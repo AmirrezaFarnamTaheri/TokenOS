@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TokenOS — Token-Optimal Execution Kernel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Ctext x='16' y='22' font-size='16' font-family='monospace' fill='%235eead4' text-anchor='middle'%3E%E2%9F%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">⬢</div>
+      <div>
+        <div class="brand-name">TokenOS</div>
+        <div class="brand-sub">Execution Kernel</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="dashboard">▦ Dashboard</button>
+      <button class="nav-item" data-view="console">⌘ Run Console</button>
+      <button class="nav-item" data-view="tasks">☰ Tasks</button>
+      <button class="nav-item" data-view="executions">↯ Executions</button>
+      <button class="nav-item" data-view="config">⚙ Configuration</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="meta-rule">“Never spend more resources deciding than the decision can save.”</div>
+      <div class="conn"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- DASHBOARD -->
+    <section class="view active" id="view-dashboard">
+      <header class="view-head">
+        <h1>Dashboard</h1>
+        <p class="subtitle">Maximize <b>Value Delivered ÷ Total System Cost</b></p>
+      </header>
+      <div class="kpi-grid" id="kpiGrid"></div>
+      <div class="panel-grid">
+        <div class="panel">
+          <div class="panel-head"><h2>Route Effectiveness</h2><span class="hint">cost per success is the metric that matters</span></div>
+          <div class="table-wrap"><table id="routeTable">
+            <thead><tr><th>Route</th><th>Runs</th><th>Success</th><th>Avg Tok In</th><th>Avg Tok Out</th><th>Avg Latency</th><th>Cost/Success</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Provider Health</h2><span class="hint">shadow pricing inputs</span></div>
+          <div class="table-wrap"><table id="providerTable">
+            <thead><tr><th>Provider</th><th>Runs</th><th>Success</th><th>Avg Latency</th><th>Tokens</th><th>Cost</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Route Distribution</h2></div>
+        <div class="bars" id="routeBars"></div>
+      </div>
+    </section>
+
+    <!-- RUN CONSOLE -->
+    <section class="view" id="view-console">
+      <header class="view-head">
+        <h1>Run Console</h1>
+        <p class="subtitle">Route deterministically (zero tokens) — then execute</p>
+      </header>
+      <div class="panel">
+        <label class="lbl" for="taskInput">Task</label>
+        <textarea id="taskInput" rows="3" placeholder="e.g. Fix the auth timeout bug in the session middleware"></textarea>
+        <label class="lbl" for="constraintsInput">Constraints (one per line, optional)</label>
+        <textarea id="constraintsInput" rows="2" placeholder="must not change the public API"></textarea>
+        <div class="btn-row">
+          <button class="btn ghost" id="btnRoute">Preview Route (free)</button>
+          <button class="btn primary" id="btnRun">Execute</button>
+        </div>
+      </div>
+      <div class="panel" id="routePreview" style="display:none">
+        <div class="panel-head"><h2>Routing Decision</h2></div>
+        <div id="routePreviewBody"></div>
+      </div>
+      <div class="panel" id="runResult" style="display:none">
+        <div class="panel-head"><h2>Execution Result</h2></div>
+        <div id="runResultBody"></div>
+      </div>
+    </section>
+
+    <!-- TASKS -->
+    <section class="view" id="view-tasks">
+      <header class="view-head"><h1>Tasks</h1><p class="subtitle">Compressed state objects — never transcripts</p></header>
+      <div class="panel">
+        <div class="table-wrap"><table id="tasksTable">
+          <thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Blocked</th><th>Updated</th><th>Trace</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div class="panel" id="tracePanel" style="display:none">
+        <div class="panel-head"><h2>Flight Recorder — <span id="traceTaskId"></span></h2></div>
+        <div id="traceBody"></div>
+      </div>
+    </section>
+
+    <!-- EXECUTIONS -->
+    <section class="view" id="view-executions">
+      <header class="view-head"><h1>Executions</h1><p class="subtitle">Telemetry event stream</p></header>
+      <div class="panel">
+        <div class="table-wrap"><table id="execTable">
+          <thead><tr><th>#</th><th>Task</th><th>Route</th><th>Provider</th><th>Tok In</th><th>Tok Out</th><th>Latency</th><th>Retries</th><th>Cost</th><th>OK</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- CONFIG -->
+    <section class="view" id="view-config">
+      <header class="view-head"><h1>Configuration</h1><p class="subtitle">Providers · filter matrix · routing rules · policy</p></header>
+      <div id="configBody"></div>
+    </section>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
