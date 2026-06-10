@@ -1,7 +1,7 @@
 # TokenOS — Token-Optimal Agent Execution Kernel
 
-A deterministic execution kernel for LLM-driven agents, written in Go. Its single
-governing rule:
+A deterministic execution kernel for LLM-driven agents, written in native Rust.
+Its single governing rule:
 
 > **Never spend more resources deciding than the decision can save.**
 
@@ -17,21 +17,22 @@ dashboard. Everything in the kernel exists to drive this number down.
 ## Architecture
 
 ```
-cmd/tokenos            CLI + embedded web GUI entrypoint
-internal/
-  kernel/              Deterministic router: route ladder, signals, policy, state
-  config/              YAML config, provider chains, two-tier model filter matrix
-  engine/              Orchestrator: route → context → payload → failover → verify → record
-  provider/            Adapters: mock (fault-injectable), OpenAI, Anthropic, Gemini, proxy-IDE
-  pricing/             Shadow pricing  U = confidence / (α·cost + β·latency)  + EWMA trackers
-  payload/             JIT cache-aligned prompt builder (static → semi-static → volatile)
-  verify/              Tiered verification: free static checks before any LLM call
-  tokenizer/           Offline token estimator (no network, no model)
-  loopdetect/          Semantic loop detection via Levenshtein distance ceiling (3%)
-  contextidx/          Surgical context: structural symbol index (FTS5, LIKE fallback)
-  store/               SQLite state store: tasks, failure memory (max 5), telemetry
-  recorder/            Out-of-band flight recorder (content-addressable blobs + NDJSON)
-  webui/               Embedded control panel (dashboard, run console, traces, config)
+src/
+  main.rs              CLI (clap) + embedded web GUI entrypoint
+  kernel.rs            Deterministic router: route ladder, signals, policy, state
+  config.rs            YAML config, provider chains, two-tier model filter matrix
+  engine.rs            Orchestrator: route → context → payload → failover → verify → record
+  provider.rs          Adapters: mock (fault-injectable), OpenAI, Anthropic, Gemini, proxy-IDE
+  pricing.rs           Shadow pricing  U = confidence / (α·cost + β·latency)  + EWMA trackers
+  payload.rs           JIT cache-aligned prompt builder (static → semi-static → volatile)
+  verify.rs            Tiered verification: free static checks before any LLM call
+  tokenizer.rs         Offline token estimator (no network, no model)
+  loopdetect.rs        Semantic loop detection via Levenshtein distance ceiling (3%)
+  contextidx.rs        Surgical context: structural symbol index (FTS5, LIKE fallback)
+  store.rs             SQLite state store: tasks, failure memory (max 5), loop history, telemetry
+  recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON)
+  webui.rs             Lock-free axum control panel (dashboard, run console, traces, config)
+static/                Embedded dashboard assets (index.html, app.js, style.css)
 ```
 
 ### The routing ladder (execution priority)
@@ -61,7 +62,8 @@ Escalations and ASK terminate locally at **zero LLM cost**.
 - **JIT cache alignment** — payloads are serialized static-first with a byte-stable
   kernel contract so provider prompt caches hit on every call.
 - **Loop detection** — normalized Levenshtein distance over a sliding window of 5
-  outputs; distance < 3% ⇒ semantic loop ⇒ escalate.
+  outputs; distance < 3% ⇒ semantic loop ⇒ escalate. The window is **persisted in
+  SQLite**, so loops are detected across cold CLI process invocations.
 - **Surgical context** — workspace parsed into structural symbols (Go, Python,
   JS/TS, Rust, Java, C, Ruby) and queried for the minimum viable context
   (≤ 2000 tokens) instead of shipping whole files.
@@ -72,12 +74,11 @@ Escalations and ASK terminate locally at **zero LLM cost**.
 
 ## Build
 
-Requires Go ≥ 1.23 and a C compiler (CGO, for SQLite).
+Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
-go build -tags sqlite_fts5 -o tokenos ./cmd/tokenos   # full FTS5 index
-go build -o tokenos ./cmd/tokenos                     # LIKE-ranking fallback
-go test ./...
+cargo build --release        # binary at target/release/tokenos
+cargo test                   # 89 unit tests across all subsystems
 ```
 
 ## Usage
@@ -127,6 +128,18 @@ routing:
 
 Other env overrides: `$TOKENOS_DB` (state database), `$TOKENOS_TRACES` (flight
 recorder directory).
+
+## Security & concurrency properties
+
+- **No API keys in URLs** — the Gemini adapter authenticates via the
+  `X-Goog-Api-Key` request header, never the query string, so secrets cannot
+  leak into access logs, proxies, or tracing systems.
+- **Lock-free web handlers** — the dashboard shares an `Arc<Engine>` with no
+  global mutex; long-running `/api/run` executions never block telemetry reads.
+- **ReDoS-immune heuristics** — all routing regexes compile to finite automata
+  (Rust `regex` crate): linear-time matching, no catastrophic backtracking.
+- **Bounded Levenshtein** — loop comparisons cap input at 20k chars, keeping the
+  quadratic pass CPU-bounded on huge generations.
 
 ## Web control panel
 
