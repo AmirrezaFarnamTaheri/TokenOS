@@ -1,0 +1,570 @@
+//! Local durable state layer: task state objects, failure memory, execution
+//! telemetry, the flight-recorder index and the persistent loop-detector
+//! window, all in a single embedded SQLite database. State, not
+//! conversations, is stored.
+//!
+//! Audit finding 12.2 remediation: the loop-detector window is persisted in
+//! the `loop_history` table so semantic loops are detected across cold CLI
+//! process invocations.
+
+use crate::kernel::{FailureEntry, State, MAX_FAILURE_MEMORY};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Wraps the SQLite handle. A fine-grained internal mutex serializes writes
+/// (SQLite requirement) without ever being held across network I/O.
+pub struct Store {
+    conn: Mutex<Connection>,
+}
+
+/// Canonical database location.
+pub fn default_path() -> PathBuf {
+    if let Ok(p) = std::env::var("TOKENOS_DB") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".local").join("share").join("tokenos").join("tokenos.db"))
+        .unwrap_or_else(|| PathBuf::from("tokenos.db"))
+}
+
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id     TEXT PRIMARY KEY,
+    goal        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    blocked     INTEGER NOT NULL DEFAULT 0,
+    state_json  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+CREATE TABLE IF NOT EXISTS failure_memory (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id   TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    reason    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_failmem_task ON failure_memory(task_id);
+
+CREATE TABLE IF NOT EXISTS executions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    route         TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL DEFAULT '',
+    tokens_in     INTEGER NOT NULL DEFAULT 0,
+    tokens_out    INTEGER NOT NULL DEFAULT 0,
+    latency_ms    INTEGER NOT NULL DEFAULT 0,
+    retries       INTEGER NOT NULL DEFAULT 0,
+    verification_cost INTEGER NOT NULL DEFAULT 0,
+    delegation_count  INTEGER NOT NULL DEFAULT 0,
+    est_cost_usd  REAL NOT NULL DEFAULT 0,
+    success       INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exec_route ON executions(route);
+CREATE INDEX IF NOT EXISTS idx_exec_provider ON executions(provider);
+CREATE INDEX IF NOT EXISTS idx_exec_created ON executions(created_at);
+
+CREATE TABLE IF NOT EXISTS traces (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    blob_path  TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_traces_task ON traces(task_id);
+
+-- Audit finding 12.2: durable loop-detector window. The detector reloads
+-- this history on engine start so loops survive cold process restarts.
+CREATE TABLE IF NOT EXISTS loop_history (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope     TEXT NOT NULL,
+    attempt   TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_loop_scope ON loop_history(scope, id);
+"#;
+
+impl Store {
+    /// Opens (and migrates) the database at `path`. None = default path,
+    /// ":memory:" supported.
+    pub fn open(path: Option<&Path>) -> Result<Store> {
+        let conn = match path {
+            Some(p) if p.as_os_str() == ":memory:" => Connection::open_in_memory()?,
+            Some(p) => {
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                Connection::open(p)?
+            }
+            None => {
+                let p = default_path();
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                Connection::open(p)?
+            }
+        };
+        conn.pragma_update(None, "journal_mode", "WAL").ok();
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.execute_batch(SCHEMA).context("migrate schema")?;
+        Ok(Store { conn: Mutex::new(conn) })
+    }
+
+    // -----------------------------------------------------------------
+    // Tasks
+    // -----------------------------------------------------------------
+
+    /// Upserts the compressed task state.
+    pub fn save_task(&self, st: &mut State) -> Result<()> {
+        st.updated_at = Utc::now();
+        let blob = st.compact()?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"INSERT INTO tasks (task_id, goal, status, blocked, state_json, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               ON CONFLICT(task_id) DO UPDATE SET
+                 goal=excluded.goal, status=excluded.status, blocked=excluded.blocked,
+                 state_json=excluded.state_json, updated_at=excluded.updated_at"#,
+            params![
+                st.task_id,
+                st.goal,
+                st.status.as_str(),
+                st.blocked as i64,
+                blob,
+                st.created_at.to_rfc3339(),
+                st.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Loads a task state by ID.
+    pub fn get_task(&self, task_id: &str) -> Result<State> {
+        let conn = self.conn.lock().unwrap();
+        let blob: Option<String> = conn
+            .query_row(
+                "SELECT state_json FROM tasks WHERE task_id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let blob = blob.with_context(|| format!("task {task_id:?} not found"))?;
+        Ok(serde_json::from_str(&blob)?)
+    }
+
+    /// Returns recent tasks (newest first).
+    pub fn list_tasks(&self, limit: usize) -> Result<Vec<State>> {
+        let limit = if limit == 0 { 50 } else { limit };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT state_json FROM tasks ORDER BY updated_at DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for blob in rows {
+            if let Ok(st) = serde_json::from_str::<State>(&blob?) {
+                out.push(st);
+            }
+        }
+        Ok(out)
+    }
+
+    // -----------------------------------------------------------------
+    // Failure memory
+    // -----------------------------------------------------------------
+
+    /// Stores a failure entry and prunes beyond the kernel cap.
+    pub fn record_failure(&self, task_id: &str, action: &str, reason: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO failure_memory (task_id, action, reason, created_at) VALUES (?1,?2,?3,?4)",
+            params![task_id, action, reason, Utc::now().to_rfc3339()],
+        )?;
+        conn.execute(
+            r#"DELETE FROM failure_memory WHERE task_id = ?1 AND id NOT IN (
+                 SELECT id FROM failure_memory WHERE task_id = ?1 ORDER BY id DESC LIMIT ?2
+               )"#,
+            params![task_id, MAX_FAILURE_MEMORY as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the (capped) failure memory for a task, oldest first.
+    pub fn failures(&self, task_id: &str) -> Result<Vec<FailureEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT action, reason, created_at FROM failure_memory WHERE task_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (action, reason, ts) = row?;
+            let at = DateTime::parse_from_rfc3339(&ts)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            out.push(FailureEntry { action, reason, at });
+        }
+        Ok(out)
+    }
+
+    /// Whether an identical failed action exists.
+    pub fn has_similar_failure(&self, task_id: &str, action: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM failure_memory WHERE task_id=?1 AND action=?2",
+            params![task_id, action],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    // -----------------------------------------------------------------
+    // Loop-detector persistence (finding 12.2)
+    // -----------------------------------------------------------------
+
+    /// Appends a failed attempt to the durable loop window for a scope (the
+    /// scope is typically a normalized goal key so loops across separate CLI
+    /// invocations of the same task are caught). Prunes beyond `window`.
+    pub fn record_loop_attempt(&self, scope: &str, attempt: &str, window: usize) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_history (scope, attempt, created_at) VALUES (?1,?2,?3)",
+            params![scope, attempt, Utc::now().to_rfc3339()],
+        )?;
+        conn.execute(
+            r#"DELETE FROM loop_history WHERE scope = ?1 AND id NOT IN (
+                 SELECT id FROM loop_history WHERE scope = ?1 ORDER BY id DESC LIMIT ?2
+               )"#,
+            params![scope, window as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Loads the persisted loop window for a scope, oldest first.
+    pub fn loop_history(&self, scope: &str, window: usize) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT attempt FROM (SELECT id, attempt FROM loop_history WHERE scope = ?1
+             ORDER BY id DESC LIMIT ?2) ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![scope, window as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Clears the durable loop window (after a successful verification).
+    pub fn clear_loop_history(&self, scope: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM loop_history WHERE scope = ?1", params![scope])?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Telemetry
+    // -----------------------------------------------------------------
+
+    pub fn record_execution(&self, e: &Execution) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"INSERT INTO executions (task_id, route, provider, model, tokens_in, tokens_out,
+                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"#,
+            params![
+                e.task_id,
+                e.route,
+                e.provider,
+                e.model,
+                e.tokens_in as i64,
+                e.tokens_out as i64,
+                e.latency_ms,
+                e.retries as i64,
+                e.verification_cost as i64,
+                e.delegation_count as i64,
+                e.est_cost_usd,
+                e.success as i64,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_executions(&self, limit: usize) -> Result<Vec<Execution>> {
+        let limit = if limit == 0 { 100 } else { limit };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT id, task_id, route, provider, model, tokens_in, tokens_out, latency_ms,
+                  retries, verification_cost, delegation_count, est_cost_usd, success, created_at
+               FROM executions ORDER BY id DESC LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(Execution {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                route: r.get(2)?,
+                provider: r.get(3)?,
+                model: r.get(4)?,
+                tokens_in: r.get::<_, i64>(5)? as usize,
+                tokens_out: r.get::<_, i64>(6)? as usize,
+                latency_ms: r.get(7)?,
+                retries: r.get::<_, i64>(8)? as usize,
+                verification_cost: r.get::<_, i64>(9)? as usize,
+                delegation_count: r.get::<_, i64>(10)? as usize,
+                est_cost_usd: r.get(11)?,
+                success: r.get::<_, i64>(12)? == 1,
+                created_at: r.get(13)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Computes Effective Cost Per Successful Task per route.
+    pub fn stats_by_route(&self) -> Result<Vec<RouteStats>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT route, COUNT(1),
+                  COALESCE(AVG(tokens_in),0), COALESCE(AVG(tokens_out),0), COALESCE(AVG(latency_ms),0),
+                  COALESCE(AVG(CAST(success AS REAL)),0),
+                  COALESCE(SUM(est_cost_usd),0),
+                  COALESCE(SUM(success),0)
+               FROM executions GROUP BY route ORDER BY COUNT(1) DESC"#,
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let successes: f64 = r.get(7)?;
+            let total_cost: f64 = r.get(6)?;
+            Ok(RouteStats {
+                route: r.get(0)?,
+                runs: r.get::<_, i64>(1)? as usize,
+                avg_tokens_in: r.get(2)?,
+                avg_tokens_out: r.get(3)?,
+                avg_latency_ms: r.get(4)?,
+                success_rate: r.get(5)?,
+                total_cost_usd: total_cost,
+                cost_per_success: if successes > 0.0 { total_cost / successes } else { 0.0 },
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn stats_by_provider(&self) -> Result<Vec<ProviderStats>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT provider, COUNT(1), COALESCE(AVG(latency_ms),0),
+                  COALESCE(AVG(CAST(success AS REAL)),0),
+                  COALESCE(SUM(est_cost_usd),0), COALESCE(SUM(tokens_in + tokens_out),0)
+               FROM executions GROUP BY provider ORDER BY COUNT(1) DESC"#,
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ProviderStats {
+                provider: r.get(0)?,
+                runs: r.get::<_, i64>(1)? as usize,
+                avg_latency_ms: r.get(2)?,
+                success_rate: r.get(3)?,
+                total_cost_usd: r.get(4)?,
+                total_tokens: r.get(5)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Global headline metrics. The headline metric is Effective Cost Per
+    /// Successful Task — not tokens per run.
+    pub fn get_summary(&self) -> Result<Summary> {
+        let conn = self.conn.lock().unwrap();
+        let tasks: i64 = conn.query_row("SELECT COUNT(1) FROM tasks", [], |r| r.get(0))?;
+        let (executions, successes, total_tokens, total_cost, avg_latency): (i64, i64, i64, f64, f64) =
+            conn.query_row(
+                r#"SELECT COUNT(1), COALESCE(SUM(success),0), COALESCE(SUM(tokens_in+tokens_out),0),
+                      COALESCE(SUM(est_cost_usd),0), COALESCE(AVG(latency_ms),0)
+                   FROM executions"#,
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+        Ok(Summary {
+            tasks: tasks as usize,
+            executions: executions as usize,
+            successes: successes as usize,
+            total_tokens,
+            total_cost_usd: total_cost,
+            cost_per_success: if successes > 0 { total_cost / successes as f64 } else { 0.0 },
+            avg_latency_ms: avg_latency,
+            overall_success_pct: if executions > 0 {
+                successes as f64 / executions as f64
+            } else {
+                0.0
+            },
+        })
+    }
+
+    /// Indexes a flight-recorder blob for a task.
+    pub fn record_trace(&self, task_id: &str, kind: &str, blob_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO traces (task_id, kind, blob_path, created_at) VALUES (?1,?2,?3,?4)",
+            params![task_id, kind, blob_path, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+}
+
+/// One telemetry event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Execution {
+    pub id: i64,
+    pub task_id: String,
+    pub route: String,
+    pub provider: String,
+    pub model: String,
+    pub tokens_in: usize,
+    pub tokens_out: usize,
+    pub latency_ms: i64,
+    pub retries: usize,
+    pub verification_cost: usize,
+    pub delegation_count: usize,
+    pub est_cost_usd: f64,
+    pub success: bool,
+    pub created_at: String,
+}
+
+/// Per-route telemetry aggregate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteStats {
+    pub route: String,
+    pub runs: usize,
+    pub avg_tokens_in: f64,
+    pub avg_tokens_out: f64,
+    pub avg_latency_ms: f64,
+    pub success_rate: f64,
+    pub total_cost_usd: f64,
+    /// the metric that matters
+    pub cost_per_success: f64,
+}
+
+/// Per-provider telemetry aggregate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderStats {
+    pub provider: String,
+    pub runs: usize,
+    pub avg_latency_ms: f64,
+    pub success_rate: f64,
+    pub total_cost_usd: f64,
+    pub total_tokens: i64,
+}
+
+/// Global telemetry headline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Summary {
+    pub tasks: usize,
+    pub executions: usize,
+    pub successes: usize,
+    pub total_tokens: i64,
+    pub total_cost_usd: f64,
+    pub cost_per_success: f64,
+    pub avg_latency_ms: f64,
+    pub overall_success_pct: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn mem() -> Store {
+        Store::open(Some(Path::new(":memory:"))).unwrap()
+    }
+
+    #[test]
+    fn task_roundtrip() {
+        let s = mem();
+        let mut st = State::new("t1", "goal text");
+        s.save_task(&mut st).unwrap();
+        let back = s.get_task("t1").unwrap();
+        assert_eq!(back.goal, "goal text");
+    }
+
+    #[test]
+    fn failure_memory_capped() {
+        let s = mem();
+        let mut st = State::new("t1", "g");
+        s.save_task(&mut st).unwrap();
+        for i in 0..8 {
+            s.record_failure("t1", &format!("a{i}"), "r").unwrap();
+        }
+        let f = s.failures("t1").unwrap();
+        assert_eq!(f.len(), MAX_FAILURE_MEMORY);
+        assert_eq!(f[0].action, "a3");
+    }
+
+    #[test]
+    fn similar_failure_lookup() {
+        let s = mem();
+        let mut st = State::new("t1", "g");
+        s.save_task(&mut st).unwrap();
+        s.record_failure("t1", "exact action", "r").unwrap();
+        assert!(s.has_similar_failure("t1", "exact action").unwrap());
+        assert!(!s.has_similar_failure("t1", "other").unwrap());
+    }
+
+    #[test]
+    fn loop_history_persists_and_prunes() {
+        let s = mem();
+        for i in 0..8 {
+            s.record_loop_attempt("scope1", &format!("attempt {i}"), 5).unwrap();
+        }
+        let h = s.loop_history("scope1", 5).unwrap();
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[0], "attempt 3");
+        assert_eq!(h[4], "attempt 7");
+        s.clear_loop_history("scope1").unwrap();
+        assert!(s.loop_history("scope1", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn telemetry_summary() {
+        let s = mem();
+        s.record_execution(&Execution {
+            task_id: "t1".into(),
+            route: "IMPLEMENT".into(),
+            provider: "mock".into(),
+            tokens_in: 100,
+            tokens_out: 50,
+            est_cost_usd: 0.002,
+            success: true,
+            ..Default::default()
+        })
+        .unwrap();
+        s.record_execution(&Execution {
+            task_id: "t2".into(),
+            route: "IMPLEMENT".into(),
+            provider: "mock".into(),
+            est_cost_usd: 0.004,
+            success: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let sum = s.get_summary().unwrap();
+        assert_eq!(sum.executions, 2);
+        assert_eq!(sum.successes, 1);
+        assert!((sum.cost_per_success - 0.006).abs() < 1e-9);
+        let routes = s.stats_by_route().unwrap();
+        assert_eq!(routes[0].runs, 2);
+    }
+}
