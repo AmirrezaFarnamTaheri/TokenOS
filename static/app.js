@@ -32,6 +32,22 @@ const routeBadge = (route) => {
   return `<span class="badge route-${esc(cls)}">${esc(route || "—")}</span>`;
 };
 
+/* Plain-language explanations shown to newcomers in the route preview. */
+const ROUTE_EXPLAIN = {
+  REUSE: "A verified answer for this exact goal is already cached — it will be served for zero tokens.",
+  DIRECT: "Small and unambiguous — answered with a minimal prompt on the cheapest viable provider.",
+  PATCH: "A well-scoped edit — only the relevant context is sent, keeping the prompt tiny.",
+  IMPLEMENT: "Real generation work — the full pipeline runs with verification of the output.",
+  PARTIAL: "An interrupted task is resumed from its compressed saved state.",
+  DELEGATE: "Big enough to hand to a sub-agent with a compressed delegation packet.",
+  ASK: "Too ambiguous to execute safely — the cheapest action is a clarifying question.",
+  ESCALATE: "Repeated failures or loops were detected — a human should take a look.",
+};
+const routeExplain = (route) => {
+  const key = route && route.startsWith("ESCALATE") ? "ESCALATE" : route;
+  return ROUTE_EXPLAIN[key] || "";
+};
+
 /* ---------- toasts ---------- */
 function toast(msg, kind = "") {
   const host = $("#toasts");
@@ -42,6 +58,24 @@ function toast(msg, kind = "") {
   host.appendChild(el);
   setTimeout(() => el.classList.add("hide"), 3600);
   setTimeout(() => el.remove(), 4000);
+}
+
+/* ---------- meta (mode badge, version) ---------- */
+async function loadMeta() {
+  try {
+    const m = await api("/api/meta");
+    const ml = $("#modeLine");
+    if (ml) {
+      ml.innerHTML = m.dry_run
+        ? '<span class="mode-badge dry">● DRY-RUN · offline, $0</span>'
+        : '<span class="mode-badge live">● LIVE · real providers</span>';
+      ml.title = m.dry_run
+        ? "Mock provider exercises the full pipeline offline — no API key, no spend."
+        : `Live mode — ${m.providers_enabled} of ${m.providers_total} providers enabled. Executions cost real money.`;
+    }
+    const vt = $("#verText");
+    if (vt) vt.textContent = "v" + m.version;
+  } catch { /* older server without /api/meta — badge stays hidden */ }
 }
 
 /* ---------- navigation ---------- */
@@ -72,7 +106,39 @@ document.addEventListener("keydown", (ev) => {
     if (!consoleVisible) return;
     ev.preventDefault();
     (ev.shiftKey ? $("#btnRoute") : $("#btnRun")).click();
+    return;
   }
+  if (ev.key === "?" && !inField) { openHelp(); return; }
+  if (ev.key === "Escape") closeHelp();
+});
+
+/* ---------- help modal ---------- */
+function openHelp() { const m = $("#helpModal"); if (m) { m.style.display = ""; $("#helpClose")?.focus(); } }
+function closeHelp() { const m = $("#helpModal"); if (m) m.style.display = "none"; }
+$("#btnHelp")?.addEventListener("click", openHelp);
+$("#helpClose")?.addEventListener("click", closeHelp);
+$("#helpModal")?.addEventListener("click", (ev) => { if (ev.target === $("#helpModal")) closeHelp(); });
+
+/* ---------- welcome banner (first-run onboarding) ---------- */
+const WELCOME_KEY = "tokenos.welcome.dismissed";
+function maybeShowWelcome(sum) {
+  const b = $("#welcomeBanner");
+  if (!b) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(WELCOME_KEY) === "1"; } catch {}
+  const fresh = !sum || !sum.executions;
+  b.style.display = fresh && !dismissed ? "" : "none";
+}
+$("#welcomeClose")?.addEventListener("click", () => {
+  try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
+  $("#welcomeBanner").style.display = "none";
+});
+$("#welcomeHelp")?.addEventListener("click", openHelp);
+$("#welcomeTry")?.addEventListener("click", () => {
+  switchView("console");
+  $("#taskInput").value = "Fix the typo in the README header";
+  $("#taskInput").focus();
+  toast("Example loaded — click “Preview Route” to see the free routing decision.", "ok");
 });
 
 /* ---------- dashboard ---------- */
@@ -86,6 +152,7 @@ async function loadDashboard() {
     setConn(true);
     const lu = $("#lastUpdated");
     if (lu) lu.textContent = "updated " + new Date().toLocaleTimeString();
+    maybeShowWelcome(sum);
 
     $("#kpiGrid").innerHTML = [
       kpi("Cost / Success", fmtUSD(sum.cost_per_success), "accent"),
@@ -181,6 +248,22 @@ function setConn(ok, msg) {
 }
 
 /* ---------- console ---------- */
+$$(".chip[data-example]").forEach((chip) =>
+  chip.addEventListener("click", () => {
+    $("#taskInput").value = chip.dataset.example;
+    $("#constraintsInput").value = "";
+    $("#taskInput").focus();
+    toast("Example loaded — preview the route for free, then execute.", "ok");
+  }));
+
+$("#btnClear")?.addEventListener("click", () => {
+  $("#taskInput").value = "";
+  $("#constraintsInput").value = "";
+  $("#routePreview").style.display = "none";
+  $("#runResult").style.display = "none";
+  $("#taskInput").focus();
+});
+
 function constraintsList() {
   return $("#constraintsInput").value.split("\n").map((s) => s.trim()).filter(Boolean);
 }
@@ -199,7 +282,9 @@ $("#btnRoute").addEventListener("click", async () => {
     const sigChips = Object.entries(s)
       .filter(([k, v]) => typeof v === "boolean")
       .map(([k, v]) => `<span class="sig ${v ? "on" : ""}">${esc(k)}</span>`).join("");
+    const explain = routeExplain(d.route);
     $("#routePreviewBody").innerHTML = `
+      ${explain ? `<div class="route-explain">${routeBadge(d.route)} ${esc(explain)}</div>` : ""}
       <dl class="kv">
         <dt>Route</dt><dd>${routeBadge(d.route)}</dd>
         <dt>Reason</dt><dd>${esc(d.reason)}</dd>
@@ -208,7 +293,8 @@ $("#btnRoute").addEventListener("click", async () => {
         <dt>Context tokens (est)</dt><dd>${fmtNum(r.context_tokens)}</dd>
         <dt>Provider chain</dt><dd>${(r.provider_chain || []).map(esc).join(" → ") || "—"}</dd>
       </dl>
-      <div class="signals">${sigChips}</div>`;
+      <div class="signals">${sigChips}</div>
+      <div class="hint" style="margin-top:8px">This decision was made entirely in code — zero tokens were spent.</div>`;
     $("#routePreview").style.display = "";
   } catch (e) {
     $("#routePreviewBody").innerHTML = `<span class="badge fail">${esc(e.message)}</span>`;
@@ -265,22 +351,33 @@ $("#btnRun").addEventListener("click", async () => {
 });
 
 /* ---------- tasks ---------- */
+let tasksCache = [];
+function renderTasks() {
+  const q = ($("#taskFilter")?.value || "").trim().toLowerCase();
+  const rows = q
+    ? tasksCache.filter((t) =>
+        (t.task_id + " " + t.goal + " " + t.status).toLowerCase().includes(q))
+    : tasksCache;
+  const tb = $("#tasksTable tbody");
+  tb.innerHTML = rows.length
+    ? rows.map((t) => `<tr>
+        <td>${esc(t.task_id)}</td>
+        <td class="goal-cell">${esc(t.goal)}</td>
+        <td><span class="badge status status-${esc(t.status)}">${esc(t.status)}</span></td>
+        <td>${t.blocked ? "⚠" : ""}</td>
+        <td>${fmtTime(t.updated_at)}</td>
+        <td><button class="link-btn" data-trace="${esc(t.task_id)}">view</button></td>
+      </tr>`).join("")
+    : emptyRow(6, tasksCache.length ? "No tasks match the filter." : "No tasks yet — run one from the console.");
+  tb.querySelectorAll("[data-trace]").forEach((b) =>
+    b.addEventListener("click", () => loadTrace(b.dataset.trace)));
+}
+$("#taskFilter")?.addEventListener("input", renderTasks);
+
 async function loadTasks() {
   try {
-    const tasks = await api("/api/tasks");
-    const tb = $("#tasksTable tbody");
-    tb.innerHTML = (tasks || []).length
-      ? tasks.map((t) => `<tr>
-          <td>${esc(t.task_id)}</td>
-          <td class="goal-cell">${esc(t.goal)}</td>
-          <td><span class="badge status status-${esc(t.status)}">${esc(t.status)}</span></td>
-          <td>${t.blocked ? "⚠" : ""}</td>
-          <td>${fmtTime(t.updated_at)}</td>
-          <td><button class="link-btn" data-trace="${esc(t.task_id)}">view</button></td>
-        </tr>`).join("")
-      : emptyRow(6, "No tasks yet.");
-    tb.querySelectorAll("[data-trace]").forEach((b) =>
-      b.addEventListener("click", () => loadTrace(b.dataset.trace)));
+    tasksCache = (await api("/api/tasks")) || [];
+    renderTasks();
   } catch (e) { setConn(false, e.message); }
 }
 
@@ -301,24 +398,39 @@ async function loadTrace(taskID) {
 }
 
 /* ---------- executions ---------- */
+let execCache = [];
+function renderExecutions() {
+  const q = ($("#execFilter")?.value || "").trim().toLowerCase();
+  const st = $("#execStatusFilter")?.value || "";
+  const rows = execCache.filter((e) => {
+    if (st === "ok" && !e.success) return false;
+    if (st === "fail" && e.success) return false;
+    if (q && !((e.task_id + " " + e.route + " " + (e.provider || "")).toLowerCase().includes(q))) return false;
+    return true;
+  });
+  const tb = $("#execTable tbody");
+  tb.innerHTML = rows.length
+    ? rows.map((e) => `<tr>
+        <td>${e.id}</td>
+        <td>${esc(e.task_id)}</td>
+        <td>${routeBadge(e.route)}</td>
+        <td>${esc(e.provider || "—")}</td>
+        <td>${fmtNum(e.tokens_in)}</td>
+        <td>${fmtNum(e.tokens_out)}</td>
+        <td>${fmtMS(e.latency_ms)}</td>
+        <td>${fmtNum(e.retries)}</td>
+        <td>${fmtUSD(e.est_cost_usd)}</td>
+        <td>${e.success ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
+      </tr>`).join("")
+    : emptyRow(10, execCache.length ? "No executions match the filter." : "No executions recorded — run a task from the console.");
+}
+$("#execFilter")?.addEventListener("input", renderExecutions);
+$("#execStatusFilter")?.addEventListener("change", renderExecutions);
+
 async function loadExecutions() {
   try {
-    const execs = await api("/api/executions");
-    const tb = $("#execTable tbody");
-    tb.innerHTML = (execs || []).length
-      ? execs.map((e) => `<tr>
-          <td>${e.id}</td>
-          <td>${esc(e.task_id)}</td>
-          <td>${routeBadge(e.route)}</td>
-          <td>${esc(e.provider || "—")}</td>
-          <td>${fmtNum(e.tokens_in)}</td>
-          <td>${fmtNum(e.tokens_out)}</td>
-          <td>${fmtMS(e.latency_ms)}</td>
-          <td>${fmtNum(e.retries)}</td>
-          <td>${fmtUSD(e.est_cost_usd)}</td>
-          <td>${e.success ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
-        </tr>`).join("")
-      : emptyRow(10, "No executions recorded.");
+    execCache = (await api("/api/executions")) || [];
+    renderExecutions();
   } catch (e) { setConn(false, e.message); }
 }
 
@@ -373,6 +485,7 @@ function refreshView(view) {
   else if (view === "config") loadConfig();
 }
 
+loadMeta();
 loadDashboard();
 setInterval(() => {
   if (document.hidden) return; // skip refresh when tab is in the background

@@ -85,6 +85,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
 pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Router {
     let auth = AuthToken(auth_token.map(Arc::new));
     let api = Router::new()
+        .route("/api/meta", get(handle_meta))
         .route("/api/summary", get(handle_summary))
         .route("/api/stats/routes", get(handle_route_stats))
         .route("/api/stats/providers", get(handle_provider_stats))
@@ -136,6 +137,19 @@ fn err(status: StatusCode, msg: String) -> Response {
 
 fn ok_json<T: serde::Serialize>(v: T) -> Response {
     Json(v).into_response()
+}
+
+/// Instance metadata for the dashboard header: kernel version, dry-run flag,
+/// and provider fleet size. Lets the UI tell newcomers at a glance whether
+/// they are exercising the offline mock provider or spending real money.
+async fn handle_meta(State(eng): State<Arc<Engine>>) -> Response {
+    let enabled = eng.cfg.providers.values().filter(|p| !p.disabled).count();
+    ok_json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "dry_run": eng.dry_run,
+        "providers_total": eng.cfg.providers.len(),
+        "providers_enabled": enabled,
+    }))
 }
 
 async fn handle_summary(State(eng): State<Arc<Engine>>) -> Response {
