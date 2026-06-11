@@ -145,7 +145,36 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
             [],
         )?;
+        // Backfill: rows recorded before the goal_hash column existed carry
+        // the '' default and are invisible to every goal-keyed read. Their
+        // task IDs still join to the tasks table, whose goal text yields the
+        // exact digest. One-time cost, idempotent (the WHERE clause empties).
+        Self::backfill_goal_hashes(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
+    }
+
+    /// Computes goal_hash for legacy failure_memory rows from tasks.goal.
+    /// Rows whose task no longer exists stay '' — unreachable either way.
+    fn backfill_goal_hashes(conn: &Connection) -> Result<()> {
+        let pairs: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT f.task_id, t.goal FROM failure_memory f
+                 JOIN tasks t ON t.task_id = f.task_id WHERE f.goal_hash = ''",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (task_id, goal) in pairs {
+            use sha2::{Digest, Sha256};
+            let gh = hex::encode(Sha256::digest(goal.trim().as_bytes()));
+            conn.execute(
+                "UPDATE failure_memory SET goal_hash = ?1 WHERE task_id = ?2 AND goal_hash = ''",
+                params![gh, task_id],
+            )?;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -226,12 +255,27 @@ impl Store {
             "INSERT INTO failure_memory (task_id, goal_hash, action, reason, created_at) VALUES (?1,?2,?3,?4,?5)",
             params![task_id, goal_hash, action, reason, Utc::now().to_rfc3339()],
         )?;
+        // Prune on the SAME key the reads use (goal_hash) — keeping the
+        // newest MAX_FAILURE_MEMORY rows per goal. Pruning by task_id would
+        // let a goal retried across many task IDs grow without bound while
+        // each task's slice stayed under the cap.
         conn.execute(
-            r#"DELETE FROM failure_memory WHERE task_id = ?1 AND id NOT IN (
-                 SELECT id FROM failure_memory WHERE task_id = ?1 ORDER BY id DESC LIMIT ?2
+            r#"DELETE FROM failure_memory WHERE goal_hash = ?1 AND id NOT IN (
+                 SELECT id FROM failure_memory WHERE goal_hash = ?1 ORDER BY id DESC LIMIT ?2
                )"#,
-            params![task_id, MAX_FAILURE_MEMORY as i64],
+            params![goal_hash, MAX_FAILURE_MEMORY as i64],
         )?;
+        // Legacy rows ('' goal_hash) are still capped per task so a
+        // pre-migration database cannot grow unbounded either.
+        if goal_hash.is_empty() {
+            conn.execute(
+                r#"DELETE FROM failure_memory WHERE task_id = ?1 AND goal_hash = '' AND id NOT IN (
+                     SELECT id FROM failure_memory WHERE task_id = ?1 AND goal_hash = ''
+                     ORDER BY id DESC LIMIT ?2
+                   )"#,
+                params![task_id, MAX_FAILURE_MEMORY as i64],
+            )?;
+        }
         Ok(())
     }
 
@@ -683,6 +727,68 @@ mod tests {
         let f = s.failures("t1").unwrap();
         assert_eq!(f.len(), MAX_FAILURE_MEMORY);
         assert_eq!(f[0].action, "a3");
+    }
+
+    #[test]
+    fn failure_memory_capped_per_goal_across_task_ids() {
+        // Review finding: pruning keyed by task_id let a goal retried under
+        // many task IDs grow without bound. Pruning must cap per goal_hash —
+        // the key every read uses.
+        let s = mem();
+        for i in 0..4 {
+            let mut st = State::new(format!("t{i}"), "same goal");
+            s.save_task(&mut st).unwrap();
+        }
+        // 8 failures for ONE goal spread across 4 task IDs (2 each — each
+        // task slice stays under the cap, so the old task-keyed prune would
+        // never delete anything).
+        for i in 0..8 {
+            s.record_failure(&format!("t{}", i % 4), "gh-same", &format!("a{i}"), "r")
+                .unwrap();
+        }
+        let f = s.goal_failures("gh-same", 100).unwrap();
+        assert_eq!(f.len(), MAX_FAILURE_MEMORY, "goal-keyed cap must hold");
+        // Newest rows survive (a7 first — goal_failures is newest-first).
+        assert_eq!(f[0].action, "a7");
+        assert_eq!(f.last().unwrap().action, "a3");
+        // Distinct goals never prune each other.
+        s.record_failure("tX", "gh-other", "b0", "r").unwrap();
+        assert_eq!(s.goal_failures("gh-other", 100).unwrap().len(), 1);
+        assert_eq!(s.goal_failures("gh-same", 100).unwrap().len(), MAX_FAILURE_MEMORY);
+    }
+
+    #[test]
+    fn legacy_goal_hash_rows_are_backfilled_on_open() {
+        // Rows written before the goal_hash migration carry '' and were
+        // invisible to goal-keyed reads. open() must backfill them from the
+        // tasks table's goal text.
+        let dir = std::env::temp_dir().join(format!(
+            "tokenos-backfill-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        {
+            let s = Store::open(Some(&db)).unwrap();
+            let mut st = State::new("legacy-task", "the legacy goal");
+            s.save_task(&mut st).unwrap();
+            // Simulate a pre-migration row: empty goal_hash.
+            s.record_failure("legacy-task", "", "old action", "old reason").unwrap();
+            assert!(!s.has_goal_failure(&gh("the legacy goal")).unwrap());
+        }
+        // Re-open: backfill runs.
+        let s = Store::open(Some(&db)).unwrap();
+        assert!(
+            s.has_goal_failure(&gh("the legacy goal")).unwrap(),
+            "backfilled row must be visible via goal_hash"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn gh(goal: &str) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(goal.trim().as_bytes()))
     }
 
     #[test]

@@ -6,14 +6,14 @@ All endpoints are served by lock-free axum handlers sharing one
 
 ## Base URL and authentication
 
-```
+```text
 http://127.0.0.1:8080            # default bind
 ```
 
 If an auth token is configured (`--auth-token` or `$TOKENOS_AUTH_TOKEN`),
 **every** `/api/*` request must carry it:
 
-```
+```text
 Authorization: Bearer <token>
 ```
 

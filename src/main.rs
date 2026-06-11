@@ -286,26 +286,31 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
             // Live UCB1 bandit standings (S19) — process-local evidence.
+            // Always printed when arms exist: a fresh process legitimately
+            // shows every arm as unexplored (the evidence lives and dies
+            // with the serving process), and hiding the table entirely made
+            // operators think the bandit was disabled.
             let ranked = eng.bandit.ranked();
-            let explored: Vec<_> = ranked
-                .iter()
-                .filter(|(p, _)| eng.bandit.arm_stats(p).0 > 0)
-                .collect();
-            if !explored.is_empty() {
+            if !ranked.is_empty() {
                 println!(
                     "\n{:<14} {:>8} {:>13} {:>14} {:>12}",
                     "BANDIT ARM", "PULLS", "MEAN_REWARD", "MEAN_LAT_MS", "UCB1"
                 );
+                let mut any_explored = false;
                 for (p, score) in &ranked {
                     let (pulls, reward, lat) = eng.bandit.arm_stats(p);
                     if pulls == 0 {
                         println!("{:<14} {:>8} {:>13} {:>14} {:>12}", p, 0, "-", "-", "unexplored");
                     } else {
+                        any_explored = true;
                         println!(
                             "{:<14} {:>8} {:>13.3} {:>14.0} {:>12.3}",
                             p, pulls, reward, lat, score
                         );
                     }
+                }
+                if !any_explored {
+                    println!("(bandit evidence is process-local — arms gain pulls inside a serving process)");
                 }
             }
             // Verified solution cache (S25): durable, zero-token replays.
@@ -394,7 +399,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             // Finding 12.1 (CWE-306): the dashboard binds loopback by default.
             // A non-loopback bind requires BOTH --public and an auth token so
             // an unauthenticated control plane can never face a network.
+            // An empty token ("") authenticates nothing — treat it as absent
+            // from BOTH sources so `--public --auth-token ""` is rejected the
+            // same way as a missing token (finding 12.1, CWE-306).
             let token = auth_token
+                .filter(|t| !t.is_empty())
                 .or_else(|| std::env::var("TOKENOS_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
             let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
             if !loopback {

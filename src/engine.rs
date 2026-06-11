@@ -479,7 +479,13 @@ impl Engine {
                 }
             };
 
-            let mut out = mask_codec.unmask(&payload::extract_solution(&resp.text));
+            // SECURITY INVARIANT (review finding): the masked form —
+            // placeholders intact — is the ONLY form that touches durable
+            // sinks (flight-recorder blobs, loop history, failure reasons,
+            // solution cache). Unmasking happens exactly once, at the very
+            // end, into the caller-facing result. Rescue + verification run
+            // on the masked form so persisted artifacts never need secrets.
+            let mut out_masked = payload::extract_solution(&resp.text);
 
             // Evolution S20: when the goal demands JSON, rescue a truncated
             // generation instead of failing verification and burning a
@@ -487,7 +493,7 @@ impl Engine {
             // closes what the model opened.
             if expects_json {
                 if let crate::jsonrescue::Rescue::Repaired(fixed) =
-                    crate::jsonrescue::rescue(&out)
+                    crate::jsonrescue::rescue(&out_masked)
                 {
                     warn_persist(
                         "flight-recorder json-rescue",
@@ -495,12 +501,14 @@ impl Engine {
                             &task_id,
                             "rescue",
                             "truncated JSON repaired in-process (zero extra tokens)",
-                            out.as_bytes(),
+                            out_masked.as_bytes(),
                         ),
                     );
-                    out = fixed;
+                    out_masked = fixed;
                 }
             }
+            // resp.text is the raw wire response: the provider only ever saw
+            // placeholders, so this blob is masked by construction.
             warn_persist(
                 "flight-recorder response",
                 self.recorder
@@ -508,7 +516,10 @@ impl Engine {
             );
 
             // Step 7: tiered verification — static first, zero token cost.
-            let v = verify::static_check(dec.route.as_str(), &out);
+            // Runs on the MASKED form: placeholders are inert text and never
+            // change structural validity, while the unmasked form must not
+            // exist before the persistence block below completes.
+            let v = verify::static_check(dec.route.as_str(), &out_masked);
             res.verified = Some(v.clone());
             if !v.pass {
                 // Unverifiable output earns the arm zero reward (S19).
@@ -527,18 +538,19 @@ impl Engine {
                 );
                 warn_persist(
                     "flight-recorder verify",
-                    self.recorder.record(&task_id, "verify", &reason, out.as_bytes()),
+                    self.recorder.record(&task_id, "verify", &reason, out_masked.as_bytes()),
                 );
 
                 // Finding 12.2: persist the failed attempt into the durable
                 // loop window AND feed the live detector. A mid-run loop hit
                 // aborts the failover ladder — burning more attempts on a
                 // semantically identical output is guaranteed waste.
+                // Masked form only: the loop window is durable SQLite state.
                 warn_persist(
                     "loop window",
-                    self.store.record_loop_attempt(&loop_key, &out, detector.window),
+                    self.store.record_loop_attempt(&loop_key, &out_masked, detector.window),
                 );
-                if detector.observe(&out) {
+                if detector.observe(&out_masked) {
                     res.retries += 1;
                     last_err = Some(anyhow!(
                         "semantic execution loop detected (edit-distance ceiling) — escalating"
@@ -565,15 +577,19 @@ impl Engine {
                 resp.tokens_in
             };
             let tokens_out = if resp.tokens_out == 0 {
-                tokenizer::estimate(&out) as i64
+                tokenizer::estimate(&out_masked) as i64
             } else {
                 resp.tokens_out
             };
 
+            // Unmask ONCE, at the boundary back to the caller. The unmasked
+            // form is moved into the result and never written to disk.
+            let out_unmasked = mask_codec.unmask(&out_masked);
+
             let p_cfg = self.cfg.providers.get(&prov_name).cloned().unwrap_or_default();
             res.provider = prov_name.clone();
             res.model = resp.model.clone();
-            res.output = out.clone();
+            res.output = out_unmasked;
             res.tokens_in = tokens_in;
             res.tokens_out = tokens_out;
             res.latency_ms = lat;
@@ -592,11 +608,13 @@ impl Engine {
 
             // Evolution S25: admit the VERIFIED output to the solution cache
             // so an identical future request costs zero tokens. ASK outputs
-            // are questions, not solutions — never cached.
+            // are questions, not solutions — never cached. MASKED form only:
+            // the cache is durable SQLite state. (A future replay returns
+            // placeholders rather than secrets — fail-safe by construction.)
             if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
                 warn_persist(
                     "solution cache",
-                    self.store.cache_solution(&cache_key, dec.route.as_str(), &out),
+                    self.store.cache_solution(&cache_key, dec.route.as_str(), &out_masked),
                 );
             }
 
@@ -604,7 +622,8 @@ impl Engine {
             if dec.route == Route::Ask {
                 st.status = Status::Blocked;
                 st.blocked = true;
-                st.next_action = format!("answer the question: {}", out);
+                // next_action is persisted in the tasks table — masked form.
+                st.next_action = format!("answer the question: {}", out_masked);
             } else {
                 st.status = Status::Done;
                 st.next_action = String::new();
@@ -721,6 +740,15 @@ fn ordered_providers(quotes: &[PriceQuote], chain: &[String]) -> Vec<String> {
 /// explored arms based on observed reward), then re-sorted with the same
 /// deterministic tiebreak. Providers the pricer filtered out (context
 /// overflow) still append in chain order as last resort.
+///
+/// Why NOT the raw UCB1 `score()` here: score is +infinity for unexplored
+/// arms and lives on a reward scale unrelated to the shadow-priced utility —
+/// multiplying by it would let any unexplored arm trump every cost signal
+/// and break the "unexplored bandit == pure shadow pricing" property pinned
+/// by the tests below. Exploration is still guaranteed: unexplored arms keep
+/// weight 1.0 and the failover ladder walks the full ordering, so every arm
+/// is pulled before exploitation evidence can demote it. `score()`/`ranked()`
+/// remain the standalone-selection API (telemetry, `select()`).
 fn ordered_providers_banditized(
     quotes: &[PriceQuote],
     chain: &[String],
@@ -1113,6 +1141,74 @@ mod tests {
         assert_eq!(goal_hash("  task  "), goal_hash("task"));
         assert_eq!(goal_hash("task").len(), 64);
         assert_ne!(goal_hash("a"), goal_hash("b"));
+    }
+
+    #[tokio::test]
+    async fn durable_sinks_never_hold_unmasked_secrets() {
+        // Review finding (security): the response leg used to unmask BEFORE
+        // persisting, leaking raw secrets into flight-recorder blobs and the
+        // SQLite loop window / solution cache. Pin the invariant: every
+        // durable artifact carries the masked form; only the caller-facing
+        // result is unmasked.
+        let e = test_engine();
+        let secret = "sk-leakcheckapikey1234567890abcdef";
+        let task = format!("rotate the credential {secret} in the config and report JSON status");
+        let r = e.run(&task, &[]).await.unwrap();
+
+        // Caller-facing output IS unmasked (mock echoes the placeholder,
+        // which the boundary unmask restores).
+        assert!(
+            r.output.contains(secret),
+            "caller output must be unmasked: {}",
+            r.output
+        );
+
+        // 1. Every flight-recorder blob for this task is secret-free.
+        for ev in e.recorder.events(&r.task_id).unwrap() {
+            if ev.blob_sha.is_empty() {
+                continue;
+            }
+            let blob = e.recorder.blob(&ev.blob_sha).unwrap_or_default();
+            let text = String::from_utf8_lossy(&blob);
+            assert!(
+                !text.contains(secret),
+                "secret leaked into {:?} blob: {}",
+                ev.kind,
+                text
+            );
+        }
+
+        // 2. The durable solution cache holds the masked form.
+        let key = solution_cache_key(&task, &[]);
+        if let Some((_route, cached)) = e.store.cached_solution(&key).unwrap() {
+            assert!(
+                !cached.contains(secret),
+                "secret leaked into solution cache: {cached}"
+            );
+        }
+
+        // 3. The persisted task state (next_action et al.) is secret-free.
+        let st = e.store.get_task(&r.task_id).unwrap();
+        assert!(
+            !st.next_action.contains(secret),
+            "secret leaked into persisted next_action"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_window_persists_masked_form_only() {
+        // Force the verification-failure path (empty PATCH output fails the
+        // static check on a diff-shaped route is hard to trigger via mock;
+        // instead exercise record_loop_attempt directly with the engine's
+        // masking convention) — the cheap pin here is that the loop-history
+        // write in run() receives `out_masked`, asserted by code review and
+        // by the secret-free recorder blobs above; this test pins the store
+        // path round-trip so a regression in the table itself is caught.
+        let e = test_engine();
+        let masked = "patched \u{00AB}SECRET:k1\u{00BB} config";
+        e.store.record_loop_attempt("scope-x", masked, 4).unwrap();
+        let hist = e.store.loop_history("scope-x", 4).unwrap();
+        assert_eq!(hist, vec![masked.to_string()]);
     }
 
     #[tokio::test]

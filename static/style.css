@@ -272,7 +272,7 @@ kbd {
 pre.output {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
   padding: 14px; font-family: var(--mono); font-size: 12.5px; overflow-x: auto;
-  white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow-y: auto;
+  white-space: pre-wrap; overflow-wrap: break-word; max-height: 420px; overflow-y: auto;
 }
 .signals { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .sig { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--bg2); border: 1px solid var(--border); color: var(--muted); }
@@ -288,7 +288,7 @@ pre.output {
 .trace-kind.rescue { color: var(--warn); }
 .trace-kind.error { color: var(--bad); }
 .trace-kind.verify { color: var(--warn); }
-.trace-summary { color: var(--text); word-break: break-word; }
+.trace-summary { color: var(--text); overflow-wrap: break-word; }
 .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; text-decoration: underline; font-family: var(--mono); }
 .link-btn:hover { filter: brightness(1.2); }
 
@@ -327,7 +327,7 @@ code.inline { background: var(--bg2); padding: 1px 6px; border-radius: 4px; font
 .toast {
   background: var(--panel2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
   border-radius: 8px; padding: 10px 14px; font-size: 13px; box-shadow: var(--shadow);
-  animation: toastIn .2s ease-out; word-break: break-word;
+  animation: toastIn .2s ease-out; overflow-wrap: break-word;
 }
 .toast.err { border-left-color: var(--bad); }
 .toast.ok { border-left-color: var(--good); }

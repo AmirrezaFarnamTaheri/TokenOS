@@ -2,8 +2,9 @@
 //!
 //! Outbound prompts are scanned for secrets (API keys, bearer tokens, AWS
 //! credentials, private-key blocks, passwords, emails, IPs) BEFORE any
-//! network byte leaves the process. Each secret is replaced with a stable
-//! placeholder (`«SECRET:k1»`) and the reverse mapping is held in an
+//! network byte leaves the process. Each secret is replaced with a stable,
+//! OPAQUE placeholder (`«SECRET:k1»` — the secret class never crosses the
+//! wire) and the reverse mapping is held in an
 //! in-process vault that never persists and never crosses the wire. Inbound
 //! responses are passed back through the codec so placeholders the model
 //! echoed are restored to the original values.
@@ -78,9 +79,23 @@ static RULES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
     ]
 });
 
-/// Loopback/example IPs that are safe to transmit (reduce false positives).
+/// Loopback/documentation IPs that are safe to transmit (reduce false
+/// positives). Private-network addresses (10.x, 172.16.x, 192.168.x) are
+/// deliberately NOT here — internal topology is exactly what the codec
+/// exists to keep off the wire.
 fn is_benign_ip(s: &str) -> bool {
-    s == "127.0.0.1" || s == "0.0.0.0" || s.starts_with("192.0.2.") || s.starts_with("10.0.0.")
+    s == "127.0.0.1" || s == "0.0.0.0" || s.starts_with("192.0.2.")
+}
+
+/// Rules whose regex captures the secret VALUE in a group: only the value is
+/// masked so the model keeps the assignment context (`password = «SECRET:k1»`)
+/// instead of losing the whole statement.
+fn value_group(kind: &str) -> Option<usize> {
+    match kind {
+        "aws_secret_key" => Some(1),
+        "password_assignment" => Some(2),
+        _ => None,
+    }
 }
 
 /// The codec instance: holds the reverse vault. One codec per outbound
@@ -104,43 +119,47 @@ impl MaskCodec {
     pub fn mask(&mut self, text: &str) -> (String, Vec<MaskedSpan>) {
         let mut out = text.to_string();
         let mut spans = Vec::new();
-        // The benign-IP scan-past trick temporarily rewrites '.' to U+2024.
-        // If the input legitimately contains U+2024 the blanket restore at
-        // the end would corrupt it — disable the optimization in that
-        // (vanishingly rare) case and mask benign IPs like any other.
-        let sentinel_safe = !out.contains('\u{2024}');
         for (kind, re) in RULES.iter() {
-            // Collect matches against the CURRENT text so successive rules
-            // see prior placeholders (placeholders never re-match: they use
-            // guillemets outside every pattern's alphabet).
-            loop {
-                let found = re.find(&out).map(|m| (m.start(), m.end()));
-                let Some((s, e)) = found else { break };
+            // Offset-based scan: `pos` advances past every decision so a
+            // benign IP is simply skipped in place (no sentinel rewriting)
+            // and a freshly inserted placeholder is never re-examined.
+            // Value-group rules leave the assignment context intact, so
+            // advancing `pos` past the whole match guarantees termination.
+            let mut pos = 0usize;
+            while pos <= out.len() {
+                let (s, e, whole_end) = {
+                    let caps = match re.captures_at(&out, pos) {
+                        Some(c) => c,
+                        None => break,
+                    };
+                    let whole = caps.get(0).expect("group 0 always present");
+                    match value_group(kind).and_then(|g| caps.get(g)) {
+                        Some(m) => (m.start(), m.end(), whole.end()),
+                        None => (whole.start(), whole.end(), whole.end()),
+                    }
+                };
                 let matched = out[s..e].to_string();
-                if *kind == "ipv4" && is_benign_ip(&matched) && sentinel_safe {
-                    // Scan past a benign IP without masking it: `find`
-                    // restarts from the head, so rewrite its dots to a
-                    // sentinel that cannot re-match the pattern, then
-                    // restore all sentinels after the loop.
-                    out.replace_range(s..e, &matched.replace('.', "\u{2024}"));
+                if *kind == "ipv4" && is_benign_ip(&matched) {
+                    pos = whole_end.max(pos + 1);
                     continue;
                 }
                 let ph = if let Some(existing) = self.forward.get(&matched) {
                     existing.clone()
                 } else {
                     self.counter += 1;
-                    let ph = format!("\u{00AB}SECRET:{}:k{}\u{00BB}", kind, self.counter);
+                    // Opaque on the wire: the placeholder carries an index
+                    // only — leaking the secret CLASS ("openai_key", …) to
+                    // the remote provider would itself be signal. The kind
+                    // stays local in the returned spans.
+                    let ph = format!("\u{00AB}SECRET:k{}\u{00BB}", self.counter);
                     self.forward.insert(matched.clone(), ph.clone());
                     self.vault.insert(ph.clone(), matched.clone());
                     ph
                 };
                 spans.push(MaskedSpan { kind, placeholder: ph.clone() });
                 out.replace_range(s..e, &ph);
+                pos = s + ph.len();
             }
-        }
-        // Restore benign-IP sentinels (only ever inserted when sentinel_safe).
-        if sentinel_safe && out.contains('\u{2024}') {
-            out = out.replace('\u{2024}', ".");
         }
         (out, spans)
     }
@@ -275,14 +294,49 @@ mod tests {
 
     #[test]
     fn preexisting_sentinel_char_survives_masking() {
-        // Input legitimately containing U+2024 (ONE DOT LEADER) must not be
-        // corrupted by the benign-IP scan-past optimization.
+        // Input legitimately containing U+2024 (ONE DOT LEADER) must never
+        // be corrupted; the offset-based scan touches nothing it does not
+        // mask, and benign IPs are skipped in place.
         let mut c = MaskCodec::new();
         let text = "literal one-dot-leader: a\u{2024}b near 127.0.0.1";
         let (masked, _) = c.mask(text);
         assert!(masked.contains("a\u{2024}b"), "U+2024 must survive: {masked}");
-        // The benign IP is masked in this mode (sentinel trick disabled) —
-        // correctness over the false-positive optimization.
+        assert!(masked.contains("127.0.0.1"), "loopback stays: {masked}");
+        assert_eq!(c.unmask(&masked), text);
+    }
+
+    #[test]
+    fn private_network_ips_are_masked() {
+        // 10.x is internal topology, NOT a documentation range — it must
+        // be masked like any other address.
+        let mut c = MaskCodec::new();
+        let text = "db lives at 10.0.0.7 behind the LB";
+        let (masked, _) = c.mask(text);
+        assert!(!masked.contains("10.0.0.7"), "private IP must mask: {masked}");
+        assert_eq!(c.unmask(&masked), text);
+    }
+
+    #[test]
+    fn placeholders_are_opaque_no_kind_on_wire() {
+        let mut c = MaskCodec::new();
+        let (masked, spans) = c.mask("key sk-abcdefghijklmnopqrstuvwxyz123456");
+        assert!(
+            !masked.contains("openai_key"),
+            "secret class must not cross the wire: {masked}"
+        );
+        // The kind is still available locally for telemetry.
+        assert_eq!(spans[0].kind, "openai_key");
+    }
+
+    #[test]
+    fn password_assignment_masks_value_only() {
+        let mut c = MaskCodec::new();
+        let text = r#"set password = "hunter2hunter2" in the env"#;
+        let (masked, _) = c.mask(text);
+        assert!(!masked.contains("hunter2hunter2"));
+        // The assignment context survives so the model understands WHAT is
+        // being configured — only the value is redacted.
+        assert!(masked.contains("password"), "context must survive: {masked}");
         assert_eq!(c.unmask(&masked), text);
     }
 
