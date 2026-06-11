@@ -176,7 +176,7 @@ cargo build --release --features native
 
 macOS (WKWebView) and Windows (WebView2) need no extra packages. CI builds
 native binaries for all three platforms on every push
-(`.github/workflows/ci.yml`) and attaches them to tagged releases.
+(`.github/workflows-staged/ci.yml` — see its README for one-step activation) and attaches them to tagged releases.
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
 kernel can be embedded inside other agent runtimes.
