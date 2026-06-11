@@ -24,6 +24,13 @@ cargo build --release                          # no system deps; SQLite is bundl
 ./target/release/tokenos serve --dry-run       # dashboard at http://127.0.0.1:8080
 ```
 
+Prefer a native desktop window over a browser tab?
+
+```sh
+cargo build --release --features native        # system-webview shell (Linux: needs WebKitGTK)
+./target/release/tokenos app --dry-run         # same dashboard, native window, loopback-only
+```
+
 No API key is needed for any of the above — the fault-injectable mock provider
 exercises the entire pipeline offline. See
 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the five-minute tour.
@@ -155,8 +162,21 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos — zero warnings
-cargo test                   # 170 unit tests across all subsystems, fully offline
+cargo test                   # 177 unit tests across all subsystems, fully offline
 ```
+
+The optional **native desktop app** (`tokenos app`) is feature-gated so
+headless/server builds stay dependency-free:
+
+```sh
+# Linux build deps (Debian/Ubuntu): WebKitGTK for the system webview
+sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+cargo build --release --features native
+```
+
+macOS (WKWebView) and Windows (WebView2) need no extra packages. CI builds
+native binaries for all three platforms on every push
+(`.github/workflows/ci.yml`) and attaches them to tagged releases.
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
 kernel can be embedded inside other agent runtimes.
@@ -240,6 +260,18 @@ Keyboard-first: views on keys `1`–`5`, `Ctrl+Enter` executes,
 all assets are embedded in the binary at compile time.
 
 Full endpoint reference: [docs/API.md](docs/API.md).
+
+### Native desktop app
+
+`tokenos app` (build feature `native`) wraps the SAME dashboard in a system
+webview window (WebKitGTK / WKWebView / WebView2 via `wry`):
+
+- the axum control plane binds an **ephemeral loopback port** (127.0.0.1:0)
+  on a background runtime — the kernel never faces a network in app mode
+- the window closing tears down the whole process, server included
+- external links open in the system browser; the control panel itself can
+  never be navigated away from the kernel
+- engine, API, auth model and frontend bytes are identical to `tokenos serve`
 
 ## Design principles
 

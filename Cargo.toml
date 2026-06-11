@@ -33,6 +33,15 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 walkdir = "2"
 once_cell = "1"
+# Native desktop shell (feature "native"): a system-webview window over the
+# loopback dashboard. Optional so headless/server builds never need GTK.
+tao = { version = "0.35", optional = true }
+wry = { version = "0.55", optional = true }
+
+[features]
+default = []
+# `cargo build --release --features native` → enables `tokenos app`
+native = ["dep:tao", "dep:wry"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

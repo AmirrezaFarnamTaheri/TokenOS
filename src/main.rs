@@ -115,6 +115,11 @@ enum Command {
         #[arg(long)]
         config: Option<String>,
     },
+    /// Launch the native desktop app (requires the "native" build feature)
+    App {
+        #[command(flatten)]
+        engine: EngineFlags,
+    },
     /// Launch the web control panel
     Serve {
         /// Listen port
@@ -152,10 +157,45 @@ fn build_engine(ef: &EngineFlags) -> Result<Engine> {
     Ok(eng)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
-    if let Err(e) = dispatch(cli).await {
+
+    // The native shell's event loop must OWN the main thread (a hard
+    // platform requirement on macOS, and the sane default everywhere), so
+    // `app` is dispatched before any tokio runtime exists — run_app spins
+    // up its own background runtime for the control plane.
+    if let Command::App { engine: ef } = &cli.command {
+        #[cfg(feature = "native")]
+        {
+            let result = build_engine(ef)
+                .map(Arc::new)
+                .and_then(tokenos::nativeapp::run_app);
+            if let Err(e) = result {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = ef;
+            eprintln!(
+                "error: this binary was built without the native desktop shell.\n\
+                 rebuild with: cargo build --release --features native\n\
+                 (or use the browser dashboard: tokenos serve)"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: failed to start async runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(dispatch(cli)) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     }
@@ -163,6 +203,8 @@ async fn main() {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        // Handled synchronously in main() before the runtime starts.
+        Command::App { .. } => unreachable!("app dispatches before the async runtime"),
         Command::Run { task, constraints, json, engine: ef } => {
             let task = task.join(" ").trim().to_string();
             if task.is_empty() {

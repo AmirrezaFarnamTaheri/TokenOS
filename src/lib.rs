@@ -14,6 +14,8 @@ pub mod jsonrescue;
 pub mod kernel;
 pub mod loopdetect;
 pub mod maskcodec;
+#[cfg(feature = "native")]
+pub mod nativeapp;
 pub mod payload;
 pub mod pricing;
 pub mod provider;

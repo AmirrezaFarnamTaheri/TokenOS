@@ -127,6 +127,28 @@ pub async fn serve(
     Ok(())
 }
 
+/// Serves the dashboard and reports the actual bound address through
+/// `ready` before accepting traffic. Used by the native desktop shell,
+/// which binds port 0 (ephemeral) and must learn the real port to point
+/// the webview at. Loopback-only by convention of its single caller.
+pub async fn serve_with_ready(
+    engine: Arc<Engine>,
+    host: &str,
+    port: u16,
+    auth_token: Option<String>,
+    ready: tokio::sync::oneshot::Sender<std::net::SocketAddr>,
+) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", host, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let local = listener.local_addr()?;
+    // A dropped receiver means the shell aborted — serving is pointless.
+    if ready.send(local).is_err() {
+        return Ok(());
+    }
+    axum::serve(listener, router_with_auth(engine, auth_token)).await?;
+    Ok(())
+}
+
 fn asset(body: &'static str, content_type: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
