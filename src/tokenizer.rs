@@ -124,3 +124,212 @@ mod tests {
         assert_eq!(estimate_bytes(&b), 50);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Greedy longest-match subword counter (evolution section 23).
+//
+// A deterministic BPE-style segmenter: text is split on whitespace and
+// punctuation boundaries, then each word is segmented by greedy longest
+// match against an embedded vocabulary of high-frequency cl100k-like
+// subword units. Unmatched residue falls back to ~4-chars-per-token (ASCII)
+// or one-token-per-char (non-ASCII), matching the conservative budgeting
+// direction of `estimate`. No vocabulary files are shipped or mmapped —
+// the merge table is compiled into the binary, so counting is exact w.r.t.
+// this vocabulary and fully reproducible across machines.
+// ---------------------------------------------------------------------------
+
+use once_cell::sync::Lazy;
+use std::collections::HashSet;
+
+/// High-frequency subword vocabulary (lowercase). Order doesn't matter —
+/// matching is greedy longest-first by probing lengths descending.
+static VOCAB_LIST: &[&str] = &[
+    // whole high-frequency words
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+    "her", "was", "one", "our", "out", "day", "get", "has", "him", "his",
+    "how", "man", "new", "now", "old", "see", "two", "way", "who", "boy",
+    "did", "its", "let", "put", "say", "she", "too", "use", "that", "with",
+    "have", "this", "will", "your", "from", "they", "know", "want", "been",
+    "good", "much", "some", "time", "very", "when", "come", "here", "just",
+    "like", "long", "make", "many", "more", "only", "over", "such", "take",
+    "than", "them", "well", "were", "what", "into", "code", "file", "test",
+    "data", "type", "list", "name", "value", "error", "function", "return",
+    "string", "number", "object", "array", "class", "const", "import",
+    "export", "public", "private", "static", "struct", "match", "async",
+    "await", "print", "write", "read", "open", "close", "true", "false",
+    "null", "none", "self", "must", "should", "would", "could", "about",
+    "after", "before", "first", "other", "right", "their", "there", "these",
+    "thing", "think", "three", "under", "water", "where", "which", "while",
+    "world", "years", "implement", "update", "create", "delete", "remove",
+    "change", "check", "build", "start", "spawn", "thread", "token",
+    "model", "route", "provider", "config", "state", "task", "goal",
+    // common prefixes/suffixes/subwords
+    "ing", "ion", "tion", "ation", "ed", "er", "est", "ly", "ity", "ment",
+    "ness", "able", "ible", "ous", "ful", "less", "ize", "ise", "ant",
+    "ent", "al", "ic", "ive", "ate", "ary", "ory", "pre", "pro", "con",
+    "com", "dis", "mis", "non", "sub", "super", "trans", "inter", "intra",
+    "over", "under", "anti", "auto", "semi", "multi", "micro", "macro",
+    "re", "un", "in", "im", "ir", "il", "de", "ex", "en", "em", "be",
+    "an", "ab", "ad", "ac", "as", "at", "co", "do", "go", "if", "is",
+    "it", "me", "my", "no", "of", "on", "or", "so", "to", "up", "us", "we",
+    "ow", "ay", "ai", "ea", "ee", "oo", "ou", "th", "ch", "sh", "wh",
+    "qu", "ck", "ng", "nk", "nt", "nd", "st", "sp", "sc", "sk", "sl",
+    "sm", "sn", "sw", "tw", "tr", "dr", "br", "cr", "fr", "gr", "pr",
+    "bl", "cl", "fl", "gl", "pl",
+];
+
+static VOCAB: Lazy<(HashSet<&'static str>, usize)> = Lazy::new(|| {
+    let set: HashSet<&'static str> = VOCAB_LIST.iter().copied().collect();
+    let max_len = VOCAB_LIST.iter().map(|w| w.len()).max().unwrap_or(1);
+    (set, max_len)
+});
+
+/// Exact (vocabulary-relative) token count via greedy longest-match
+/// segmentation. Deterministic, allocation-light, O(N * max_piece_len).
+pub fn count_bpe(s: &str) -> usize {
+    if s.is_empty() {
+        return 0;
+    }
+    let (vocab, max_len) = (&VOCAB.0, VOCAB.1);
+    let mut tokens = 0usize;
+    // Word splitter: runs of alphanumerics are words; runs of spaces merge
+    // into the following token (BPE-style leading-space units); every other
+    // symbol is its own token.
+    let mut word = String::new();
+    let flush = |w: &mut String, tokens: &mut usize| {
+        if w.is_empty() {
+            return;
+        }
+        let lower = w.to_lowercase();
+        let bytes = lower.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let mut matched = 0usize;
+            let cap = (bytes.len() - i).min(max_len);
+            for l in (2..=cap).rev() {
+                if !lower.is_char_boundary(i) || !lower.is_char_boundary(i + l) {
+                    continue;
+                }
+                if vocab.contains(&lower[i..i + l]) {
+                    matched = l;
+                    break;
+                }
+            }
+            if matched > 0 {
+                tokens_add(tokens, 1);
+                i += matched;
+            } else {
+                // Residue: consume up to 4 bytes as one fallback token —
+                // mirrors byte-level BPE density on ASCII. The end is pulled
+                // back to a valid char boundary (minimum one char).
+                let mut j = (i + 4).min(bytes.len());
+                while j > i + 1 && !lower.is_char_boundary(j) {
+                    j -= 1;
+                }
+                if !lower.is_char_boundary(j) {
+                    // single multi-byte char wider than 4 bytes: take it whole
+                    j = i + 1;
+                    while j < bytes.len() && !lower.is_char_boundary(j) {
+                        j += 1;
+                    }
+                }
+                tokens_add(tokens, 1);
+                i = j;
+            }
+        }
+        w.clear();
+    };
+    #[inline]
+    fn tokens_add(t: &mut usize, n: usize) {
+        *t += n;
+    }
+    for ch in s.chars() {
+        if ch.is_alphanumeric() && ch.is_ascii() {
+            word.push(ch);
+        } else if (ch as u32) > 127 {
+            flush(&mut word, &mut tokens);
+            tokens += 1; // non-ASCII: ~1 token per scalar (CJK-conservative)
+        } else if ch.is_whitespace() {
+            flush(&mut word, &mut tokens);
+            // whitespace fuses into the next token (BPE leading-space): free
+        } else {
+            flush(&mut word, &mut tokens);
+            tokens += 1; // each symbol is a token
+        }
+    }
+    flush(&mut word, &mut tokens);
+    tokens.max(1)
+}
+
+/// Best-of-both budget counter: takes the max of the calibrated heuristic
+/// and the greedy subword count, erring conservative for budget enforcement.
+pub fn count_conservative(s: &str) -> usize {
+    if s.is_empty() {
+        return 0;
+    }
+    estimate(s).max(count_bpe(s))
+}
+
+#[cfg(test)]
+mod bpe_tests {
+    use super::*;
+
+    #[test]
+    fn empty_counts_zero() {
+        assert_eq!(count_bpe(""), 0);
+        assert_eq!(count_conservative(""), 0);
+    }
+
+    #[test]
+    fn known_words_count_once_or_twice() {
+        // "the" is a single vocab hit.
+        assert_eq!(count_bpe("the"), 1);
+        // "thinking" → "think" + "ing" = 2.
+        assert_eq!(count_bpe("thinking"), 2);
+    }
+
+    #[test]
+    fn symbols_count_individually() {
+        assert_eq!(count_bpe("{}();"), 5);
+    }
+
+    #[test]
+    fn whitespace_is_free() {
+        assert_eq!(count_bpe("the   the"), 2);
+    }
+
+    #[test]
+    fn cjk_counts_per_char() {
+        assert_eq!(count_bpe("日本語"), 3);
+    }
+
+    #[test]
+    fn deterministic() {
+        let s = "implement the new token counting function for the kernel";
+        assert_eq!(count_bpe(s), count_bpe(s));
+    }
+
+    #[test]
+    fn prose_density_plausible() {
+        let s = "The quick brown fox jumps over the lazy dog repeatedly today.";
+        let n = count_bpe(s);
+        // 11 words + 1 period; subword splits keep it in a sane band.
+        assert!((10..=32).contains(&n), "count was {n}");
+    }
+
+    #[test]
+    fn conservative_dominates_both() {
+        let s = "implement the new function";
+        assert!(count_conservative(s) >= estimate(s));
+        assert!(count_conservative(s) >= count_bpe(s));
+    }
+
+    #[test]
+    fn unknown_long_word_falls_back_chunked() {
+        // 16 chars of consonant gibberish with no vocab hits longer than 2:
+        // must stay bounded (≤ 8 fallback chunks).
+        let n = count_bpe("xzqvxzqvxzqvxzqv");
+        assert!(n <= 8, "count was {n}");
+        assert!(n >= 4);
+    }
+}

@@ -46,8 +46,9 @@ $$(".nav-item").forEach((btn) => {
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
   try {
-    const [sum, routes, providers] = await Promise.all([
+    const [sum, routes, providers, bandit] = await Promise.all([
       api("/api/summary"), api("/api/stats/routes"), api("/api/stats/providers"),
+      api("/api/stats/bandit").catch(() => null),
     ]);
     setConn(true);
 
@@ -86,6 +87,20 @@ async function loadDashboard() {
           <td>${fmtUSD(p.total_cost_usd)}</td>
         </tr>`).join("")
       : emptyRow(6, "No provider calls yet.");
+
+    const bt = $("#banditTable tbody");
+    if (bt) {
+      const arms = (bandit && bandit.arms) || [];
+      bt.innerHTML = arms.length
+        ? arms.map((a) => `<tr>
+            <td>${esc(a.provider)}</td>
+            <td>${fmtNum(a.pulls)}</td>
+            <td>${a.pulls ? Number(a.mean_reward).toFixed(3) : "—"}</td>
+            <td>${a.pulls ? fmtMS(a.mean_latency_ms) : "—"}</td>
+            <td>${a.ucb1_score === "unexplored" ? "<span class=\"hint\">unexplored</span>" : Number(a.ucb1_score).toFixed(3)}</td>
+          </tr>`).join("")
+        : emptyRow(5, "No bandit arms configured.");
+    }
 
     const max = Math.max(1, ...(routes || []).map((r) => r.runs));
     $("#routeBars").innerHTML = (routes || []).length

@@ -5,6 +5,10 @@ edition = "2021"
 description = "TokenOS — Token-Optimal Agent Execution Kernel (native Rust)"
 license = "MIT"
 
+[lib]
+name = "tokenos"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tokenos"
 path = "src/main.rs"

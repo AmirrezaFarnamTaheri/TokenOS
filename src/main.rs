@@ -3,24 +3,11 @@
 //! Deterministic, zero-token routing for LLM agents: route locally, spend
 //! upstream tokens only when a cheaper local action cannot finish the task.
 
-mod config;
-mod contextidx;
-mod engine;
-mod kernel;
-mod loopdetect;
-mod payload;
-mod pricing;
-mod provider;
-mod recorder;
-mod store;
-mod tokenizer;
-mod verify;
-mod webui;
-
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
-use engine::{Engine, Options};
 use std::sync::Arc;
+use tokenos::engine::{Engine, Options};
+use tokenos::{config, contextidx, provider, webui};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -133,9 +120,17 @@ enum Command {
         /// Listen port
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// Listen host
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Listen host (loopback by default; see --public)
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Explicitly allow binding a non-loopback interface.
+        /// Refused unless an auth token is also configured (finding 12.1).
+        #[arg(long)]
+        public: bool,
+        /// Bearer token required on every /api/* request.
+        /// Falls back to the TOKENOS_AUTH_TOKEN environment variable.
+        #[arg(long)]
+        auth_token: Option<String>,
         #[command(flatten)]
         engine: EngineFlags,
     },
@@ -290,6 +285,29 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     );
                 }
             }
+            // Live UCB1 bandit standings (S19) — process-local evidence.
+            let ranked = eng.bandit.ranked();
+            let explored: Vec<_> = ranked
+                .iter()
+                .filter(|(p, _)| eng.bandit.arm_stats(p).0 > 0)
+                .collect();
+            if !explored.is_empty() {
+                println!(
+                    "\n{:<14} {:>8} {:>13} {:>14} {:>12}",
+                    "BANDIT ARM", "PULLS", "MEAN_REWARD", "MEAN_LAT_MS", "UCB1"
+                );
+                for (p, score) in &ranked {
+                    let (pulls, reward, lat) = eng.bandit.arm_stats(p);
+                    if pulls == 0 {
+                        println!("{:<14} {:>8} {:>13} {:>14} {:>12}", p, 0, "-", "-", "unexplored");
+                    } else {
+                        println!(
+                            "{:<14} {:>8} {:>13.3} {:>14.0} {:>12.3}",
+                            p, pulls, reward, lat, score
+                        );
+                    }
+                }
+            }
             Ok(())
         }
         Command::Tasks { limit, engine: ef } => {
@@ -347,13 +365,38 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
-        Command::Serve { port, host, engine: ef } => {
+        Command::Serve { port, host, public, auth_token, engine: ef } => {
+            // Finding 12.1 (CWE-306): the dashboard binds loopback by default.
+            // A non-loopback bind requires BOTH --public and an auth token so
+            // an unauthenticated control plane can never face a network.
+            let token = auth_token
+                .or_else(|| std::env::var("TOKENOS_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
+            let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+            if !loopback {
+                if !public {
+                    return Err(anyhow!(
+                        "refusing to bind non-loopback host {:?} without --public                          (the dashboard can trigger paid API executions)",
+                        host
+                    ));
+                }
+                if token.is_none() {
+                    return Err(anyhow!(
+                        "--public requires an auth token: pass --auth-token or set                          TOKENOS_AUTH_TOKEN (finding 12.1, CWE-306)"
+                    ));
+                }
+                eprintln!(
+                    "WARNING: dashboard exposed on {host}:{port}; bearer auth is ENFORCED on /api/*"
+                );
+            }
             let eng = Arc::new(build_engine(&ef)?);
             println!(
-                "TokenOS control panel listening on http://{}:{} (dry-run={})",
-                host, port, ef.dry_run
+                "TokenOS control panel listening on http://{}:{} (dry-run={}, auth={})",
+                host,
+                port,
+                ef.dry_run,
+                if token.is_some() { "on" } else { "off (loopback only)" }
             );
-            webui::serve(eng, &host, port).await
+            webui::serve(eng, &host, port, token).await
         }
     }
 }

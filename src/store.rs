@@ -48,11 +48,13 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE TABLE IF NOT EXISTS failure_memory (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id   TEXT NOT NULL,
+    goal_hash TEXT NOT NULL DEFAULT '',
     action    TEXT NOT NULL,
     reason    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_failmem_task ON failure_memory(task_id);
+CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash);
 
 CREATE TABLE IF NOT EXISTS executions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +120,18 @@ impl Store {
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA).context("migrate schema")?;
+        // Migration for pre-goal_hash databases (finding 12.3): the column
+        // addition is idempotent — the error on already-migrated DBs is
+        // expected and ignored, then the index creation is retried.
+        conn.execute(
+            "ALTER TABLE failure_memory ADD COLUMN goal_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
+            [],
+        )?;
         Ok(Store { conn: Mutex::new(conn) })
     }
 
@@ -183,12 +197,21 @@ impl Store {
     // Failure memory
     // -----------------------------------------------------------------
 
-    /// Stores a failure entry and prunes beyond the kernel cap.
-    pub fn record_failure(&self, task_id: &str, action: &str, reason: &str) -> Result<()> {
+    /// Stores a failure entry and prunes beyond the kernel cap. `goal_hash`
+    /// is the stable digest of the task text (finding 12.3): failure memory
+    /// is keyed by WHAT was attempted, not by the random per-run task ID, so
+    /// re-submitting the same failing goal is recognized across runs.
+    pub fn record_failure(
+        &self,
+        task_id: &str,
+        goal_hash: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO failure_memory (task_id, action, reason, created_at) VALUES (?1,?2,?3,?4)",
-            params![task_id, action, reason, Utc::now().to_rfc3339()],
+            "INSERT INTO failure_memory (task_id, goal_hash, action, reason, created_at) VALUES (?1,?2,?3,?4,?5)",
+            params![task_id, goal_hash, action, reason, Utc::now().to_rfc3339()],
         )?;
         conn.execute(
             r#"DELETE FROM failure_memory WHERE task_id = ?1 AND id NOT IN (
@@ -223,7 +246,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Whether an identical failed action exists.
+    /// Whether an identical failed action exists for a task.
     pub fn has_similar_failure(&self, task_id: &str, action: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(
@@ -232,6 +255,65 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    /// Whether ANY prior failure exists for this goal digest, regardless of
+    /// which task ID recorded it (finding 12.3 remediation: the old lookup
+    /// keyed on the freshly generated task ID and therefore always missed).
+    pub fn has_goal_failure(&self, goal_hash: &str) -> Result<bool> {
+        if goal_hash.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM failure_memory WHERE goal_hash=?1",
+            params![goal_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Recent failure reasons for a goal digest (newest first, capped) —
+    /// injected into the prompt's FAILURE MEMORY block on re-attempts.
+    pub fn goal_failures(&self, goal_hash: &str, limit: usize) -> Result<Vec<FailureEntry>> {
+        if goal_hash.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT action, reason, created_at FROM failure_memory
+             WHERE goal_hash = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![goal_hash, limit.max(1) as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (action, reason, ts) = row?;
+            let at = DateTime::parse_from_rfc3339(&ts)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            out.push(FailureEntry { action, reason, at });
+        }
+        Ok(out)
+    }
+
+    /// Clears the failure memory for a goal digest after a verified success
+    /// so a goal that eventually succeeded is no longer flagged as repeated.
+    pub fn clear_goal_failures(&self, goal_hash: &str) -> Result<()> {
+        if goal_hash.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM failure_memory WHERE goal_hash = ?1",
+            params![goal_hash],
+        )?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -506,7 +588,7 @@ mod tests {
         let mut st = State::new("t1", "g");
         s.save_task(&mut st).unwrap();
         for i in 0..8 {
-            s.record_failure("t1", &format!("a{i}"), "r").unwrap();
+            s.record_failure("t1", "gh1", &format!("a{i}"), "r").unwrap();
         }
         let f = s.failures("t1").unwrap();
         assert_eq!(f.len(), MAX_FAILURE_MEMORY);
@@ -518,9 +600,25 @@ mod tests {
         let s = mem();
         let mut st = State::new("t1", "g");
         s.save_task(&mut st).unwrap();
-        s.record_failure("t1", "exact action", "r").unwrap();
+        s.record_failure("t1", "gh1", "exact action", "r").unwrap();
         assert!(s.has_similar_failure("t1", "exact action").unwrap());
         assert!(!s.has_similar_failure("t1", "other").unwrap());
+    }
+
+    #[test]
+    fn goal_failure_memory_crosses_task_ids() {
+        // Finding 12.3: the same goal failed under a DIFFERENT task ID must
+        // still register as a repeated failure on the next attempt.
+        let s = mem();
+        s.record_failure("task-aaaa", "gh-goal-1", "execute via mock", "boom").unwrap();
+        assert!(s.has_goal_failure("gh-goal-1").unwrap());
+        assert!(!s.has_goal_failure("gh-other").unwrap());
+        assert!(!s.has_goal_failure("").unwrap());
+        let f = s.goal_failures("gh-goal-1", 5).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].reason, "boom");
+        s.clear_goal_failures("gh-goal-1").unwrap();
+        assert!(!s.has_goal_failure("gh-goal-1").unwrap());
     }
 
     #[test]

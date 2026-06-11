@@ -18,20 +18,23 @@ dashboard. Everything in the kernel exists to drive this number down.
 
 ```
 src/
+  lib.rs               Library crate root (kernel embeddable in other runtimes)
   main.rs              CLI (clap) + embedded web GUI entrypoint
-  kernel.rs            Deterministic router: route ladder, signals, policy, state
+  kernel.rs            Deterministic router: route ladder, signals, policy, state, delegation packet
   config.rs            YAML config, provider chains, two-tier model filter matrix
   engine.rs            Orchestrator: route → context → payload → failover → verify → record
   provider.rs          Adapters: mock (fault-injectable), OpenAI, Anthropic, Gemini, proxy-IDE
-  pricing.rs           Shadow pricing  U = confidence / (α·cost + β·latency)  + EWMA trackers
+  pricing.rs           Shadow pricing U = confidence/(α·cost + β·latency) + EWMA + lock-free UCB1 bandit
   payload.rs           JIT cache-aligned prompt builder (static → semi-static → volatile)
   verify.rs            Tiered verification: free static checks before any LLM call
-  tokenizer.rs         Offline token estimator (no network, no model)
-  loopdetect.rs        Semantic loop detection via Levenshtein distance ceiling (3%)
+  tokenizer.rs         Offline token estimator + greedy BPE counter (conservative budgeting)
+  jsonrescue.rs        Single-pass truncated-JSON rescuer (EOF as soft boundary)
+  maskcodec.rs         Edge secret-masking codec (mask outbound, unmask echoes)
+  loopdetect.rs        Semantic loop detection: Myers bit-parallel Levenshtein, 3% ceiling
   contextidx.rs        Surgical context: structural symbol index (FTS5, LIKE fallback)
-  store.rs             SQLite state store: tasks, failure memory (max 5), loop history, telemetry
+  store.rs             SQLite state store: tasks, goal-keyed failure memory, loop history, telemetry
   recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON)
-  webui.rs             Lock-free axum control panel (dashboard, run console, traces, config)
+  webui.rs             Lock-free axum control panel (dashboard, run console, traces, bandit, config)
 static/                Embedded dashboard assets (index.html, app.js, style.css)
 ```
 
@@ -71,6 +74,30 @@ Escalations and ASK terminate locally at **zero LLM cost**.
   (SHA-256) outside the conversation, so debugging never consumes context tokens.
 - **Tiered verification** — free static checks (diff shape for PATCH, single-question
   contract for ASK, brace balance, truncation detection) run before anything costs.
+- **UCB1 bandit failover (S19)** — a lock-free multi-armed bandit over the provider
+  fleet scales each shadow-priced utility by live observed evidence
+  (`0.5 + mean_reward` for explored arms; neutral `1.0` for unexplored arms so
+  shadow pricing alone decides and every arm is still explored). Verified
+  successes earn latency-discounted reward; transport failures and
+  verification failures earn zero. Standings surface in `tokenos telemetry`,
+  `/api/stats/bandit`, and the dashboard.
+- **Truncated-JSON rescue (S20)** — when the goal demands JSON, a generation cut
+  mid-stream (timeout, token limit) is repaired by a single-pass lenient parser
+  instead of being discarded: strings cut at EOF keep their partial contents,
+  dangling keys are dropped, open containers are closed. A truncation guard
+  refuses to "repair" prose that merely starts with a bracket. Every rescue is
+  logged to the flight recorder at zero token cost.
+- **Conservative token budgeting (S23)** — routing estimates take the max of the
+  calibrated chars/token heuristic and a greedy longest-match BPE segmenter, so
+  a route is never selected on an underestimate.
+- **Delegation packets** — `DELEGATE` routes transmit a minimal JSON contract
+  (task, scope, constraints, acceptance, next step) — conclusions only, no
+  history, no reasoning.
+- **Edge secret masking (S24)** — outbound prompts are scanned for API keys,
+  tokens, private-key blocks, passwords, connection strings, emails and IPs;
+  secrets are replaced with stable placeholders before any network byte leaves
+  the process, and echoes are restored on the response leg. The reverse vault
+  lives only in the request's stack frame.
 
 ## Build
 
@@ -78,8 +105,11 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos
-cargo test                   # 89 unit tests across all subsystems
+cargo test                   # 157 unit tests across all subsystems
 ```
+
+The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
+kernel can be embedded inside other agent runtimes.
 
 ## Usage
 
@@ -145,7 +175,8 @@ recorder directory).
 
 `tokenos serve` embeds a zero-dependency GUI:
 
-- **Dashboard** — cost-per-success KPI, route distribution, per-provider stats
+- **Dashboard** — cost-per-success KPI, route distribution, per-provider stats,
+  live UCB1 bandit standings (`/api/stats/bandit`)
 - **Run console** — free route preview (signals + provider chain + token estimates)
   before committing to a paid execution
 - **Tasks** — persisted state with flight-recorder trace timeline per task

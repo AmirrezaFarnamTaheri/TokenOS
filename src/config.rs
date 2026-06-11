@@ -351,7 +351,7 @@ impl Config {
         let mut seen: std::collections::HashSet<String> = Default::default();
         let mut chain: Vec<String> = Vec::new();
 
-        let mut add = |name: &str, seen: &mut std::collections::HashSet<String>, chain: &mut Vec<String>| {
+        let add = |name: &str, seen: &mut std::collections::HashSet<String>, chain: &mut Vec<String>| {
             if name.is_empty() || seen.contains(name) {
                 return;
             }

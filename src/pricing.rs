@@ -242,3 +242,273 @@ mod tests {
         assert_eq!(q[0].candidate.provider, "aaa");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Lock-free UCB1 multi-armed bandit router (evolution section 19).
+//
+// Each provider arm keeps three atomics: pull count, cumulative reward and
+// cumulative squared latency. f64 values are bit-cast into AtomicU64 and
+// updated with compare-exchange loops, so the hot scoring path takes no lock
+// at all and scales linearly across the multi-threaded runtime.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// f64 stored in an AtomicU64 via bit-casting. Updates use a CAS loop —
+/// wait-free for readers, lock-free for writers.
+#[derive(Debug, Default)]
+pub struct AtomicF64(AtomicU64);
+
+impl AtomicF64 {
+    pub fn new(v: f64) -> Self {
+        AtomicF64(AtomicU64::new(v.to_bits()))
+    }
+
+    #[inline]
+    pub fn load(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    pub fn store(&self, v: f64) {
+        self.0.store(v.to_bits(), Ordering::Release);
+    }
+
+    /// Lock-free fetch-add via compare-exchange loop.
+    pub fn fetch_add(&self, delta: f64) -> f64 {
+        let mut cur = self.0.load(Ordering::Acquire);
+        loop {
+            let new = (f64::from_bits(cur) + delta).to_bits();
+            match self
+                .0
+                .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(prev) => return f64::from_bits(prev),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
+
+/// One bandit arm: a provider's lifetime pull count and reward sum.
+#[derive(Debug, Default)]
+pub struct Arm {
+    pulls: AtomicU64,
+    reward_sum: AtomicF64,
+    latency_sum_ms: AtomicF64,
+}
+
+impl Arm {
+    pub fn pulls(&self) -> u64 {
+        self.pulls.load(Ordering::Acquire)
+    }
+
+    pub fn mean_reward(&self) -> f64 {
+        let n = self.pulls();
+        if n == 0 {
+            return 0.0;
+        }
+        self.reward_sum.load() / n as f64
+    }
+
+    pub fn mean_latency_ms(&self) -> f64 {
+        let n = self.pulls();
+        if n == 0 {
+            return 0.0;
+        }
+        self.latency_sum_ms.load() / n as f64
+    }
+}
+
+/// Lock-free UCB1 router over a FIXED arm set. The arm list is immutable
+/// after construction (no rebalancing locks); all statistics are atomics.
+///
+///   UCB1(arm) = mean_reward + c * sqrt(2 ln(total_pulls) / arm_pulls)
+///
+/// Unpulled arms score +infinity, guaranteeing initial exploration of every
+/// provider before exploitation begins.
+#[derive(Debug)]
+pub struct Ucb1Router {
+    arms: Vec<(String, Arm)>,
+    total_pulls: AtomicU64,
+    /// exploration constant (1.0 = classic UCB1; lower = greedier)
+    pub exploration: f64,
+}
+
+impl Ucb1Router {
+    pub fn new(providers: &[String]) -> Self {
+        Ucb1Router {
+            arms: providers
+                .iter()
+                .map(|p| (p.clone(), Arm::default()))
+                .collect(),
+            total_pulls: AtomicU64::new(0),
+            exploration: 1.0,
+        }
+    }
+
+    fn arm(&self, provider: &str) -> Option<&Arm> {
+        self.arms
+            .iter()
+            .find(|(p, _)| p == provider)
+            .map(|(_, a)| a)
+    }
+
+    /// Records an outcome. Reward = success(0/1) scaled down by latency so
+    /// fast successes dominate slow ones; failures earn 0.
+    pub fn record(&self, provider: &str, success: bool, latency_ms: f64) {
+        let Some(arm) = self.arm(provider) else { return };
+        let reward = if success {
+            // 1.0 at 0 ms decaying toward ~0.5 at 10 s.
+            1.0 / (1.0 + latency_ms / 10_000.0)
+        } else {
+            0.0
+        };
+        arm.pulls.fetch_add(1, Ordering::AcqRel);
+        arm.reward_sum.fetch_add(reward);
+        arm.latency_sum_ms.fetch_add(latency_ms);
+        self.total_pulls.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// UCB1 score for a single provider (infinity when unexplored).
+    pub fn score(&self, provider: &str) -> f64 {
+        let Some(arm) = self.arm(provider) else {
+            return f64::NEG_INFINITY;
+        };
+        let n = arm.pulls();
+        if n == 0 {
+            return f64::INFINITY;
+        }
+        let total = self.total_pulls.load(Ordering::Acquire).max(1) as f64;
+        arm.mean_reward() + self.exploration * (2.0 * total.ln() / n as f64).sqrt()
+    }
+
+    /// Returns all providers ordered by descending UCB1 score with a
+    /// deterministic name tiebreak. Zero locks on this path.
+    pub fn ranked(&self) -> Vec<(String, f64)> {
+        let mut out: Vec<(String, f64)> = self
+            .arms
+            .iter()
+            .map(|(p, _)| (p.clone(), self.score(p)))
+            .collect();
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        out
+    }
+
+    /// Best arm right now (None when no arms configured).
+    pub fn select(&self) -> Option<String> {
+        self.ranked().into_iter().next().map(|(p, _)| p)
+    }
+
+    /// Raw per-arm statistics: (pulls, mean_reward, mean_latency_ms).
+    /// Unknown providers report zeros. Lock-free.
+    pub fn arm_stats(&self, provider: &str) -> (u64, f64, f64) {
+        match self.arm(provider) {
+            None => (0, 0.0, 0.0),
+            Some(a) => (a.pulls(), a.mean_reward(), a.mean_latency_ms()),
+        }
+    }
+
+    /// Deterministic multiplicative weight applied to a shadow-pricing
+    /// utility: unexplored or unknown arms are neutral (1.0, so shadow
+    /// pricing alone decides and the arm still gets explored); explored arms
+    /// scale utility by `0.5 + mean_reward` ∈ [0.5, 1.5], so live observed
+    /// success/latency evidence bends the failover order toward arms that
+    /// actually deliver.
+    pub fn exploitation_weight(&self, provider: &str) -> f64 {
+        match self.arm(provider) {
+            None => 1.0,
+            Some(a) if a.pulls() == 0 => 1.0,
+            Some(a) => 0.5 + a.mean_reward(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod ucb1_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn arms(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn atomic_f64_roundtrip_and_add() {
+        let a = AtomicF64::new(1.5);
+        assert_eq!(a.load(), 1.5);
+        a.fetch_add(2.25);
+        assert_eq!(a.load(), 3.75);
+        a.store(-0.5);
+        assert_eq!(a.load(), -0.5);
+    }
+
+    #[test]
+    fn unexplored_arms_are_pulled_first() {
+        let r = Ucb1Router::new(&arms(&["a", "b"]));
+        r.record("a", true, 100.0);
+        // "b" is unexplored → infinite score → selected.
+        assert_eq!(r.select().unwrap(), "b");
+    }
+
+    #[test]
+    fn better_arm_wins_after_exploration() {
+        let r = Ucb1Router::new(&arms(&["good", "bad"]));
+        for _ in 0..50 {
+            r.record("good", true, 50.0);
+            r.record("bad", false, 50.0);
+        }
+        assert_eq!(r.select().unwrap(), "good");
+        assert!(r.score("good") > r.score("bad"));
+    }
+
+    #[test]
+    fn fast_success_outranks_slow_success() {
+        let r = Ucb1Router::new(&arms(&["fast", "slow"]));
+        for _ in 0..100 {
+            r.record("fast", true, 50.0);
+            r.record("slow", true, 20_000.0);
+        }
+        let ranked = r.ranked();
+        assert_eq!(ranked[0].0, "fast");
+    }
+
+    #[test]
+    fn unknown_provider_is_ignored() {
+        let r = Ucb1Router::new(&arms(&["a"]));
+        r.record("ghost", true, 1.0); // no-op
+        assert_eq!(r.score("ghost"), f64::NEG_INFINITY);
+        assert_eq!(r.select().unwrap(), "a");
+    }
+
+    #[test]
+    fn concurrent_records_are_lock_free_and_consistent() {
+        let r = Arc::new(Ucb1Router::new(&arms(&["x", "y"])));
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let r = r.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..1000 {
+                    let p = if (t + i) % 2 == 0 { "x" } else { "y" };
+                    r.record(p, i % 3 != 0, 10.0 + i as f64);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let total: u64 = r.arms.iter().map(|(_, a)| a.pulls()).sum();
+        assert_eq!(total, 8000);
+        assert_eq!(r.total_pulls.load(Ordering::Acquire), 8000);
+    }
+
+    #[test]
+    fn empty_router_selects_none() {
+        let r = Ucb1Router::new(&[]);
+        assert!(r.select().is_none());
+    }
+}
