@@ -104,6 +104,11 @@ impl MaskCodec {
     pub fn mask(&mut self, text: &str) -> (String, Vec<MaskedSpan>) {
         let mut out = text.to_string();
         let mut spans = Vec::new();
+        // The benign-IP scan-past trick temporarily rewrites '.' to U+2024.
+        // If the input legitimately contains U+2024 the blanket restore at
+        // the end would corrupt it — disable the optimization in that
+        // (vanishingly rare) case and mask benign IPs like any other.
+        let sentinel_safe = !out.contains('\u{2024}');
         for (kind, re) in RULES.iter() {
             // Collect matches against the CURRENT text so successive rules
             // see prior placeholders (placeholders never re-match: they use
@@ -112,13 +117,11 @@ impl MaskCodec {
                 let found = re.find(&out).map(|m| (m.start(), m.end()));
                 let Some((s, e)) = found else { break };
                 let matched = out[s..e].to_string();
-                if *kind == "ipv4" && is_benign_ip(&matched) {
-                    // Skip benign IPs by temporarily replacing and restoring
-                    // after the loop is impossible with `find`; instead scan
-                    // past this occurrence by masking nothing and using a
-                    // bounded search window.
-                    // Simple approach: replace with a sentinel that cannot
-                    // re-match, then restore at the end.
+                if *kind == "ipv4" && is_benign_ip(&matched) && sentinel_safe {
+                    // Scan past a benign IP without masking it: `find`
+                    // restarts from the head, so rewrite its dots to a
+                    // sentinel that cannot re-match the pattern, then
+                    // restore all sentinels after the loop.
                     out.replace_range(s..e, &matched.replace('.', "\u{2024}"));
                     continue;
                 }
@@ -135,8 +138,8 @@ impl MaskCodec {
                 out.replace_range(s..e, &ph);
             }
         }
-        // Restore benign-IP sentinels.
-        if out.contains('\u{2024}') {
+        // Restore benign-IP sentinels (only ever inserted when sentinel_safe).
+        if sentinel_safe && out.contains('\u{2024}') {
             out = out.replace('\u{2024}', ".");
         }
         (out, spans)
@@ -268,6 +271,19 @@ mod tests {
     fn unmask_without_placeholders_is_identity() {
         let c = MaskCodec::new();
         assert_eq!(c.unmask("plain output"), "plain output");
+    }
+
+    #[test]
+    fn preexisting_sentinel_char_survives_masking() {
+        // Input legitimately containing U+2024 (ONE DOT LEADER) must not be
+        // corrupted by the benign-IP scan-past optimization.
+        let mut c = MaskCodec::new();
+        let text = "literal one-dot-leader: a\u{2024}b near 127.0.0.1";
+        let (masked, _) = c.mask(text);
+        assert!(masked.contains("a\u{2024}b"), "U+2024 must survive: {masked}");
+        // The benign IP is masked in this mode (sentinel trick disabled) —
+        // correctness over the false-positive optimization.
+        assert_eq!(c.unmask(&masked), text);
     }
 
     #[test]

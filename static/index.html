@@ -17,12 +17,12 @@
         <div class="brand-sub">Execution Kernel</div>
       </div>
     </div>
-    <nav class="nav">
-      <button class="nav-item active" data-view="dashboard">▦ Dashboard</button>
-      <button class="nav-item" data-view="console">⌘ Run Console</button>
-      <button class="nav-item" data-view="tasks">☰ Tasks</button>
-      <button class="nav-item" data-view="executions">↯ Executions</button>
-      <button class="nav-item" data-view="config">⚙ Configuration</button>
+    <nav class="nav" aria-label="Main navigation">
+      <button class="nav-item active" data-view="dashboard" title="Dashboard (1)">▦ Dashboard</button>
+      <button class="nav-item" data-view="console" title="Run Console (2)">⌘ Run Console</button>
+      <button class="nav-item" data-view="tasks" title="Tasks (3)">☰ Tasks</button>
+      <button class="nav-item" data-view="executions" title="Executions (4)">↯ Executions</button>
+      <button class="nav-item" data-view="config" title="Configuration (5)">⚙ Configuration</button>
     </nav>
     <div class="sidebar-foot">
       <div class="meta-rule">“Never spend more resources deciding than the decision can save.”</div>
@@ -34,8 +34,11 @@
     <!-- DASHBOARD -->
     <section class="view active" id="view-dashboard">
       <header class="view-head">
-        <h1>Dashboard</h1>
-        <p class="subtitle">Maximize <b>Value Delivered ÷ Total System Cost</b></p>
+        <div class="view-head-text">
+          <h1>Dashboard</h1>
+          <p class="subtitle">Maximize <b>Value Delivered ÷ Total System Cost</b></p>
+        </div>
+        <span class="last-updated" id="lastUpdated"></span>
       </header>
       <div class="kpi-grid" id="kpiGrid"></div>
       <div class="panel-grid">
@@ -75,12 +78,13 @@
       </header>
       <div class="panel">
         <label class="lbl" for="taskInput">Task</label>
-        <textarea id="taskInput" rows="3" placeholder="e.g. Fix the auth timeout bug in the session middleware"></textarea>
+        <textarea id="taskInput" rows="3" placeholder="e.g. Fix the auth timeout bug in the session middleware" autofocus></textarea>
         <label class="lbl" for="constraintsInput">Constraints (one per line, optional)</label>
         <textarea id="constraintsInput" rows="2" placeholder="must not change the public API"></textarea>
         <div class="btn-row">
-          <button class="btn ghost" id="btnRoute">Preview Route (free)</button>
-          <button class="btn primary" id="btnRun">Execute</button>
+          <button class="btn ghost" id="btnRoute" title="Preview route (Ctrl+Shift+Enter)">Preview Route (free)</button>
+          <button class="btn primary" id="btnRun" title="Execute (Ctrl+Enter)">Execute</button>
+          <span class="kbd-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> to execute · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> to preview</span>
         </div>
       </div>
       <div class="panel" id="routePreview" style="display:none">
@@ -126,6 +130,7 @@
     </section>
   </main>
 </div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

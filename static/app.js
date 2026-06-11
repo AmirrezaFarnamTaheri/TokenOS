@@ -32,15 +32,47 @@ const routeBadge = (route) => {
   return `<span class="badge route-${esc(cls)}">${esc(route || "—")}</span>`;
 };
 
+/* ---------- toasts ---------- */
+function toast(msg, kind = "") {
+  const host = $("#toasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  host.appendChild(el);
+  setTimeout(() => el.classList.add("hide"), 3600);
+  setTimeout(() => el.remove(), 4000);
+}
+
 /* ---------- navigation ---------- */
+function switchView(view) {
+  const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
+  if (!btn) return;
+  $$(".nav-item").forEach((b) => b.classList.remove("active"));
+  $$(".view").forEach((v) => v.classList.remove("active"));
+  btn.classList.add("active");
+  $("#view-" + view).classList.add("active");
+  refreshView(view);
+}
+
 $$(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    $$(".nav-item").forEach((b) => b.classList.remove("active"));
-    $$(".view").forEach((v) => v.classList.remove("active"));
-    btn.classList.add("active");
-    $("#view-" + btn.dataset.view).classList.add("active");
-    refreshView(btn.dataset.view);
-  });
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
+/* Keyboard shortcuts: 1-5 switch views, Ctrl+Enter executes, Ctrl+Shift+Enter previews */
+const VIEW_KEYS = { 1: "dashboard", 2: "console", 3: "tasks", 4: "executions", 5: "config" };
+document.addEventListener("keydown", (ev) => {
+  const inField = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (!inField && VIEW_KEYS[ev.key] && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    switchView(VIEW_KEYS[ev.key]);
+    return;
+  }
+  if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+    const consoleVisible = $("#view-console").classList.contains("active");
+    if (!consoleVisible) return;
+    ev.preventDefault();
+    (ev.shiftKey ? $("#btnRoute") : $("#btnRun")).click();
+  }
 });
 
 /* ---------- dashboard ---------- */
@@ -51,6 +83,8 @@ async function loadDashboard() {
       api("/api/stats/bandit").catch(() => null),
     ]);
     setConn(true);
+    const lu = $("#lastUpdated");
+    if (lu) lu.textContent = "updated " + new Date().toLocaleTimeString();
 
     $("#kpiGrid").innerHTML = [
       kpi("Cost / Success", fmtUSD(sum.cost_per_success), "accent"),
@@ -134,7 +168,9 @@ function constraintsList() {
 
 $("#btnRoute").addEventListener("click", async () => {
   const task = $("#taskInput").value.trim();
-  if (!task) return;
+  if (!task) { toast("Enter a task first.", "err"); return; }
+  const btn = $("#btnRoute");
+  btn.disabled = true;
   try {
     const r = await api("/api/route", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -158,14 +194,18 @@ $("#btnRoute").addEventListener("click", async () => {
   } catch (e) {
     $("#routePreviewBody").innerHTML = `<span class="badge fail">${esc(e.message)}</span>`;
     $("#routePreview").style.display = "";
+    toast("Route preview failed: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
   }
 });
 
 $("#btnRun").addEventListener("click", async () => {
   const task = $("#taskInput").value.trim();
-  if (!task) return;
+  if (!task) { toast("Enter a task first.", "err"); return; }
   const btn = $("#btnRun");
-  btn.disabled = true; btn.textContent = "Executing…";
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Executing…';
   try {
     const r = await api("/api/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -184,12 +224,22 @@ $("#btnRun").addEventListener("click", async () => {
         <dt>Retries</dt><dd>${fmtNum(res.retries)}</dd>
         ${r.error ? `<dt>Error</dt><dd><span class="badge fail">${esc(r.error)}</span></dd>` : ""}
       </dl>
-      <label class="lbl">Output</label>
-      <pre class="output">${esc(res.output || "(empty)")}</pre>`;
+      <div class="output-head">
+        <label class="lbl" style="margin:0">Output</label>
+        <button class="link-btn" id="btnCopyOutput">copy</button>
+      </div>
+      <pre class="output" id="runOutput">${esc(res.output || "(empty)")}</pre>`;
     $("#runResult").style.display = "";
+    $("#btnCopyOutput")?.addEventListener("click", () => {
+      navigator.clipboard.writeText($("#runOutput").textContent)
+        .then(() => toast("Output copied to clipboard.", "ok"))
+        .catch(() => toast("Copy failed.", "err"));
+    });
+    toast(res.success ? "Execution succeeded." : "Execution failed — see result panel.", res.success ? "ok" : "err");
   } catch (e) {
     $("#runResultBody").innerHTML = `<span class="badge fail">${esc(e.message)}</span>`;
     $("#runResult").style.display = "";
+    toast("Execution error: " + e.message, "err");
   } finally {
     btn.disabled = false; btn.textContent = "Execute";
   }
@@ -306,7 +356,11 @@ function refreshView(view) {
 
 loadDashboard();
 setInterval(() => {
+  if (document.hidden) return; // skip refresh when tab is in the background
   const active = document.querySelector(".nav-item.active")?.dataset.view;
   if (active === "dashboard") loadDashboard();
   else if (active === "executions") loadExecutions();
 }, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshView(document.querySelector(".nav-item.active")?.dataset.view || "dashboard");
+});

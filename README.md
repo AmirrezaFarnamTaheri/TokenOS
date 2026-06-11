@@ -14,6 +14,33 @@ actually requires generation.
 **Effective Cost Per Successful Task** — surfaced in `tokenos telemetry` and on the
 dashboard. Everything in the kernel exists to drive this number down.
 
+## Quick start
+
+```sh
+cargo build --release                          # no system deps; SQLite is bundled
+./target/release/tokenos config init           # write default config
+./target/release/tokenos route "fix typo"      # FREE routing preview — zero tokens
+./target/release/tokenos run "say hello" --dry-run   # full pipeline, fully offline
+./target/release/tokenos serve --dry-run       # dashboard at http://127.0.0.1:8080
+```
+
+No API key is needed for any of the above — the fault-injectable mock provider
+exercises the entire pipeline offline. See
+[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the five-minute tour.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Clone → offline run → dashboard → live providers |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dataflow, module invariants, routing ladder, bandit, persistence |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every YAML field, the filter matrix, env overrides |
+| [docs/CLI.md](docs/CLI.md) | Full command and flag reference with workflows |
+| [docs/API.md](docs/API.md) | HTTP API endpoints, shapes, auth, curl cookbook |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, masking, auth, parser safety, ops checklist |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Ground rules, testing conventions, PR checklist |
+
 ## Architecture
 
 ```
@@ -104,8 +131,8 @@ Escalations and ASK terminate locally at **zero LLM cost**.
 Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
-cargo build --release        # binary at target/release/tokenos
-cargo test                   # 157 unit tests across all subsystems
+cargo build --release        # binary at target/release/tokenos — zero warnings
+cargo test                   # 158 unit tests across all subsystems, fully offline
 ```
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
@@ -182,6 +209,12 @@ recorder directory).
 - **Tasks** — persisted state with flight-recorder trace timeline per task
 - **Executions** — full telemetry ledger
 - **Configuration** — read-only view (keys stay in env)
+
+Keyboard-first: views on keys `1`–`5`, `Ctrl+Enter` executes,
+`Ctrl+Shift+Enter` previews the route for free. Zero frontend dependencies —
+all assets are embedded in the binary at compile time.
+
+Full endpoint reference: [docs/API.md](docs/API.md).
 
 ## Design principles
 
