@@ -137,7 +137,15 @@ fn open_external(url: &str) -> Result<()> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Ok(());
     }
-    #[cfg(target_os = "linux")]
+    // BSDs share the xdg-open path with Linux — the native feature compiles
+    // for them (wry/tao gtk path), so `cmd` must be defined there too.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
     let cmd = "xdg-open";
     #[cfg(target_os = "macos")]
     let cmd = "open";

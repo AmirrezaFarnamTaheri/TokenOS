@@ -45,14 +45,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # "-latest" labels are intentionally dynamic (macos-latest is
+          # currently ARM64 and may migrate again); the arch suffix is
+          # derived from runner.arch at upload time so artifact names can
+          # never drift from the actual binary.
           - os: ubuntu-latest
-            artifact: tokenos-linux-x86_64
+            artifact: tokenos-linux
             binary: target/release/tokenos
           - os: macos-latest
-            artifact: tokenos-macos-aarch64
+            artifact: tokenos-macos
             binary: target/release/tokenos
           - os: windows-latest
-            artifact: tokenos-windows-x86_64
+            artifact: tokenos-windows
             binary: target/release/tokenos.exe
     runs-on: ${{ matrix.os }}
     steps:
@@ -77,7 +81,9 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          # runner.arch (X64 / ARM64) keeps the name truthful even when a
+          # "-latest" label migrates architectures.
+          name: ${{ matrix.artifact }}-${{ runner.arch }}
           path: ${{ matrix.binary }}
           retention-days: 14
 

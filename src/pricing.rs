@@ -132,12 +132,20 @@ impl Tracker {
     pub fn open_cooldown(&self, provider: &str) {
         let mut state = self.state.lock().unwrap();
         let h = state.entry(provider.to_string()).or_default();
+        // A streak only counts while the breaker window is still open: an
+        // isolated 429 long after the previous cooldown expired is a fresh
+        // incident, not an escalation — without this reset, sporadic rate
+        // limits accumulate into outage-grade backoff forever.
+        let now = Instant::now();
+        if matches!(h.cooldown_until, Some(until) if until <= now) {
+            h.consecutive_429s = 0;
+        }
         h.consecutive_429s = h.consecutive_429s.saturating_add(1);
         let shift = (h.consecutive_429s - 1).min(8);
         let dur = Self::COOLDOWN_BASE
             .saturating_mul(1u32 << shift)
             .min(Self::COOLDOWN_CAP);
-        h.cooldown_until = Some(Instant::now() + dur);
+        h.cooldown_until = Some(now + dur);
     }
 
     /// Clears the breaker after any successful (non-429) interaction.
@@ -177,8 +185,11 @@ pub fn quote_all(
 ) -> Vec<PriceQuote> {
     let mut quotes: Vec<PriceQuote> = Vec::with_capacity(cands.len());
     for c in cands {
-        // Hard constraint: context must fit.
-        if c.max_context > 0 && est_in > c.max_context {
+        // Hard constraint: context must fit BOTH the prompt and the output
+        // budget the route will actually request — admitting a provider
+        // whose window holds the prompt but not prompt+output trades a
+        // zero-cost local rejection for a guaranteed paid failure.
+        if c.max_context > 0 && est_in.saturating_add(est_out) > c.max_context {
             continue;
         }
         let cost = (est_in as f64 * c.cost_per_mtok_in + est_out as f64 * c.cost_per_mtok_out)
@@ -252,6 +263,57 @@ mod tests {
         c.max_context = 100;
         let q = quote_all(&[c], 0.9, 1000, 100, Weights::default(), None, &HashMap::new());
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn context_fit_includes_output_budget() {
+        // Prompt alone fits (900 <= 1000) but prompt + the route's output
+        // budget does not (900 + 200 > 1000): the provider must be rejected
+        // at quote time rather than failing at execution time.
+        let mut c = cand("tight", 0.1, 1);
+        c.max_context = 1000;
+        let q = quote_all(
+            &[c.clone()],
+            0.9,
+            900,
+            200,
+            Weights::default(),
+            None,
+            &HashMap::new(),
+        );
+        assert!(q.is_empty(), "prompt+output overflow must filter");
+        // Same provider admits when the combined size fits.
+        let q = quote_all(&[c], 0.9, 700, 200, Weights::default(), None, &HashMap::new());
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn cooldown_streak_resets_after_window_expires() {
+        // Two isolated 429s separated by an elapsed cooldown window must
+        // NOT escalate the backoff as if they were consecutive.
+        let t = Tracker::new();
+        t.open_cooldown("p");
+        // Simulate the window having elapsed by rewinding cooldown_until.
+        {
+            let mut state = t.state.lock().unwrap();
+            let h = state.get_mut("p").unwrap();
+            h.cooldown_until = Some(Instant::now() - Duration::from_secs(1));
+        }
+        assert!(!t.in_cooldown("p"), "window must be elapsed");
+        t.open_cooldown("p");
+        let state = t.state.lock().unwrap();
+        let h = state.get("p").unwrap();
+        // A fresh incident: streak restarted at 1, not escalated to 2.
+        assert_eq!(h.consecutive_429s, 1, "elapsed window resets the streak");
+    }
+
+    #[test]
+    fn consecutive_429s_inside_window_escalate() {
+        let t = Tracker::new();
+        t.open_cooldown("p");
+        t.open_cooldown("p"); // window still open — a real streak
+        let state = t.state.lock().unwrap();
+        assert_eq!(state.get("p").unwrap().consecutive_429s, 2);
     }
 
     #[test]

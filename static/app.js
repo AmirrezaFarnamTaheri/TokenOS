@@ -216,9 +216,14 @@ async function loadDashboard() {
           </tr>`).join("")
         : emptyRow(4, "No live-usage samples yet — calibration appears after provider-billed runs.");
       const cl = $("#cacheLine");
-      if (cl && drift && drift.solution_cache) {
-        const c = drift.solution_cache;
-        cl.textContent = `Solution cache: ${c.entries} verified entr${c.entries === 1 ? "y" : "ies"} · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
+      if (cl) {
+        if (drift && drift.solution_cache) {
+          const c = drift.solution_cache;
+          cl.textContent = `Solution cache: ${c.entries} verified entr${c.entries === 1 ? "y" : "ies"} · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
+        } else {
+          // Clear stale telemetry after a partial refresh failure.
+          cl.textContent = "";
+        }
       }
     }
 

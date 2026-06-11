@@ -339,7 +339,10 @@ impl Engine {
         if chain.is_empty() {
             return Err(anyhow!("no enabled providers for route {}", dec.route.as_str()));
         }
-        let quotes = self.quote(&chain, sig.confidence, est);
+        // The quote includes the route's output budget so the context-fit
+        // check covers prompt + allowed output, not just the prompt.
+        let est_out = dec.route.max_output_tokens().max(0) as usize;
+        let quotes = self.quote(&chain, sig.confidence, est, est_out);
         res.quotes = quotes.clone();
 
         // Evolution S29: budget sentinel. A hard per-task cost ceiling —
@@ -648,7 +651,13 @@ impl Engine {
     }
 
     /// Shadow pricing over the provider chain.
-    fn quote(&self, chain: &[String], confidence: f64, est_in: usize) -> Vec<PriceQuote> {
+    fn quote(
+        &self,
+        chain: &[String],
+        confidence: f64,
+        est_in: usize,
+        est_out: usize,
+    ) -> Vec<PriceQuote> {
         let mut cands = Vec::with_capacity(chain.len());
         let mut quota: HashMap<String, u32> = HashMap::new();
         for name in chain {
@@ -670,7 +679,7 @@ impl Engine {
         if w.alpha == 0.0 && w.beta == 0.0 {
             w = Weights::default();
         }
-        pricing::quote_all(&cands, confidence, est_in, 1024, w, Some(&self.tracker), &quota)
+        pricing::quote_all(&cands, confidence, est_in, est_out, w, Some(&self.tracker), &quota)
     }
 
     /// Two-tier filter matrix applied to the adapter's manifest.
