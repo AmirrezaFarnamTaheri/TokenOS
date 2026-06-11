@@ -116,6 +116,22 @@ ranked by score; an unexplored arm's score is the string `"unexplored"`
 }
 ```
 
+## GET `/api/stats/drift`
+
+Estimator calibration watchdog plus solution-cache counters. `ratio_ewma`
+is the EWMA of actual÷estimated input tokens (1.0 = perfectly calibrated);
+`drifting` becomes true after ≥ 5 samples outside the trusted band
+[0.75, 1.30].
+
+```json
+{
+  "providers": [
+    { "provider": "anthropic", "ratio_ewma": 1.04, "samples": 12, "drifting": false }
+  ],
+  "solution_cache": { "entries": 3, "zero_token_hits": 7 }
+}
+```
+
 ## GET `/api/executions`
 
 Most recent 200 telemetry rows (newest first):
@@ -263,6 +279,7 @@ B="http://127.0.0.1:8080"
 
 curl -s $B/api/summary -H "Authorization: Bearer $TOK" | jq
 curl -s $B/api/stats/bandit -H "Authorization: Bearer $TOK" | jq
+curl -s $B/api/stats/drift -H "Authorization: Bearer $TOK" | jq
 curl -s $B/api/route -H "Authorization: Bearer $TOK" \
      -H 'Content-Type: application/json' \
      -d '{"task":"fix typo in README"}' | jq

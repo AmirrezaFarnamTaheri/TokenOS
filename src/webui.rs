@@ -89,6 +89,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/stats/routes", get(handle_route_stats))
         .route("/api/stats/providers", get(handle_provider_stats))
         .route("/api/stats/bandit", get(handle_bandit_stats))
+        .route("/api/stats/drift", get(handle_drift_stats))
         .route("/api/executions", get(handle_executions))
         .route("/api/tasks", get(handle_tasks))
         .route("/api/config", get(handle_config))
@@ -177,6 +178,17 @@ async fn handle_bandit_stats(State(eng): State<Arc<Engine>>) -> Response {
         })
         .collect();
     ok_json(json!({ "exploration": eng.bandit.exploration, "arms": arms }))
+}
+
+/// Estimator drift watchdog (evolution S30): per-provider EWMA of
+/// actual/estimated input-token ratios plus the solution-cache counters
+/// (evolution S25).
+async fn handle_drift_stats(State(eng): State<Arc<Engine>>) -> Response {
+    let (cache_entries, cache_hits) = eng.store.solution_cache_stats().unwrap_or((0, 0));
+    ok_json(json!({
+        "providers": eng.drift.all(),
+        "solution_cache": { "entries": cache_entries, "zero_token_hits": cache_hits },
+    }))
 }
 
 async fn handle_executions(State(eng): State<Arc<Engine>>) -> Response {
@@ -285,6 +297,7 @@ mod tests {
             .unwrap(),
             tracker: Tracker::new(),
             bandit: crate::pricing::Ucb1Router::new(&arms),
+            drift: crate::pricing::DriftWatchdog::new(),
             indexer: None,
             dry_run: true,
             adapters: Default::default(),

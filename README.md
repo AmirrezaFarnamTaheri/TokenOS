@@ -125,6 +125,29 @@ Escalations and ASK terminate locally at **zero LLM cost**.
   secrets are replaced with stable placeholders before any network byte leaves
   the process, and echoes are restored on the response leg. The reverse vault
   lives only in the request's stack frame.
+- **Verified solution cache (S25)** — an exact goal+constraints re-request is
+  served from a durable SQLite cache at **zero tokens**. Only verified
+  successes are admitted; a later failure of the same goal evicts the entry.
+  Toggle with `policy.reuse_cache`.
+- **Rate-limit circuit breaker (S26)** — a 429 opens a per-provider breaker
+  with exponential backoff (5s → 120s cap); failover skips the provider while
+  the breaker is open. Retrying a provider that just said "stop" is
+  guaranteed waste.
+- **Route-scoped output budgets (S27)** — each route caps the output tokens it
+  may request: an ASK is one question (256), a PATCH is a minimal diff (2048),
+  only full builds get the wide ceiling (4096). Paying for headroom a route's
+  contract cannot use is pure waste.
+- **Context distillation (S28)** — the context block is distilled before
+  transmission: trailing whitespace stripped, blank-line runs collapsed,
+  duplicate index headers dropped (code lines are never deduplicated).
+  Deterministic and idempotent, so prompt-cache alignment is preserved.
+- **Budget sentinel (S29)** — `policy.max_cost_per_task_usd` sets a hard
+  per-task ceiling. Over-budget providers are pruned from the chain; if every
+  candidate exceeds the ceiling the run terminates locally at zero token cost.
+- **Estimator drift watchdog (S30)** — an EWMA of actual÷estimated token
+  ratios per provider flags calibration drift outside the trusted band
+  [0.75, 1.30]. Surfaced in `tokenos telemetry`, `/api/stats/drift`, and the
+  dashboard's Estimator Calibration panel.
 
 ## Build
 
@@ -132,7 +155,7 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos — zero warnings
-cargo test                   # 158 unit tests across all subsystems, fully offline
+cargo test                   # 170 unit tests across all subsystems, fully offline
 ```
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
@@ -168,6 +191,8 @@ policy:
   direct_max_tokens: 600
   delegation_penalty: 1500
   delegation_min_scale: 1.5
+  max_cost_per_task_usd: 0   # budget sentinel; 0 = disabled
+  reuse_cache: true          # verified solution cache
 providers:
   anthropic:
     adapter: anthropic

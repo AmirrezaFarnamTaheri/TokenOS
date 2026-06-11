@@ -78,9 +78,10 @@ document.addEventListener("keydown", (ev) => {
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
   try {
-    const [sum, routes, providers, bandit] = await Promise.all([
+    const [sum, routes, providers, bandit, drift] = await Promise.all([
       api("/api/summary"), api("/api/stats/routes"), api("/api/stats/providers"),
       api("/api/stats/bandit").catch(() => null),
+      api("/api/stats/drift").catch(() => null),
     ]);
     setConn(true);
     const lu = $("#lastUpdated");
@@ -134,6 +135,24 @@ async function loadDashboard() {
             <td>${a.ucb1_score === "unexplored" ? "<span class=\"hint\">unexplored</span>" : Number(a.ucb1_score).toFixed(3)}</td>
           </tr>`).join("")
         : emptyRow(5, "No bandit arms configured.");
+    }
+
+    const dt = $("#driftTable tbody");
+    if (dt) {
+      const provs2 = (drift && drift.providers) || [];
+      dt.innerHTML = provs2.length
+        ? provs2.map((d) => `<tr>
+            <td>${esc(d.provider)}</td>
+            <td>${fmtNum(d.samples)}</td>
+            <td>${Number(d.ratio_ewma).toFixed(3)}</td>
+            <td>${d.drifting ? '<span class="badge fail">DRIFTING</span>' : '<span class="badge ok">calibrated</span>'}</td>
+          </tr>`).join("")
+        : emptyRow(4, "No live-usage samples yet — calibration appears after provider-billed runs.");
+      const cl = $("#cacheLine");
+      if (cl && drift && drift.solution_cache) {
+        const c = drift.solution_cache;
+        cl.textContent = `Solution cache: ${c.entries} verified entr${c.entries === 1 ? "y" : "ies"} · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
+      }
     }
 
     const max = Math.max(1, ...(routes || []).map((r) => r.runs));

@@ -57,9 +57,13 @@ pub fn build(route: Route, st: &State) -> String {
     let _ = writeln!(b, "ROUTE: {route}");
     let _ = writeln!(b, "GOAL: {}", st.goal);
     if !st.context.is_empty() {
+        // Evolution S28: the context block is distilled before transmission —
+        // trailing whitespace, blank-line runs and exact duplicate lines are
+        // removed. Pure formatting weight never reaches the provider.
+        let ctx = distill_context(&st.context);
         b.push_str("CONTEXT (minimum viable):\n");
-        b.push_str(&st.context);
-        if !st.context.ends_with('\n') {
+        b.push_str(&ctx);
+        if !ctx.ends_with('\n') {
             b.push('\n');
         }
     }
@@ -106,6 +110,46 @@ fn build_delegation(st: &State) -> String {
         }
     }
     b
+}
+
+/// Evolution S28: context distillation. A purely lossless-in-meaning,
+/// lossy-in-bytes pass over the context block:
+///
+/// 1. trailing whitespace stripped from every line,
+/// 2. runs of blank lines collapsed to a single blank line,
+/// 3. duplicate symbol-header lines (`// file:span [kind name]` — emitted by
+///    the surgical index) dropped after first occurrence; overlapping index
+///    hits are the dominant duplication source. Code lines are NEVER
+///    deduplicated — repeated code is legitimate.
+///
+/// Deterministic and order-preserving — same input, same bytes out — so the
+/// JIT cache alignment above it is never destabilized.
+pub fn distill_context(ctx: &str) -> String {
+    use std::collections::HashSet;
+    let mut seen_headers: HashSet<&str> = HashSet::new();
+    let mut out = String::with_capacity(ctx.len());
+    let mut prev_blank = false;
+    for line in ctx.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if !prev_blank && !out.is_empty() {
+                out.push('\n');
+            }
+            prev_blank = true;
+            continue;
+        }
+        prev_blank = false;
+        // Header lines from contextidx look like "// path:12-40 [fn name]".
+        let is_index_header =
+            trimmed.starts_with("// ") && trimmed.contains(':') && trimmed.ends_with(']');
+        if is_index_header && !seen_headers.insert(trimmed) {
+            continue;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out.truncate(out.trim_end_matches('\n').len());
+    out
 }
 
 /// Applies the strict output contract: prioritize Markdown fence extraction
@@ -159,6 +203,39 @@ fn unwrap_fence(s: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::kernel::State;
+
+    /// Evolution S28: distillation strips trailing whitespace, collapses
+    /// blank-line runs and drops duplicate index headers — but never code.
+    #[test]
+    fn distill_removes_formatting_weight_only() {
+        let ctx = "// src/a.rs:1-5 [fn alpha]   \nfn alpha() {}\n\n\n\n// src/a.rs:1-5 [fn alpha]\nfn alpha() {}\nlet x = 1;   \nlet x = 1;\n";
+        let d = distill_context(ctx);
+        // Duplicate header dropped; duplicate CODE retained.
+        assert_eq!(d.matches("[fn alpha]").count(), 1);
+        assert_eq!(d.matches("let x = 1;").count(), 2);
+        // Blank-line runs collapsed; no trailing spaces survive.
+        assert!(!d.contains("\n\n\n"));
+        assert!(!d.lines().any(|l| l.ends_with(' ')));
+    }
+
+    /// Evolution S28: distillation is deterministic and idempotent.
+    #[test]
+    fn distill_is_idempotent() {
+        let ctx = "// f.rs:1-2 [fn f]\nbody\n\n\nmore\n";
+        let once = distill_context(ctx);
+        assert_eq!(distill_context(&once), once);
+    }
+
+    /// Evolution S28: distilled context flows into the built payload.
+    #[test]
+    fn build_uses_distilled_context() {
+        let mut st = State::new("t", "goal");
+        st.context = "line one   \n\n\n\nline two\n".into();
+        let p = build(Route::Implement, &st);
+        assert!(p.contains("line one\n"));
+        assert!(!p.contains("line one   "));
+        assert!(!p.contains("\n\n\n\n"));
+    }
 
     #[test]
     fn static_block_leads() {

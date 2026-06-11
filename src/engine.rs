@@ -13,7 +13,7 @@ use crate::contextidx::Indexer;
 use crate::kernel::{self, Decision, Route, Signals, State, Status};
 use crate::loopdetect::Detector;
 use crate::payload;
-use crate::pricing::{self, Candidate, PriceQuote, Tracker, Ucb1Router, Weights};
+use crate::pricing::{self, Candidate, DriftWatchdog, PriceQuote, Tracker, Ucb1Router, Weights};
 use crate::provider::{Adapter, Request};
 use crate::recorder::Recorder;
 use crate::store::{Execution, Store};
@@ -38,6 +38,10 @@ pub struct Engine {
     /// failover order toward arms that actually deliver, with guaranteed
     /// exploration of unpulled arms.
     pub bandit: Ucb1Router,
+    /// Estimator drift watchdog (evolution S30): EWMA of actual/estimated
+    /// token ratios per provider. Drift outside the trusted band means every
+    /// shadow price is silently degrading — surfaced in telemetry.
+    pub drift: DriftWatchdog,
     /// Optional surgical-context index (None when no workspace indexed).
     pub indexer: Option<Indexer>,
     /// Force the mock adapter regardless of config.
@@ -94,6 +98,20 @@ fn loop_scope(task: &str) -> String {
 /// Stable digest of the task text used to key failure memory (finding 12.2):
 /// "have we failed at THIS GOAL before?" must survive the random per-run
 /// task ID, so the key is derived from the goal itself.
+/// Cache key for the verified solution cache (evolution S25): the goal
+/// digest extended with the constraint set, so the same goal under different
+/// constraints never collides.
+fn solution_cache_key(task: &str, constraints: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(task.trim().as_bytes());
+    for c in constraints {
+        h.update(b"\x1f");
+        h.update(c.trim().as_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
 fn goal_hash(task: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(task.trim().as_bytes()))
@@ -121,6 +139,7 @@ impl Engine {
             recorder,
             tracker: Tracker::new(),
             bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
             indexer: None,
             dry_run: opt.dry_run,
             adapters: RwLock::new(HashMap::new()),
@@ -278,6 +297,35 @@ impl Engine {
             return Ok(res);
         }
 
+        // Evolution S25: verified solution cache. An exact goal+constraints
+        // re-request is served from the durable cache at ZERO tokens — the
+        // cheapest possible execution. Only verified successes are admitted
+        // (below), so a cache hit is by construction a verified answer.
+        // ASK is excluded: a question is a request for input, not a solution.
+        let cache_key = solution_cache_key(task, constraints);
+        if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
+            if let Ok(Some((cached_route, cached_out))) = self.store.cached_solution(&cache_key) {
+                warn_persist(
+                    "flight-recorder cache",
+                    self.recorder.record(
+                        &task_id,
+                        "cache",
+                        &format!("verified solution served from cache (route {cached_route}, zero tokens)"),
+                        cached_out.as_bytes(),
+                    ),
+                );
+                st.status = Status::Done;
+                st.next_action = String::new();
+                self.store.save_task(&mut st)?;
+                res.provider = "cache".into();
+                res.model = "solution-cache".into();
+                res.output = cached_out;
+                res.success = true;
+                self.record(&res, 0);
+                return Ok(res);
+            }
+        }
+
         // Step 5: payload serialization (static→dynamic, conclusions only).
         // Evolution section 24: secrets are masked at the edge BEFORE any
         // network byte leaves the process; the reverse vault lives only in
@@ -294,6 +342,37 @@ impl Engine {
         let quotes = self.quote(&chain, sig.confidence, est);
         res.quotes = quotes.clone();
 
+        // Evolution S29: budget sentinel. A hard per-task cost ceiling —
+        // candidates whose shadow-priced estimate exceeds it are pruned; if
+        // EVERY candidate exceeds it the run terminates locally at zero
+        // token cost. Spending over an explicit budget is never correct.
+        let budget = self.cfg.policy.max_cost_per_task_usd;
+        let over_budget: std::collections::HashSet<String> = if budget > 0.0 {
+            quotes
+                .iter()
+                .filter(|q| q.est_cost_usd > budget)
+                .map(|q| q.candidate.provider.clone())
+                .collect()
+        } else {
+            Default::default()
+        };
+        if budget > 0.0 && !quotes.is_empty() && over_budget.len() == quotes.len() {
+            let msg = format!(
+                "BUDGET-SENTINEL: every provider estimate exceeds the {budget:.4} USD per-task ceiling \u{2014} terminated locally at zero token cost"
+            );
+            warn_persist(
+                "flight-recorder budget",
+                self.recorder.record(&task_id, "budget", &msg, &[]),
+            );
+            st.status = Status::Blocked;
+            st.blocked = true;
+            st.next_action = "raise policy.max_cost_per_task_usd or reduce task scope".into();
+            self.store.save_task(&mut st)?;
+            res.output = msg;
+            self.record(&res, 0);
+            return Ok(res);
+        }
+
         // JSON-shaped goals get the lenient rescue pass (evolution S20):
         // a generation cut mid-stream is salvaged instead of discarded.
         let expects_json = task_expects_json(task, constraints);
@@ -305,6 +384,22 @@ impl Engine {
         let mut last_err: Option<anyhow::Error> = None;
 
         for prov_name in ordered_providers_banditized(&quotes, &chain, &self.bandit) {
+            // Evolution S29: skip candidates priced over the task budget.
+            if over_budget.contains(&prov_name) {
+                last_err = Some(anyhow!(
+                    "provider {prov_name} pruned: estimate exceeds the per-task budget"
+                ));
+                continue;
+            }
+            // Evolution S26: rate-limit circuit breaker. A provider that
+            // recently answered 429 is skipped while its cooldown is open —
+            // retrying it is guaranteed waste.
+            if self.tracker.in_cooldown(&prov_name) {
+                last_err = Some(anyhow!(
+                    "provider {prov_name} skipped: rate-limit cooldown open"
+                ));
+                continue;
+            }
             let adapter = match self.adapter(&prov_name) {
                 Ok(a) => a,
                 Err(e) => {
@@ -337,12 +432,23 @@ impl Engine {
                     route: dec.route.as_str().to_string(),
                     prompt: prompt.clone(),
                     model: model.clone(),
-                    max_out: 4096,
+                    // Evolution S27: route-scoped output budget — an ASK is
+                    // one question, a PATCH is a minimal diff; only full
+                    // builds get the wide ceiling.
+                    max_out: dec.route.max_output_tokens(),
                     timeout,
                 })
                 .await;
             let lat = start.elapsed().as_millis() as i64;
             self.tracker.record(&prov_name, lat as f64, resp.is_ok());
+            // Evolution S26: a 429 opens the provider's circuit breaker with
+            // exponential backoff; any non-429 outcome closes it.
+            match &resp {
+                Err(crate::provider::ProviderError::RateLimited) => {
+                    self.tracker.open_cooldown(&prov_name);
+                }
+                _ => self.tracker.clear_cooldown(&prov_name),
+            }
             // Feed the bandit (S19): transport failures earn zero reward
             // immediately; verified successes are credited after the static
             // check below so reward reflects useful output, not just bytes.
@@ -445,6 +551,14 @@ impl Engine {
                 continue;
             }
 
+            // Evolution S30: feed the estimator drift watchdog with the
+            // (estimate, actual) pair whenever the provider reports real
+            // usage. Drift outside the trusted band is surfaced in telemetry.
+            if resp.tokens_in > 0 {
+                self.drift
+                    .observe(&prov_name, tokenizer::estimate(&prompt) as i64, resp.tokens_in);
+            }
+
             let tokens_in = if resp.tokens_in == 0 {
                 tokenizer::estimate(&prompt) as i64
             } else {
@@ -476,6 +590,16 @@ impl Engine {
             warn_persist("loop window clear", self.store.clear_loop_history(&loop_key));
             warn_persist("failure memory clear", self.store.clear_goal_failures(&goal_key));
 
+            // Evolution S25: admit the VERIFIED output to the solution cache
+            // so an identical future request costs zero tokens. ASK outputs
+            // are questions, not solutions — never cached.
+            if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
+                warn_persist(
+                    "solution cache",
+                    self.store.cache_solution(&cache_key, dec.route.as_str(), &out),
+                );
+            }
+
             // Stop rule: acceptance satisfied, no known blocker => stop now.
             if dec.route == Route::Ask {
                 st.status = Status::Blocked;
@@ -492,6 +616,9 @@ impl Engine {
 
         st.status = Status::Failed;
         self.store.save_task(&mut st)?;
+        // Evolution S25: a failed goal must never serve a stale cached answer
+        // afterwards — the world has demonstrably changed.
+        warn_persist("solution cache evict", self.store.evict_solution(&cache_key));
         self.record(&res, res.latency_ms);
         let last = last_err.unwrap_or_else(|| anyhow!("all providers exhausted"));
         Err(anyhow!(
@@ -659,6 +786,7 @@ mod tests {
             .unwrap(),
             tracker: Tracker::new(),
             bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
             indexer: None,
             dry_run: true,
             adapters: RwLock::new(HashMap::new()),
@@ -792,6 +920,145 @@ mod tests {
         let (pulls, reward, _) = e.bandit.arm_stats(&r.provider);
         assert!(pulls >= 1, "successful run must credit the bandit arm");
         assert!(reward > 0.0);
+    }
+
+    /// Evolution S25: an identical goal+constraints re-request is served
+    /// from the verified solution cache at zero tokens.
+    #[tokio::test]
+    async fn verified_solution_is_served_from_cache() {
+        let e = test_engine();
+        let task = "rename variable alpha to beta in module gamma";
+        let r1 = e.run(task, &[]).await.unwrap();
+        assert!(r1.success);
+        assert_ne!(r1.provider, "cache");
+        let r2 = e.run(task, &[]).await.unwrap();
+        assert!(r2.success);
+        assert_eq!(r2.provider, "cache", "second identical run must hit the cache");
+        assert_eq!(r2.tokens_in, 0);
+        assert_eq!(r2.cost_usd, 0.0);
+        assert_eq!(r2.output, r1.output, "cache must return the verified output verbatim");
+        let (entries, hits) = e.store.solution_cache_stats().unwrap();
+        assert!(entries >= 1 && hits >= 1);
+    }
+
+    /// Evolution S25: different constraints must not collide in the cache.
+    #[tokio::test]
+    async fn cache_key_distinguishes_constraints() {
+        let e = test_engine();
+        let task = "rename function foo to bar across the crate";
+        let r1 = e.run(task, &[]).await.unwrap();
+        assert!(r1.success);
+        let r2 = e
+            .run(task, &["must not change the public API".into()])
+            .await
+            .unwrap();
+        assert_ne!(
+            r2.provider, "cache",
+            "different constraint set must miss the cache"
+        );
+    }
+
+    /// Evolution S25: caching can be disabled by policy.
+    #[tokio::test]
+    async fn cache_respects_policy_toggle() {
+        let mut e = test_engine();
+        e.cfg.policy.reuse_cache = false;
+        let task = "rename constant MAX_N to MAX_COUNT in lib.rs";
+        let r1 = e.run(task, &[]).await.unwrap();
+        assert!(r1.success);
+        let r2 = e.run(task, &[]).await.unwrap();
+        assert_ne!(r2.provider, "cache", "reuse_cache=false must always re-execute");
+    }
+
+    /// Evolution S26: a 429 opens the breaker; failover skips the provider
+    /// while the cooldown is open; any success closes it.
+    #[test]
+    fn rate_limit_breaker_opens_and_clears() {
+        let t = Tracker::new();
+        assert!(!t.in_cooldown("p"));
+        t.open_cooldown("p");
+        assert!(t.in_cooldown("p"), "breaker must be open right after a 429");
+        t.clear_cooldown("p");
+        assert!(!t.in_cooldown("p"), "success must close the breaker");
+    }
+
+    /// Evolution S27: output budgets are route-scoped and monotone in the
+    /// route's expected output size.
+    #[test]
+    fn route_scoped_output_budgets() {
+        assert_eq!(Route::Ask.max_output_tokens(), 256);
+        assert!(Route::Direct.max_output_tokens() < Route::Implement.max_output_tokens());
+        assert!(Route::Patch.max_output_tokens() < Route::Implement.max_output_tokens());
+        assert_eq!(Route::Implement.max_output_tokens(), 4096);
+        assert_eq!(
+            Route::EscalateConflict.max_output_tokens(),
+            0,
+            "escalations never reach a provider"
+        );
+    }
+
+    /// Evolution S29: when every quote exceeds the per-task ceiling the run
+    /// terminates locally — blocked, zero tokens, sentinel message recorded.
+    #[tokio::test]
+    async fn budget_sentinel_terminates_locally() {
+        let mut e = test_engine();
+        e.cfg.policy.max_cost_per_task_usd = 0.000001;
+        // Give the mock provider a non-zero price so its quote exceeds the
+        // microscopic ceiling above.
+        if let Some(p) = e.cfg.providers.get_mut("mock") {
+            p.cost_per_mtok_in = 100.0;
+            p.cost_per_mtok_out = 100.0;
+        }
+        let r = e
+            .run("implement a complete database migration subsystem", &[])
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("BUDGET-SENTINEL"), "got: {}", r.output);
+        assert_eq!(r.tokens_in, 0, "sentinel termination must cost zero tokens");
+        assert!(r.provider.is_empty(), "no provider may be contacted");
+    }
+
+    /// Evolution S30: the drift watchdog flags a calibration ratio outside
+    /// the trusted band only after enough samples accumulate.
+    #[test]
+    fn drift_watchdog_flags_sustained_drift() {
+        let w = DriftWatchdog::new();
+        // Within band: actual ≈ estimate.
+        for _ in 0..10 {
+            w.observe("calibrated", 1000, 1000);
+        }
+        assert!(!w.status("calibrated").drifting);
+        // Severe under-estimation: actual is double the estimate.
+        for i in 0..10 {
+            w.observe("drifty", 1000, 2000);
+            let st = w.status("drifty");
+            if i < 4 {
+                assert!(!st.drifting, "must not flag before MIN_SAMPLES");
+            }
+        }
+        let st = w.status("drifty");
+        assert!(st.drifting, "ratio_ewma={} must flag", st.ratio_ewma);
+        assert!(st.ratio_ewma > 1.5);
+        // Unknown provider: neutral, not drifting.
+        assert!(!w.status("never-seen").drifting);
+        // all() is deterministic and sorted.
+        let all = w.all();
+        assert_eq!(all.len(), 2);
+        assert!(all[0].provider < all[1].provider);
+    }
+
+    /// Evolution S25 (engine): cache keys are order-sensitive in constraints
+    /// and stable across whitespace.
+    #[test]
+    fn solution_cache_key_properties() {
+        let a = solution_cache_key("task", &["c1".into(), "c2".into()]);
+        let b = solution_cache_key("task", &["c2".into(), "c1".into()]);
+        assert_ne!(a, b, "constraint order is part of the contract");
+        assert_eq!(
+            solution_cache_key("  task  ", &[]),
+            solution_cache_key("task", &[])
+        );
     }
 
     #[test]

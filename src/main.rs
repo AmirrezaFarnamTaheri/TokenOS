@@ -308,6 +308,31 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     }
                 }
             }
+            // Verified solution cache (S25): durable, zero-token replays.
+            if let Ok((entries, hits)) = eng.store.solution_cache_stats() {
+                if entries > 0 {
+                    println!("\nSOLUTION CACHE: {entries} verified entr{} \u{00b7} {hits} zero-token hit{}",
+                        if entries == 1 { "y" } else { "ies" },
+                        if hits == 1 { "" } else { "s" });
+                }
+            }
+            // Estimator drift watchdog (S30) — process-local calibration.
+            let drift = eng.drift.all();
+            if !drift.is_empty() {
+                println!(
+                    "\n{:<14} {:>10} {:>12} {:>10}",
+                    "ESTIMATOR", "SAMPLES", "RATIO_EWMA", "STATUS"
+                );
+                for d in drift {
+                    println!(
+                        "{:<14} {:>10} {:>12.3} {:>10}",
+                        d.provider,
+                        d.samples,
+                        d.ratio_ewma,
+                        if d.drifting { "DRIFTING" } else { "ok" }
+                    );
+                }
+            }
             Ok(())
         }
         Command::Tasks { limit, engine: ef } => {

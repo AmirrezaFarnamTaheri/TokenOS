@@ -94,6 +94,19 @@ CREATE TABLE IF NOT EXISTS loop_history (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_loop_scope ON loop_history(scope, id);
+
+-- Evolution S25: verified solution cache. An exact goal+constraints
+-- re-request is the cheapest possible execution: zero tokens, zero network.
+-- Only VERIFIED successes are admitted; verification failures never poison
+-- the cache.
+CREATE TABLE IF NOT EXISTS solution_cache (
+    cache_key  TEXT PRIMARY KEY,
+    route      TEXT NOT NULL,
+    output     TEXT NOT NULL,
+    hits       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_hit_at TEXT
+);
 "#;
 
 impl Store {
@@ -361,6 +374,63 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
+    // Evolution S25: verified solution cache
+    // -----------------------------------------------------------------
+
+    /// Admits a verified output to the solution cache. Idempotent: a repeat
+    /// admission for the same key refreshes the stored output (last verified
+    /// answer wins).
+    pub fn cache_solution(&self, cache_key: &str, route: &str, output: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO solution_cache (cache_key, route, output, hits, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)
+             ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3",
+            params![cache_key, route, output, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Looks up a cached verified solution. A hit increments the hit counter
+    /// and stamps last_hit_at — telemetry for proving the cache pays rent.
+    pub fn cached_solution(&self, cache_key: &str) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT route, output FROM solution_cache WHERE cache_key = ?1",
+                params![cache_key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if row.is_some() {
+            conn.execute(
+                "UPDATE solution_cache SET hits = hits + 1, last_hit_at = ?2 WHERE cache_key = ?1",
+                params![cache_key, Utc::now().to_rfc3339()],
+            )?;
+        }
+        Ok(row)
+    }
+
+    /// Evicts one cached solution (e.g. when its goal later fails — a stale
+    /// answer must never be served after the world has changed).
+    pub fn evict_solution(&self, cache_key: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM solution_cache WHERE cache_key = ?1", params![cache_key])?;
+        Ok(())
+    }
+
+    /// (entries, total_hits) for the solution cache — surfaced in telemetry.
+    pub fn solution_cache_stats(&self) -> Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT COUNT(1), COALESCE(SUM(hits), 0) FROM solution_cache",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok(row)
+    }
+
+    // -----------------------------------------------------------------
     // Telemetry
     // -----------------------------------------------------------------
 
@@ -571,6 +641,26 @@ mod tests {
 
     fn mem() -> Store {
         Store::open(Some(Path::new(":memory:"))).unwrap()
+    }
+
+    /// Evolution S25: cache admit → hit (with counters) → evict → miss.
+    #[test]
+    fn solution_cache_lifecycle() {
+        let s = mem();
+        assert!(s.cached_solution("k1").unwrap().is_none());
+        s.cache_solution("k1", "IMPLEMENT", "the answer").unwrap();
+        let (route, out) = s.cached_solution("k1").unwrap().unwrap();
+        assert_eq!(route, "IMPLEMENT");
+        assert_eq!(out, "the answer");
+        let (entries, hits) = s.solution_cache_stats().unwrap();
+        assert_eq!((entries, hits), (1, 1));
+        // Re-admission refreshes the stored output.
+        s.cache_solution("k1", "PATCH", "newer answer").unwrap();
+        let (route2, out2) = s.cached_solution("k1").unwrap().unwrap();
+        assert_eq!((route2.as_str(), out2.as_str()), ("PATCH", "newer answer"));
+        // Eviction makes it a miss again.
+        s.evict_solution("k1").unwrap();
+        assert!(s.cached_solution("k1").unwrap().is_none());
     }
 
     #[test]

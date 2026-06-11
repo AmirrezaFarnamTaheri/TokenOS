@@ -61,6 +61,12 @@ struct Health {
     ewma_latency_ms: f64,
     fail_ewma: f64, // 0..1
     calls: Vec<Instant>,
+    /// Evolution S26: rate-limit circuit breaker. A 429 opens the breaker
+    /// until this instant; while open the provider is skipped in failover
+    /// (retrying a provider that just told us "stop" is guaranteed waste).
+    cooldown_until: Option<Instant>,
+    /// Consecutive 429s drive exponential backoff.
+    consecutive_429s: u32,
 }
 
 /// Accumulates live per-provider health metrics. Interior mutability via a
@@ -109,6 +115,46 @@ impl Tracker {
         match state.get(provider) {
             Some(h) => (h.ewma_latency_ms, h.fail_ewma, h.calls.len()),
             None => (0.0, 0.0, 0),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Evolution S26: rate-limit circuit breaker
+    // -----------------------------------------------------------------
+
+    /// Base cooldown applied on the first 429; doubles per consecutive 429
+    /// up to the cap. (5s, 10s, 20s, 40s, 80s, then capped at 120s.)
+    const COOLDOWN_BASE: Duration = Duration::from_secs(5);
+    const COOLDOWN_CAP: Duration = Duration::from_secs(120);
+
+    /// Opens (or extends, with exponential backoff) the provider's breaker
+    /// after a rate-limit response.
+    pub fn open_cooldown(&self, provider: &str) {
+        let mut state = self.state.lock().unwrap();
+        let h = state.entry(provider.to_string()).or_default();
+        h.consecutive_429s = h.consecutive_429s.saturating_add(1);
+        let shift = (h.consecutive_429s - 1).min(8);
+        let dur = Self::COOLDOWN_BASE
+            .saturating_mul(1u32 << shift)
+            .min(Self::COOLDOWN_CAP);
+        h.cooldown_until = Some(Instant::now() + dur);
+    }
+
+    /// Clears the breaker after any successful (non-429) interaction.
+    pub fn clear_cooldown(&self, provider: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(h) = state.get_mut(provider) {
+            h.cooldown_until = None;
+            h.consecutive_429s = 0;
+        }
+    }
+
+    /// True while the provider's breaker is open. Failover skips it.
+    pub fn in_cooldown(&self, provider: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        match state.get(provider).and_then(|h| h.cooldown_until) {
+            Some(t) => Instant::now() < t,
+            None => false,
         }
     }
 }
@@ -240,6 +286,91 @@ mod tests {
         let cands = vec![cand("bbb", 1.0, 2), cand("aaa", 1.0, 2)];
         let q = quote_all(&cands, 0.9, 1000, 500, Weights::default(), None, &HashMap::new());
         assert_eq!(q[0].candidate.provider, "aaa");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Evolution S30: estimator drift watchdog.
+//
+// The offline tokenizer estimates what the provider eventually bills. If the
+// estimator drifts (new model tokenizer, unusual content mix), every shadow
+// price and DIRECT-route ceiling silently degrades. The watchdog tracks an
+// EWMA of actual/estimated input-token ratios per provider and flags drift
+// once the calibration leaves the trusted band.
+// ---------------------------------------------------------------------------
+
+/// Drift band: ratios within [0.75, 1.30] are considered calibrated.
+/// (The estimator is deliberately conservative, so mild over-estimation —
+/// ratio < 1 — is expected and healthy.)
+const DRIFT_LOW: f64 = 0.75;
+const DRIFT_HIGH: f64 = 1.30;
+const DRIFT_EWMA_ALPHA: f64 = 0.2;
+/// Minimum samples before the watchdog renders a verdict.
+const DRIFT_MIN_SAMPLES: u64 = 5;
+
+/// Per-provider calibration snapshot reported by the watchdog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriftStatus {
+    pub provider: String,
+    /// EWMA of actual/estimated token ratios. 1.0 = perfectly calibrated.
+    pub ratio_ewma: f64,
+    pub samples: u64,
+    /// True once enough samples exist AND the ratio left the trusted band.
+    pub drifting: bool,
+}
+
+/// Lock-free estimator drift watchdog (evolution S30).
+#[derive(Debug, Default)]
+pub struct DriftWatchdog {
+    state: Mutex<HashMap<String, (f64, u64)>>, // provider -> (ewma, samples)
+}
+
+impl DriftWatchdog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds one observation: the estimate made before the call and the
+    /// actual billed input tokens reported by the provider. Ignores calls
+    /// where either side is zero (mock adapters, missing usage blocks).
+    pub fn observe(&self, provider: &str, estimated: i64, actual: i64) {
+        if estimated <= 0 || actual <= 0 {
+            return;
+        }
+        let ratio = actual as f64 / estimated as f64;
+        let mut st = self.state.lock().unwrap();
+        let e = st.entry(provider.to_string()).or_insert((ratio, 0));
+        e.0 = DRIFT_EWMA_ALPHA * ratio + (1.0 - DRIFT_EWMA_ALPHA) * e.0;
+        e.1 += 1;
+    }
+
+    /// Calibration status for one provider.
+    pub fn status(&self, provider: &str) -> DriftStatus {
+        let st = self.state.lock().unwrap();
+        let (ewma, samples) = st.get(provider).copied().unwrap_or((1.0, 0));
+        DriftStatus {
+            provider: provider.to_string(),
+            ratio_ewma: ewma,
+            samples,
+            drifting: samples >= DRIFT_MIN_SAMPLES && !(DRIFT_LOW..=DRIFT_HIGH).contains(&ewma),
+        }
+    }
+
+    /// All providers with at least one sample, sorted by name (deterministic).
+    pub fn all(&self) -> Vec<DriftStatus> {
+        let st = self.state.lock().unwrap();
+        let mut v: Vec<DriftStatus> = st
+            .iter()
+            .map(|(p, &(ewma, samples))| DriftStatus {
+                provider: p.clone(),
+                ratio_ewma: ewma,
+                samples,
+                drifting: samples >= DRIFT_MIN_SAMPLES
+                    && !(DRIFT_LOW..=DRIFT_HIGH).contains(&ewma),
+            })
+            .collect();
+        v.sort_by(|a, b| a.provider.cmp(&b.provider));
+        v
     }
 }
 
