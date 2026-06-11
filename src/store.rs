@@ -48,11 +48,13 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE TABLE IF NOT EXISTS failure_memory (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id   TEXT NOT NULL,
+    goal_hash TEXT NOT NULL DEFAULT '',
     action    TEXT NOT NULL,
     reason    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_failmem_task ON failure_memory(task_id);
+CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash);
 
 CREATE TABLE IF NOT EXISTS executions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +94,19 @@ CREATE TABLE IF NOT EXISTS loop_history (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_loop_scope ON loop_history(scope, id);
+
+-- Evolution S25: verified solution cache. An exact goal+constraints
+-- re-request is the cheapest possible execution: zero tokens, zero network.
+-- Only VERIFIED successes are admitted; verification failures never poison
+-- the cache.
+CREATE TABLE IF NOT EXISTS solution_cache (
+    cache_key  TEXT PRIMARY KEY,
+    route      TEXT NOT NULL,
+    output     TEXT NOT NULL,
+    hits       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_hit_at TEXT
+);
 "#;
 
 impl Store {
@@ -118,7 +133,48 @@ impl Store {
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA).context("migrate schema")?;
+        // Migration for pre-goal_hash databases (finding 12.3): the column
+        // addition is idempotent — the error on already-migrated DBs is
+        // expected and ignored, then the index creation is retried.
+        conn.execute(
+            "ALTER TABLE failure_memory ADD COLUMN goal_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
+            [],
+        )?;
+        // Backfill: rows recorded before the goal_hash column existed carry
+        // the '' default and are invisible to every goal-keyed read. Their
+        // task IDs still join to the tasks table, whose goal text yields the
+        // exact digest. One-time cost, idempotent (the WHERE clause empties).
+        Self::backfill_goal_hashes(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
+    }
+
+    /// Computes goal_hash for legacy failure_memory rows from tasks.goal.
+    /// Rows whose task no longer exists stay '' — unreachable either way.
+    fn backfill_goal_hashes(conn: &Connection) -> Result<()> {
+        let pairs: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT f.task_id, t.goal FROM failure_memory f
+                 JOIN tasks t ON t.task_id = f.task_id WHERE f.goal_hash = ''",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (task_id, goal) in pairs {
+            use sha2::{Digest, Sha256};
+            let gh = hex::encode(Sha256::digest(goal.trim().as_bytes()));
+            conn.execute(
+                "UPDATE failure_memory SET goal_hash = ?1 WHERE task_id = ?2 AND goal_hash = ''",
+                params![gh, task_id],
+            )?;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -183,19 +239,43 @@ impl Store {
     // Failure memory
     // -----------------------------------------------------------------
 
-    /// Stores a failure entry and prunes beyond the kernel cap.
-    pub fn record_failure(&self, task_id: &str, action: &str, reason: &str) -> Result<()> {
+    /// Stores a failure entry and prunes beyond the kernel cap. `goal_hash`
+    /// is the stable digest of the task text (finding 12.3): failure memory
+    /// is keyed by WHAT was attempted, not by the random per-run task ID, so
+    /// re-submitting the same failing goal is recognized across runs.
+    pub fn record_failure(
+        &self,
+        task_id: &str,
+        goal_hash: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO failure_memory (task_id, action, reason, created_at) VALUES (?1,?2,?3,?4)",
-            params![task_id, action, reason, Utc::now().to_rfc3339()],
+            "INSERT INTO failure_memory (task_id, goal_hash, action, reason, created_at) VALUES (?1,?2,?3,?4,?5)",
+            params![task_id, goal_hash, action, reason, Utc::now().to_rfc3339()],
         )?;
+        // Prune on the SAME key the reads use (goal_hash) — keeping the
+        // newest MAX_FAILURE_MEMORY rows per goal. Pruning by task_id would
+        // let a goal retried across many task IDs grow without bound while
+        // each task's slice stayed under the cap.
         conn.execute(
-            r#"DELETE FROM failure_memory WHERE task_id = ?1 AND id NOT IN (
-                 SELECT id FROM failure_memory WHERE task_id = ?1 ORDER BY id DESC LIMIT ?2
+            r#"DELETE FROM failure_memory WHERE goal_hash = ?1 AND id NOT IN (
+                 SELECT id FROM failure_memory WHERE goal_hash = ?1 ORDER BY id DESC LIMIT ?2
                )"#,
-            params![task_id, MAX_FAILURE_MEMORY as i64],
+            params![goal_hash, MAX_FAILURE_MEMORY as i64],
         )?;
+        // Legacy rows ('' goal_hash) are still capped per task so a
+        // pre-migration database cannot grow unbounded either.
+        if goal_hash.is_empty() {
+            conn.execute(
+                r#"DELETE FROM failure_memory WHERE task_id = ?1 AND goal_hash = '' AND id NOT IN (
+                     SELECT id FROM failure_memory WHERE task_id = ?1 AND goal_hash = ''
+                     ORDER BY id DESC LIMIT ?2
+                   )"#,
+                params![task_id, MAX_FAILURE_MEMORY as i64],
+            )?;
+        }
         Ok(())
     }
 
@@ -223,7 +303,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Whether an identical failed action exists.
+    /// Whether an identical failed action exists for a task.
     pub fn has_similar_failure(&self, task_id: &str, action: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(
@@ -232,6 +312,65 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    /// Whether ANY prior failure exists for this goal digest, regardless of
+    /// which task ID recorded it (finding 12.3 remediation: the old lookup
+    /// keyed on the freshly generated task ID and therefore always missed).
+    pub fn has_goal_failure(&self, goal_hash: &str) -> Result<bool> {
+        if goal_hash.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM failure_memory WHERE goal_hash=?1",
+            params![goal_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Recent failure reasons for a goal digest (newest first, capped) —
+    /// injected into the prompt's FAILURE MEMORY block on re-attempts.
+    pub fn goal_failures(&self, goal_hash: &str, limit: usize) -> Result<Vec<FailureEntry>> {
+        if goal_hash.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT action, reason, created_at FROM failure_memory
+             WHERE goal_hash = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![goal_hash, limit.max(1) as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (action, reason, ts) = row?;
+            let at = DateTime::parse_from_rfc3339(&ts)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            out.push(FailureEntry { action, reason, at });
+        }
+        Ok(out)
+    }
+
+    /// Clears the failure memory for a goal digest after a verified success
+    /// so a goal that eventually succeeded is no longer flagged as repeated.
+    pub fn clear_goal_failures(&self, goal_hash: &str) -> Result<()> {
+        if goal_hash.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM failure_memory WHERE goal_hash = ?1",
+            params![goal_hash],
+        )?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -276,6 +415,63 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM loop_history WHERE scope = ?1", params![scope])?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Evolution S25: verified solution cache
+    // -----------------------------------------------------------------
+
+    /// Admits a verified output to the solution cache. Idempotent: a repeat
+    /// admission for the same key refreshes the stored output (last verified
+    /// answer wins).
+    pub fn cache_solution(&self, cache_key: &str, route: &str, output: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO solution_cache (cache_key, route, output, hits, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)
+             ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3",
+            params![cache_key, route, output, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Looks up a cached verified solution. A hit increments the hit counter
+    /// and stamps last_hit_at — telemetry for proving the cache pays rent.
+    pub fn cached_solution(&self, cache_key: &str) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT route, output FROM solution_cache WHERE cache_key = ?1",
+                params![cache_key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if row.is_some() {
+            conn.execute(
+                "UPDATE solution_cache SET hits = hits + 1, last_hit_at = ?2 WHERE cache_key = ?1",
+                params![cache_key, Utc::now().to_rfc3339()],
+            )?;
+        }
+        Ok(row)
+    }
+
+    /// Evicts one cached solution (e.g. when its goal later fails — a stale
+    /// answer must never be served after the world has changed).
+    pub fn evict_solution(&self, cache_key: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM solution_cache WHERE cache_key = ?1", params![cache_key])?;
+        Ok(())
+    }
+
+    /// (entries, total_hits) for the solution cache — surfaced in telemetry.
+    pub fn solution_cache_stats(&self) -> Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT COUNT(1), COALESCE(SUM(hits), 0) FROM solution_cache",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok(row)
     }
 
     // -----------------------------------------------------------------
@@ -491,6 +687,26 @@ mod tests {
         Store::open(Some(Path::new(":memory:"))).unwrap()
     }
 
+    /// Evolution S25: cache admit → hit (with counters) → evict → miss.
+    #[test]
+    fn solution_cache_lifecycle() {
+        let s = mem();
+        assert!(s.cached_solution("k1").unwrap().is_none());
+        s.cache_solution("k1", "IMPLEMENT", "the answer").unwrap();
+        let (route, out) = s.cached_solution("k1").unwrap().unwrap();
+        assert_eq!(route, "IMPLEMENT");
+        assert_eq!(out, "the answer");
+        let (entries, hits) = s.solution_cache_stats().unwrap();
+        assert_eq!((entries, hits), (1, 1));
+        // Re-admission refreshes the stored output.
+        s.cache_solution("k1", "PATCH", "newer answer").unwrap();
+        let (route2, out2) = s.cached_solution("k1").unwrap().unwrap();
+        assert_eq!((route2.as_str(), out2.as_str()), ("PATCH", "newer answer"));
+        // Eviction makes it a miss again.
+        s.evict_solution("k1").unwrap();
+        assert!(s.cached_solution("k1").unwrap().is_none());
+    }
+
     #[test]
     fn task_roundtrip() {
         let s = mem();
@@ -506,7 +722,7 @@ mod tests {
         let mut st = State::new("t1", "g");
         s.save_task(&mut st).unwrap();
         for i in 0..8 {
-            s.record_failure("t1", &format!("a{i}"), "r").unwrap();
+            s.record_failure("t1", "gh1", &format!("a{i}"), "r").unwrap();
         }
         let f = s.failures("t1").unwrap();
         assert_eq!(f.len(), MAX_FAILURE_MEMORY);
@@ -514,13 +730,91 @@ mod tests {
     }
 
     #[test]
+    fn failure_memory_capped_per_goal_across_task_ids() {
+        // Review finding: pruning keyed by task_id let a goal retried under
+        // many task IDs grow without bound. Pruning must cap per goal_hash —
+        // the key every read uses.
+        let s = mem();
+        for i in 0..4 {
+            let mut st = State::new(format!("t{i}"), "same goal");
+            s.save_task(&mut st).unwrap();
+        }
+        // 8 failures for ONE goal spread across 4 task IDs (2 each — each
+        // task slice stays under the cap, so the old task-keyed prune would
+        // never delete anything).
+        for i in 0..8 {
+            s.record_failure(&format!("t{}", i % 4), "gh-same", &format!("a{i}"), "r")
+                .unwrap();
+        }
+        let f = s.goal_failures("gh-same", 100).unwrap();
+        assert_eq!(f.len(), MAX_FAILURE_MEMORY, "goal-keyed cap must hold");
+        // Newest rows survive (a7 first — goal_failures is newest-first).
+        assert_eq!(f[0].action, "a7");
+        assert_eq!(f.last().unwrap().action, "a3");
+        // Distinct goals never prune each other.
+        s.record_failure("tX", "gh-other", "b0", "r").unwrap();
+        assert_eq!(s.goal_failures("gh-other", 100).unwrap().len(), 1);
+        assert_eq!(s.goal_failures("gh-same", 100).unwrap().len(), MAX_FAILURE_MEMORY);
+    }
+
+    #[test]
+    fn legacy_goal_hash_rows_are_backfilled_on_open() {
+        // Rows written before the goal_hash migration carry '' and were
+        // invisible to goal-keyed reads. open() must backfill them from the
+        // tasks table's goal text.
+        let dir = std::env::temp_dir().join(format!(
+            "tokenos-backfill-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        {
+            let s = Store::open(Some(&db)).unwrap();
+            let mut st = State::new("legacy-task", "the legacy goal");
+            s.save_task(&mut st).unwrap();
+            // Simulate a pre-migration row: empty goal_hash.
+            s.record_failure("legacy-task", "", "old action", "old reason").unwrap();
+            assert!(!s.has_goal_failure(&gh("the legacy goal")).unwrap());
+        }
+        // Re-open: backfill runs.
+        let s = Store::open(Some(&db)).unwrap();
+        assert!(
+            s.has_goal_failure(&gh("the legacy goal")).unwrap(),
+            "backfilled row must be visible via goal_hash"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn gh(goal: &str) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(goal.trim().as_bytes()))
+    }
+
+    #[test]
     fn similar_failure_lookup() {
         let s = mem();
         let mut st = State::new("t1", "g");
         s.save_task(&mut st).unwrap();
-        s.record_failure("t1", "exact action", "r").unwrap();
+        s.record_failure("t1", "gh1", "exact action", "r").unwrap();
         assert!(s.has_similar_failure("t1", "exact action").unwrap());
         assert!(!s.has_similar_failure("t1", "other").unwrap());
+    }
+
+    #[test]
+    fn goal_failure_memory_crosses_task_ids() {
+        // Finding 12.3: the same goal failed under a DIFFERENT task ID must
+        // still register as a repeated failure on the next attempt.
+        let s = mem();
+        s.record_failure("task-aaaa", "gh-goal-1", "execute via mock", "boom").unwrap();
+        assert!(s.has_goal_failure("gh-goal-1").unwrap());
+        assert!(!s.has_goal_failure("gh-other").unwrap());
+        assert!(!s.has_goal_failure("").unwrap());
+        let f = s.goal_failures("gh-goal-1", 5).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].reason, "boom");
+        s.clear_goal_failures("gh-goal-1").unwrap();
+        assert!(!s.has_goal_failure("gh-goal-1").unwrap());
     }
 
     #[test]

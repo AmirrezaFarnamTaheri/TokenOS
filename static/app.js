@@ -32,24 +32,127 @@ const routeBadge = (route) => {
   return `<span class="badge route-${esc(cls)}">${esc(route || "—")}</span>`;
 };
 
+/* Plain-language explanations shown to newcomers in the route preview. */
+const ROUTE_EXPLAIN = {
+  REUSE: "A verified answer for this exact goal is already cached — it will be served for zero tokens.",
+  DIRECT: "Small and unambiguous — answered with a minimal prompt on the cheapest viable provider.",
+  PATCH: "A well-scoped edit — only the relevant context is sent, keeping the prompt tiny.",
+  IMPLEMENT: "Real generation work — the full pipeline runs with verification of the output.",
+  PARTIAL: "An interrupted task is resumed from its compressed saved state.",
+  DELEGATE: "Big enough to hand to a sub-agent with a compressed delegation packet.",
+  ASK: "Too ambiguous to execute safely — the cheapest action is a clarifying question.",
+  ESCALATE: "Repeated failures or loops were detected — a human should take a look.",
+};
+const routeExplain = (route) => {
+  const key = route && route.startsWith("ESCALATE") ? "ESCALATE" : route;
+  return ROUTE_EXPLAIN[key] || "";
+};
+
+/* ---------- toasts ---------- */
+function toast(msg, kind = "") {
+  const host = $("#toasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  host.appendChild(el);
+  setTimeout(() => el.classList.add("hide"), 3600);
+  setTimeout(() => el.remove(), 4000);
+}
+
+/* ---------- meta (mode badge, version) ---------- */
+async function loadMeta() {
+  try {
+    const m = await api("/api/meta");
+    const ml = $("#modeLine");
+    if (ml) {
+      ml.innerHTML = m.dry_run
+        ? '<span class="mode-badge dry">● DRY-RUN · offline, $0</span>'
+        : '<span class="mode-badge live">● LIVE · real providers</span>';
+      ml.title = m.dry_run
+        ? "Mock provider exercises the full pipeline offline — no API key, no spend."
+        : `Live mode — ${m.providers_enabled} of ${m.providers_total} providers enabled. Executions cost real money.`;
+    }
+    const vt = $("#verText");
+    if (vt) vt.textContent = "v" + m.version;
+  } catch { /* older server without /api/meta — badge stays hidden */ }
+}
+
 /* ---------- navigation ---------- */
+function switchView(view) {
+  const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
+  if (!btn) return;
+  $$(".nav-item").forEach((b) => b.classList.remove("active"));
+  $$(".view").forEach((v) => v.classList.remove("active"));
+  btn.classList.add("active");
+  $("#view-" + view).classList.add("active");
+  refreshView(view);
+}
+
 $$(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    $$(".nav-item").forEach((b) => b.classList.remove("active"));
-    $$(".view").forEach((v) => v.classList.remove("active"));
-    btn.classList.add("active");
-    $("#view-" + btn.dataset.view).classList.add("active");
-    refreshView(btn.dataset.view);
-  });
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
+/* Keyboard shortcuts: 1-5 switch views, Ctrl+Enter executes, Ctrl+Shift+Enter previews */
+const VIEW_KEYS = { 1: "dashboard", 2: "console", 3: "tasks", 4: "executions", 5: "config" };
+document.addEventListener("keydown", (ev) => {
+  const inField = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (!inField && VIEW_KEYS[ev.key] && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    switchView(VIEW_KEYS[ev.key]);
+    return;
+  }
+  if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+    const consoleVisible = $("#view-console").classList.contains("active");
+    if (!consoleVisible) return;
+    ev.preventDefault();
+    (ev.shiftKey ? $("#btnRoute") : $("#btnRun")).click();
+    return;
+  }
+  if (ev.key === "?" && !inField) { openHelp(); return; }
+  if (ev.key === "Escape") closeHelp();
+});
+
+/* ---------- help modal ---------- */
+function openHelp() { const m = $("#helpModal"); if (m) { m.style.display = ""; $("#helpClose")?.focus(); } }
+function closeHelp() { const m = $("#helpModal"); if (m) m.style.display = "none"; }
+$("#btnHelp")?.addEventListener("click", openHelp);
+$("#helpClose")?.addEventListener("click", closeHelp);
+$("#helpModal")?.addEventListener("click", (ev) => { if (ev.target === $("#helpModal")) closeHelp(); });
+
+/* ---------- welcome banner (first-run onboarding) ---------- */
+const WELCOME_KEY = "tokenos.welcome.dismissed";
+function maybeShowWelcome(sum) {
+  const b = $("#welcomeBanner");
+  if (!b) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(WELCOME_KEY) === "1"; } catch {}
+  const fresh = !sum || !sum.executions;
+  b.style.display = fresh && !dismissed ? "" : "none";
+}
+$("#welcomeClose")?.addEventListener("click", () => {
+  try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
+  $("#welcomeBanner").style.display = "none";
+});
+$("#welcomeHelp")?.addEventListener("click", openHelp);
+$("#welcomeTry")?.addEventListener("click", () => {
+  switchView("console");
+  $("#taskInput").value = "Fix the typo in the README header";
+  $("#taskInput").focus();
+  toast("Example loaded — click “Preview Route” to see the free routing decision.", "ok");
 });
 
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
   try {
-    const [sum, routes, providers] = await Promise.all([
+    const [sum, routes, providers, bandit, drift] = await Promise.all([
       api("/api/summary"), api("/api/stats/routes"), api("/api/stats/providers"),
+      api("/api/stats/bandit").catch(() => null),
+      api("/api/stats/drift").catch(() => null),
     ]);
     setConn(true);
+    const lu = $("#lastUpdated");
+    if (lu) lu.textContent = "updated " + new Date().toLocaleTimeString();
+    maybeShowWelcome(sum);
 
     $("#kpiGrid").innerHTML = [
       kpi("Cost / Success", fmtUSD(sum.cost_per_success), "accent"),
@@ -87,6 +190,43 @@ async function loadDashboard() {
         </tr>`).join("")
       : emptyRow(6, "No provider calls yet.");
 
+    const bt = $("#banditTable tbody");
+    if (bt) {
+      const arms = (bandit && bandit.arms) || [];
+      bt.innerHTML = arms.length
+        ? arms.map((a) => `<tr>
+            <td>${esc(a.provider)}</td>
+            <td>${fmtNum(a.pulls)}</td>
+            <td>${a.pulls ? Number(a.mean_reward).toFixed(3) : "—"}</td>
+            <td>${a.pulls ? fmtMS(a.mean_latency_ms) : "—"}</td>
+            <td>${a.ucb1_score === "unexplored" ? "<span class=\"hint\">unexplored</span>" : Number(a.ucb1_score).toFixed(3)}</td>
+          </tr>`).join("")
+        : emptyRow(5, "No bandit arms configured.");
+    }
+
+    const dt = $("#driftTable tbody");
+    if (dt) {
+      const provs2 = (drift && drift.providers) || [];
+      dt.innerHTML = provs2.length
+        ? provs2.map((d) => `<tr>
+            <td>${esc(d.provider)}</td>
+            <td>${fmtNum(d.samples)}</td>
+            <td>${Number(d.ratio_ewma).toFixed(3)}</td>
+            <td>${d.drifting ? '<span class="badge fail">DRIFTING</span>' : '<span class="badge ok">calibrated</span>'}</td>
+          </tr>`).join("")
+        : emptyRow(4, "No live-usage samples yet — calibration appears after provider-billed runs.");
+      const cl = $("#cacheLine");
+      if (cl) {
+        if (drift && drift.solution_cache) {
+          const c = drift.solution_cache;
+          cl.textContent = `Solution cache: ${c.entries} verified entr${c.entries === 1 ? "y" : "ies"} · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
+        } else {
+          // Clear stale telemetry after a partial refresh failure.
+          cl.textContent = "";
+        }
+      }
+    }
+
     const max = Math.max(1, ...(routes || []).map((r) => r.runs));
     $("#routeBars").innerHTML = (routes || []).length
       ? routes.map((r) => `<div class="bar-row">
@@ -113,13 +253,31 @@ function setConn(ok, msg) {
 }
 
 /* ---------- console ---------- */
+$$(".chip[data-example]").forEach((chip) =>
+  chip.addEventListener("click", () => {
+    $("#taskInput").value = chip.dataset.example;
+    $("#constraintsInput").value = "";
+    $("#taskInput").focus();
+    toast("Example loaded — preview the route for free, then execute.", "ok");
+  }));
+
+$("#btnClear")?.addEventListener("click", () => {
+  $("#taskInput").value = "";
+  $("#constraintsInput").value = "";
+  $("#routePreview").style.display = "none";
+  $("#runResult").style.display = "none";
+  $("#taskInput").focus();
+});
+
 function constraintsList() {
   return $("#constraintsInput").value.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 $("#btnRoute").addEventListener("click", async () => {
   const task = $("#taskInput").value.trim();
-  if (!task) return;
+  if (!task) { toast("Enter a task first.", "err"); return; }
+  const btn = $("#btnRoute");
+  btn.disabled = true;
   try {
     const r = await api("/api/route", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -129,7 +287,9 @@ $("#btnRoute").addEventListener("click", async () => {
     const sigChips = Object.entries(s)
       .filter(([k, v]) => typeof v === "boolean")
       .map(([k, v]) => `<span class="sig ${v ? "on" : ""}">${esc(k)}</span>`).join("");
+    const explain = routeExplain(d.route);
     $("#routePreviewBody").innerHTML = `
+      ${explain ? `<div class="route-explain">${routeBadge(d.route)} ${esc(explain)}</div>` : ""}
       <dl class="kv">
         <dt>Route</dt><dd>${routeBadge(d.route)}</dd>
         <dt>Reason</dt><dd>${esc(d.reason)}</dd>
@@ -138,19 +298,24 @@ $("#btnRoute").addEventListener("click", async () => {
         <dt>Context tokens (est)</dt><dd>${fmtNum(r.context_tokens)}</dd>
         <dt>Provider chain</dt><dd>${(r.provider_chain || []).map(esc).join(" → ") || "—"}</dd>
       </dl>
-      <div class="signals">${sigChips}</div>`;
+      <div class="signals">${sigChips}</div>
+      <div class="hint" style="margin-top:8px">This decision was made entirely in code — zero tokens were spent.</div>`;
     $("#routePreview").style.display = "";
   } catch (e) {
     $("#routePreviewBody").innerHTML = `<span class="badge fail">${esc(e.message)}</span>`;
     $("#routePreview").style.display = "";
+    toast("Route preview failed: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
   }
 });
 
 $("#btnRun").addEventListener("click", async () => {
   const task = $("#taskInput").value.trim();
-  if (!task) return;
+  if (!task) { toast("Enter a task first.", "err"); return; }
   const btn = $("#btnRun");
-  btn.disabled = true; btn.textContent = "Executing…";
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Executing…';
   try {
     const r = await api("/api/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -169,34 +334,55 @@ $("#btnRun").addEventListener("click", async () => {
         <dt>Retries</dt><dd>${fmtNum(res.retries)}</dd>
         ${r.error ? `<dt>Error</dt><dd><span class="badge fail">${esc(r.error)}</span></dd>` : ""}
       </dl>
-      <label class="lbl">Output</label>
-      <pre class="output">${esc(res.output || "(empty)")}</pre>`;
+      <div class="output-head">
+        <label class="lbl" style="margin:0">Output</label>
+        <button class="link-btn" id="btnCopyOutput">copy</button>
+      </div>
+      <pre class="output" id="runOutput">${esc(res.output || "(empty)")}</pre>`;
     $("#runResult").style.display = "";
+    $("#btnCopyOutput")?.addEventListener("click", () => {
+      navigator.clipboard.writeText($("#runOutput").textContent)
+        .then(() => toast("Output copied to clipboard.", "ok"))
+        .catch(() => toast("Copy failed.", "err"));
+    });
+    toast(res.success ? "Execution succeeded." : "Execution failed — see result panel.", res.success ? "ok" : "err");
   } catch (e) {
     $("#runResultBody").innerHTML = `<span class="badge fail">${esc(e.message)}</span>`;
     $("#runResult").style.display = "";
+    toast("Execution error: " + e.message, "err");
   } finally {
     btn.disabled = false; btn.textContent = "Execute";
   }
 });
 
 /* ---------- tasks ---------- */
+let tasksCache = [];
+function renderTasks() {
+  const q = ($("#taskFilter")?.value || "").trim().toLowerCase();
+  const rows = q
+    ? tasksCache.filter((t) =>
+        (t.task_id + " " + t.goal + " " + t.status).toLowerCase().includes(q))
+    : tasksCache;
+  const tb = $("#tasksTable tbody");
+  tb.innerHTML = rows.length
+    ? rows.map((t) => `<tr>
+        <td>${esc(t.task_id)}</td>
+        <td class="goal-cell">${esc(t.goal)}</td>
+        <td><span class="badge status status-${esc(t.status)}">${esc(t.status)}</span></td>
+        <td>${t.blocked ? "⚠" : ""}</td>
+        <td>${fmtTime(t.updated_at)}</td>
+        <td><button class="link-btn" data-trace="${esc(t.task_id)}">view</button></td>
+      </tr>`).join("")
+    : emptyRow(6, tasksCache.length ? "No tasks match the filter." : "No tasks yet — run one from the console.");
+  tb.querySelectorAll("[data-trace]").forEach((b) =>
+    b.addEventListener("click", () => loadTrace(b.dataset.trace)));
+}
+$("#taskFilter")?.addEventListener("input", renderTasks);
+
 async function loadTasks() {
   try {
-    const tasks = await api("/api/tasks");
-    const tb = $("#tasksTable tbody");
-    tb.innerHTML = (tasks || []).length
-      ? tasks.map((t) => `<tr>
-          <td>${esc(t.task_id)}</td>
-          <td class="goal-cell">${esc(t.goal)}</td>
-          <td><span class="badge status status-${esc(t.status)}">${esc(t.status)}</span></td>
-          <td>${t.blocked ? "⚠" : ""}</td>
-          <td>${fmtTime(t.updated_at)}</td>
-          <td><button class="link-btn" data-trace="${esc(t.task_id)}">view</button></td>
-        </tr>`).join("")
-      : emptyRow(6, "No tasks yet.");
-    tb.querySelectorAll("[data-trace]").forEach((b) =>
-      b.addEventListener("click", () => loadTrace(b.dataset.trace)));
+    tasksCache = (await api("/api/tasks")) || [];
+    renderTasks();
   } catch (e) { setConn(false, e.message); }
 }
 
@@ -217,24 +403,39 @@ async function loadTrace(taskID) {
 }
 
 /* ---------- executions ---------- */
+let execCache = [];
+function renderExecutions() {
+  const q = ($("#execFilter")?.value || "").trim().toLowerCase();
+  const st = $("#execStatusFilter")?.value || "";
+  const rows = execCache.filter((e) => {
+    if (st === "ok" && !e.success) return false;
+    if (st === "fail" && e.success) return false;
+    if (q && !((e.task_id + " " + e.route + " " + (e.provider || "")).toLowerCase().includes(q))) return false;
+    return true;
+  });
+  const tb = $("#execTable tbody");
+  tb.innerHTML = rows.length
+    ? rows.map((e) => `<tr>
+        <td>${e.id}</td>
+        <td>${esc(e.task_id)}</td>
+        <td>${routeBadge(e.route)}</td>
+        <td>${esc(e.provider || "—")}</td>
+        <td>${fmtNum(e.tokens_in)}</td>
+        <td>${fmtNum(e.tokens_out)}</td>
+        <td>${fmtMS(e.latency_ms)}</td>
+        <td>${fmtNum(e.retries)}</td>
+        <td>${fmtUSD(e.est_cost_usd)}</td>
+        <td>${e.success ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
+      </tr>`).join("")
+    : emptyRow(10, execCache.length ? "No executions match the filter." : "No executions recorded — run a task from the console.");
+}
+$("#execFilter")?.addEventListener("input", renderExecutions);
+$("#execStatusFilter")?.addEventListener("change", renderExecutions);
+
 async function loadExecutions() {
   try {
-    const execs = await api("/api/executions");
-    const tb = $("#execTable tbody");
-    tb.innerHTML = (execs || []).length
-      ? execs.map((e) => `<tr>
-          <td>${e.id}</td>
-          <td>${esc(e.task_id)}</td>
-          <td>${routeBadge(e.route)}</td>
-          <td>${esc(e.provider || "—")}</td>
-          <td>${fmtNum(e.tokens_in)}</td>
-          <td>${fmtNum(e.tokens_out)}</td>
-          <td>${fmtMS(e.latency_ms)}</td>
-          <td>${fmtNum(e.retries)}</td>
-          <td>${fmtUSD(e.est_cost_usd)}</td>
-          <td>${e.success ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
-        </tr>`).join("")
-      : emptyRow(10, "No executions recorded.");
+    execCache = (await api("/api/executions")) || [];
+    renderExecutions();
   } catch (e) { setConn(false, e.message); }
 }
 
@@ -289,9 +490,14 @@ function refreshView(view) {
   else if (view === "config") loadConfig();
 }
 
+loadMeta();
 loadDashboard();
 setInterval(() => {
+  if (document.hidden) return; // skip refresh when tab is in the background
   const active = document.querySelector(".nav-item.active")?.dataset.view;
   if (active === "dashboard") loadDashboard();
   else if (active === "executions") loadExecutions();
 }, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshView(document.querySelector(".nav-item.active")?.dataset.view || "dashboard");
+});

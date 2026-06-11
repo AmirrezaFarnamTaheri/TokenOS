@@ -14,24 +14,61 @@ actually requires generation.
 **Effective Cost Per Successful Task** — surfaced in `tokenos telemetry` and on the
 dashboard. Everything in the kernel exists to drive this number down.
 
+## Quick start
+
+```sh
+cargo build --release                          # no system deps; SQLite is bundled
+./target/release/tokenos config init           # write default config
+./target/release/tokenos route "fix typo"      # FREE routing preview — zero tokens
+./target/release/tokenos run "say hello" --dry-run   # full pipeline, fully offline
+./target/release/tokenos serve --dry-run       # dashboard at http://127.0.0.1:8080
+```
+
+Prefer a native desktop window over a browser tab?
+
+```sh
+cargo build --release --features native        # system-webview shell (Linux: needs WebKitGTK)
+./target/release/tokenos app --dry-run         # same dashboard, native window, loopback-only
+```
+
+No API key is needed for any of the above — the fault-injectable mock provider
+exercises the entire pipeline offline. See
+[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the five-minute tour.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Clone → offline run → dashboard → live providers |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dataflow, module invariants, routing ladder, bandit, persistence |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every YAML field, the filter matrix, env overrides |
+| [docs/CLI.md](docs/CLI.md) | Full command and flag reference with workflows |
+| [docs/API.md](docs/API.md) | HTTP API endpoints, shapes, auth, curl cookbook |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, masking, auth, parser safety, ops checklist |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Ground rules, testing conventions, PR checklist |
+
 ## Architecture
 
 ```
 src/
+  lib.rs               Library crate root (kernel embeddable in other runtimes)
   main.rs              CLI (clap) + embedded web GUI entrypoint
-  kernel.rs            Deterministic router: route ladder, signals, policy, state
+  kernel.rs            Deterministic router: route ladder, signals, policy, state, delegation packet
   config.rs            YAML config, provider chains, two-tier model filter matrix
   engine.rs            Orchestrator: route → context → payload → failover → verify → record
   provider.rs          Adapters: mock (fault-injectable), OpenAI, Anthropic, Gemini, proxy-IDE
-  pricing.rs           Shadow pricing  U = confidence / (α·cost + β·latency)  + EWMA trackers
+  pricing.rs           Shadow pricing U = confidence/(α·cost + β·latency) + EWMA + lock-free UCB1 bandit
   payload.rs           JIT cache-aligned prompt builder (static → semi-static → volatile)
   verify.rs            Tiered verification: free static checks before any LLM call
-  tokenizer.rs         Offline token estimator (no network, no model)
-  loopdetect.rs        Semantic loop detection via Levenshtein distance ceiling (3%)
+  tokenizer.rs         Offline token estimator + greedy BPE counter (conservative budgeting)
+  jsonrescue.rs        Single-pass truncated-JSON rescuer (EOF as soft boundary)
+  maskcodec.rs         Edge secret-masking codec (mask outbound, unmask echoes)
+  loopdetect.rs        Semantic loop detection: Myers bit-parallel Levenshtein, 3% ceiling
   contextidx.rs        Surgical context: structural symbol index (FTS5, LIKE fallback)
-  store.rs             SQLite state store: tasks, failure memory (max 5), loop history, telemetry
+  store.rs             SQLite state store: tasks, goal-keyed failure memory, loop history, telemetry
   recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON)
-  webui.rs             Lock-free axum control panel (dashboard, run console, traces, config)
+  webui.rs             Lock-free axum control panel (dashboard, run console, traces, bandit, config)
 static/                Embedded dashboard assets (index.html, app.js, style.css)
 ```
 
@@ -71,15 +108,78 @@ Escalations and ASK terminate locally at **zero LLM cost**.
   (SHA-256) outside the conversation, so debugging never consumes context tokens.
 - **Tiered verification** — free static checks (diff shape for PATCH, single-question
   contract for ASK, brace balance, truncation detection) run before anything costs.
+- **UCB1 bandit failover (S19)** — a lock-free multi-armed bandit over the provider
+  fleet scales each shadow-priced utility by live observed evidence
+  (`0.5 + mean_reward` for explored arms; neutral `1.0` for unexplored arms so
+  shadow pricing alone decides and every arm is still explored). Verified
+  successes earn latency-discounted reward; transport failures and
+  verification failures earn zero. Standings surface in `tokenos telemetry`,
+  `/api/stats/bandit`, and the dashboard.
+- **Truncated-JSON rescue (S20)** — when the goal demands JSON, a generation cut
+  mid-stream (timeout, token limit) is repaired by a single-pass lenient parser
+  instead of being discarded: strings cut at EOF keep their partial contents,
+  dangling keys are dropped, open containers are closed. A truncation guard
+  refuses to "repair" prose that merely starts with a bracket. Every rescue is
+  logged to the flight recorder at zero token cost.
+- **Conservative token budgeting (S23)** — routing estimates take the max of the
+  calibrated chars/token heuristic and a greedy longest-match BPE segmenter, so
+  a route is never selected on an underestimate.
+- **Delegation packets** — `DELEGATE` routes transmit a minimal JSON contract
+  (task, scope, constraints, acceptance, next step) — conclusions only, no
+  history, no reasoning.
+- **Edge secret masking (S24)** — outbound prompts are scanned for API keys,
+  tokens, private-key blocks, passwords, connection strings, emails and IPs;
+  secrets are replaced with stable placeholders before any network byte leaves
+  the process, and echoes are restored on the response leg. The reverse vault
+  lives only in the request's stack frame.
+- **Verified solution cache (S25)** — an exact goal+constraints re-request is
+  served from a durable SQLite cache at **zero tokens**. Only verified
+  successes are admitted; a later failure of the same goal evicts the entry.
+  Toggle with `policy.reuse_cache`.
+- **Rate-limit circuit breaker (S26)** — a 429 opens a per-provider breaker
+  with exponential backoff (5s → 120s cap); failover skips the provider while
+  the breaker is open. Retrying a provider that just said "stop" is
+  guaranteed waste.
+- **Route-scoped output budgets (S27)** — each route caps the output tokens it
+  may request: an ASK is one question (256), a PATCH is a minimal diff (2048),
+  only full builds get the wide ceiling (4096). Paying for headroom a route's
+  contract cannot use is pure waste.
+- **Context distillation (S28)** — the context block is distilled before
+  transmission: trailing whitespace stripped, blank-line runs collapsed,
+  duplicate index headers dropped (code lines are never deduplicated).
+  Deterministic and idempotent, so prompt-cache alignment is preserved.
+- **Budget sentinel (S29)** — `policy.max_cost_per_task_usd` sets a hard
+  per-task ceiling. Over-budget providers are pruned from the chain; if every
+  candidate exceeds the ceiling the run terminates locally at zero token cost.
+- **Estimator drift watchdog (S30)** — an EWMA of actual÷estimated token
+  ratios per provider flags calibration drift outside the trusted band
+  [0.75, 1.30]. Surfaced in `tokenos telemetry`, `/api/stats/drift`, and the
+  dashboard's Estimator Calibration panel.
 
 ## Build
 
 Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
-cargo build --release        # binary at target/release/tokenos
-cargo test                   # 89 unit tests across all subsystems
+cargo build --release        # binary at target/release/tokenos — zero warnings
+cargo test                   # 177 unit tests across all subsystems, fully offline
 ```
+
+The optional **native desktop app** (`tokenos app`) is feature-gated so
+headless/server builds stay dependency-free:
+
+```sh
+# Linux build deps (Debian/Ubuntu): WebKitGTK for the system webview
+sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+cargo build --release --features native
+```
+
+macOS (WKWebView) and Windows (WebView2) need no extra packages. CI builds
+native binaries for all three platforms on every push
+(`.github/workflows-staged/ci.yml` — see its README for one-step activation) and attaches them to tagged releases.
+
+The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
+kernel can be embedded inside other agent runtimes.
 
 ## Usage
 
@@ -111,6 +211,8 @@ policy:
   direct_max_tokens: 600
   delegation_penalty: 1500
   delegation_min_scale: 1.5
+  max_cost_per_task_usd: 0   # budget sentinel; 0 = disabled
+  reuse_cache: true          # verified solution cache
 providers:
   anthropic:
     adapter: anthropic
@@ -145,12 +247,31 @@ recorder directory).
 
 `tokenos serve` embeds a zero-dependency GUI:
 
-- **Dashboard** — cost-per-success KPI, route distribution, per-provider stats
+- **Dashboard** — cost-per-success KPI, route distribution, per-provider stats,
+  live UCB1 bandit standings (`/api/stats/bandit`)
 - **Run console** — free route preview (signals + provider chain + token estimates)
   before committing to a paid execution
 - **Tasks** — persisted state with flight-recorder trace timeline per task
 - **Executions** — full telemetry ledger
 - **Configuration** — read-only view (keys stay in env)
+
+Keyboard-first: views on keys `1`–`5`, `Ctrl+Enter` executes,
+`Ctrl+Shift+Enter` previews the route for free. Zero frontend dependencies —
+all assets are embedded in the binary at compile time.
+
+Full endpoint reference: [docs/API.md](docs/API.md).
+
+### Native desktop app
+
+`tokenos app` (build feature `native`) wraps the SAME dashboard in a system
+webview window (WebKitGTK / WKWebView / WebView2 via `wry`):
+
+- the axum control plane binds an **ephemeral loopback port** (127.0.0.1:0)
+  on a background runtime — the kernel never faces a network in app mode
+- the window closing tears down the whole process, server included
+- external links open in the system browser; the control panel itself can
+  never be navigated away from the kernel
+- engine, API, auth model and frontend bytes are identical to `tokenos serve`
 
 ## Design principles
 

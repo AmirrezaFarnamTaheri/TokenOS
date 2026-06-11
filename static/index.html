@@ -17,16 +17,18 @@
         <div class="brand-sub">Execution Kernel</div>
       </div>
     </div>
-    <nav class="nav">
-      <button class="nav-item active" data-view="dashboard">▦ Dashboard</button>
-      <button class="nav-item" data-view="console">⌘ Run Console</button>
-      <button class="nav-item" data-view="tasks">☰ Tasks</button>
-      <button class="nav-item" data-view="executions">↯ Executions</button>
-      <button class="nav-item" data-view="config">⚙ Configuration</button>
+    <div class="mode-line" id="modeLine" title="Execution mode"></div>
+    <nav class="nav" aria-label="Main navigation">
+      <button class="nav-item active" data-view="dashboard" title="Dashboard (1)">▦ Dashboard</button>
+      <button class="nav-item" data-view="console" title="Run Console (2)">⌘ Run Console</button>
+      <button class="nav-item" data-view="tasks" title="Tasks (3)">☰ Tasks</button>
+      <button class="nav-item" data-view="executions" title="Executions (4)">↯ Executions</button>
+      <button class="nav-item" data-view="config" title="Configuration (5)">⚙ Configuration</button>
     </nav>
     <div class="sidebar-foot">
       <div class="meta-rule">“Never spend more resources deciding than the decision can save.”</div>
-      <div class="conn"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <button class="help-btn" id="btnHelp" title="Help & glossary (?)">? Help &amp; shortcuts</button>
+      <div class="conn"><span class="dot" id="connDot"></span><span id="connText">connecting…</span><span class="ver" id="verText"></span></div>
     </div>
   </aside>
 
@@ -34,13 +36,30 @@
     <!-- DASHBOARD -->
     <section class="view active" id="view-dashboard">
       <header class="view-head">
-        <h1>Dashboard</h1>
-        <p class="subtitle">Maximize <b>Value Delivered ÷ Total System Cost</b></p>
+        <div class="view-head-text">
+          <h1>Dashboard</h1>
+          <p class="subtitle">Maximize <b>Value Delivered ÷ Total System Cost</b></p>
+        </div>
+        <span class="last-updated" id="lastUpdated"></span>
       </header>
+      <div class="welcome" id="welcomeBanner" style="display:none">
+        <button class="welcome-close" id="welcomeClose" title="Dismiss" aria-label="Dismiss welcome banner">×</button>
+        <h2>👋 Welcome to TokenOS</h2>
+        <p>This kernel routes agent tasks <b>deterministically — with zero tokens</b> — and only calls a model when generation is truly needed. Nothing has run yet, so here's how to see it work:</p>
+        <ol class="welcome-steps">
+          <li><b>Open the Run Console</b> (press <kbd>2</kbd> or click ⌘ in the sidebar).</li>
+          <li><b>Preview a route for free</b> — the router decides DIRECT / PATCH / IMPLEMENT / ASK in pure code.</li>
+          <li><b>Execute</b> — in dry-run mode the mock provider exercises the full pipeline offline, no API key needed.</li>
+        </ol>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn primary" id="welcomeTry">Try an example task →</button>
+          <button class="btn ghost" id="welcomeHelp">What do these terms mean?</button>
+        </div>
+      </div>
       <div class="kpi-grid" id="kpiGrid"></div>
       <div class="panel-grid">
         <div class="panel">
-          <div class="panel-head"><h2>Route Effectiveness</h2><span class="hint">cost per success is the metric that matters</span></div>
+          <div class="panel-head"><h2>Route Effectiveness <span class="info-tip" data-tip="Each route is a rung on the execution ladder: REUSE serves cached answers, DIRECT answers tiny tasks cheaply, PATCH edits, IMPLEMENT generates, DELEGATE hands off, ASK requests clarification. Lower cost-per-success = better.">ⓘ</span></h2><span class="hint">cost per success is the metric that matters</span></div>
           <div class="table-wrap"><table id="routeTable">
             <thead><tr><th>Route</th><th>Runs</th><th>Success</th><th>Avg Tok In</th><th>Avg Tok Out</th><th>Avg Latency</th><th>Cost/Success</th></tr></thead>
             <tbody></tbody>
@@ -52,6 +71,21 @@
             <thead><tr><th>Provider</th><th>Runs</th><th>Success</th><th>Avg Latency</th><th>Tokens</th><th>Cost</th></tr></thead>
             <tbody></tbody>
           </table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Bandit Standings <span class="info-tip" data-tip="A UCB1 multi-armed bandit learns which provider actually delivers. Higher mean reward = more verified successes; unexplored arms are guaranteed a trial.">ⓘ</span></h2><span class="hint">UCB1 — live failover evidence (this process)</span></div>
+          <div class="table-wrap"><table id="banditTable">
+            <thead><tr><th>Arm</th><th>Pulls</th><th>Mean Reward</th><th>Mean Latency</th><th>UCB1 Score</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Estimator Calibration <span class="info-tip" data-tip="Compares provider-billed token counts to the kernel's local estimates. A ratio drifting far from 1.0 means cost predictions are silently degrading.">ⓘ</span></h2><span class="hint">actual ÷ estimated tokens — drift watchdog</span></div>
+          <div class="table-wrap"><table id="driftTable">
+            <thead><tr><th>Provider</th><th>Samples</th><th>Ratio (EWMA)</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+          <div class="hint" id="cacheLine" style="margin-top:10px"></div>
         </div>
       </div>
       <div class="panel">
@@ -67,13 +101,22 @@
         <p class="subtitle">Route deterministically (zero tokens) — then execute</p>
       </header>
       <div class="panel">
+        <div class="examples">
+          <span class="examples-label">Try an example:</span>
+          <button class="chip" data-example="Fix the typo in the README header">fix a typo</button>
+          <button class="chip" data-example="Implement a rate limiter middleware with a token bucket algorithm, configurable per-route limits, and unit tests">implement a feature</button>
+          <button class="chip" data-example="Refactor the session handler to do the thing better">vague task (routes to ASK)</button>
+          <button class="chip" data-example="Return a JSON object with fields name, version and a list of three dependencies">JSON-shaped output</button>
+        </div>
         <label class="lbl" for="taskInput">Task</label>
-        <textarea id="taskInput" rows="3" placeholder="e.g. Fix the auth timeout bug in the session middleware"></textarea>
+        <textarea id="taskInput" rows="3" placeholder="e.g. Fix the auth timeout bug in the session middleware" autofocus></textarea>
         <label class="lbl" for="constraintsInput">Constraints (one per line, optional)</label>
         <textarea id="constraintsInput" rows="2" placeholder="must not change the public API"></textarea>
         <div class="btn-row">
-          <button class="btn ghost" id="btnRoute">Preview Route (free)</button>
-          <button class="btn primary" id="btnRun">Execute</button>
+          <button class="btn ghost" id="btnRoute" title="Preview route (Ctrl+Shift+Enter)">Preview Route (free)</button>
+          <button class="btn primary" id="btnRun" title="Execute (Ctrl+Enter)">Execute</button>
+          <button class="btn ghost subtle" id="btnClear" title="Clear the form">Clear</button>
+          <span class="kbd-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> to execute · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> to preview</span>
         </div>
       </div>
       <div class="panel" id="routePreview" style="display:none">
@@ -88,7 +131,10 @@
 
     <!-- TASKS -->
     <section class="view" id="view-tasks">
-      <header class="view-head"><h1>Tasks</h1><p class="subtitle">Compressed state objects — never transcripts</p></header>
+      <header class="view-head">
+        <div class="view-head-text"><h1>Tasks</h1><p class="subtitle">Compressed state objects — never transcripts</p></div>
+        <input type="text" class="filter-input" id="taskFilter" placeholder="Filter tasks…" aria-label="Filter tasks">
+      </header>
       <div class="panel">
         <div class="table-wrap"><table id="tasksTable">
           <thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Blocked</th><th>Updated</th><th>Trace</th></tr></thead>
@@ -103,7 +149,17 @@
 
     <!-- EXECUTIONS -->
     <section class="view" id="view-executions">
-      <header class="view-head"><h1>Executions</h1><p class="subtitle">Telemetry event stream</p></header>
+      <header class="view-head">
+        <div class="view-head-text"><h1>Executions</h1><p class="subtitle">Telemetry event stream</p></div>
+        <div class="filter-row">
+          <select id="execStatusFilter" class="filter-input" aria-label="Filter by status">
+            <option value="">all results</option>
+            <option value="ok">successes only</option>
+            <option value="fail">failures only</option>
+          </select>
+          <input type="text" class="filter-input" id="execFilter" placeholder="Filter by task / route / provider…" aria-label="Filter executions">
+        </div>
+      </header>
       <div class="panel">
         <div class="table-wrap"><table id="execTable">
           <thead><tr><th>#</th><th>Task</th><th>Route</th><th>Provider</th><th>Tok In</th><th>Tok Out</th><th>Latency</th><th>Retries</th><th>Cost</th><th>OK</th></tr></thead>
@@ -119,6 +175,56 @@
     </section>
   </main>
 </div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- HELP MODAL -->
+<div class="modal-backdrop" id="helpModal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="helpTitle">Help &amp; Glossary</h2>
+      <button class="welcome-close" id="helpClose" aria-label="Close help">×</button>
+    </div>
+    <div class="modal-body">
+      <h3>What is TokenOS?</h3>
+      <p>A deterministic execution kernel for LLM agents. Routing, verification, loop detection and provider choice happen <b>in code, with zero tokens</b> — the model is only invoked for work that truly requires generation. The headline metric is <b>cost per successful task</b>.</p>
+
+      <h3>Keyboard shortcuts</h3>
+      <table class="help-table">
+        <tr><td><kbd>1</kbd>–<kbd>5</kbd></td><td>Switch views (Dashboard / Console / Tasks / Executions / Config)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Execute the task in the Run Console</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>Free route preview (zero tokens)</td></tr>
+        <tr><td><kbd>?</kbd></td><td>Open this help panel</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Close this help panel</td></tr>
+      </table>
+
+      <h3>Route types</h3>
+      <table class="help-table">
+        <tr><td><span class="badge route-REUSE">REUSE</span></td><td>A verified answer for this exact goal already exists — served from cache for zero tokens.</td></tr>
+        <tr><td><span class="badge route-DIRECT">DIRECT</span></td><td>Tiny, unambiguous task — answered with a minimal prompt on the cheapest provider.</td></tr>
+        <tr><td><span class="badge route-PATCH">PATCH</span></td><td>Small, well-scoped edit to existing material.</td></tr>
+        <tr><td><span class="badge route-IMPLEMENT">IMPLEMENT</span></td><td>Real generation work — full pipeline with verification.</td></tr>
+        <tr><td><span class="badge route-PARTIAL">PARTIAL</span></td><td>Resume an interrupted task from its saved state.</td></tr>
+        <tr><td><span class="badge route-DELEGATE">DELEGATE</span></td><td>Big enough to hand to a sub-agent with a compressed delegation packet.</td></tr>
+        <tr><td><span class="badge route-ASK">ASK</span></td><td>The task is too ambiguous — the cheapest action is asking a clarifying question.</td></tr>
+        <tr><td><span class="badge route-ESC">ESCALATE</span></td><td>Repeated failures or loops detected — a human should look.</td></tr>
+      </table>
+
+      <h3>Glossary</h3>
+      <table class="help-table">
+        <tr><td><b>Dry-run mode</b></td><td>A fault-injectable mock provider exercises the full pipeline offline. No API key, no spend — perfect for evaluation.</td></tr>
+        <tr><td><b>Shadow pricing</b></td><td>Every candidate provider is priced in code before any call; the cheapest viable one goes first.</td></tr>
+        <tr><td><b>UCB1 bandit</b></td><td>A learning algorithm that balances trying providers (exploration) with using the proven best one (exploitation).</td></tr>
+        <tr><td><b>Drift watchdog</b></td><td>Compares billed token counts to local estimates; flags providers whose cost predictions are off.</td></tr>
+        <tr><td><b>Solution cache</b></td><td>Verified outputs keyed by goal + constraints; an identical request is replayed for zero tokens.</td></tr>
+        <tr><td><b>Flight recorder</b></td><td>A per-task trace of decisions, prompts, responses, rescues and verification — open any task to inspect it.</td></tr>
+      </table>
+
+      <h3>Going live</h3>
+      <p>Stop the server and restart without <code class="inline">--dry-run</code>, with provider API keys exported (e.g. <code class="inline">ANTHROPIC_API_KEY</code>). See <code class="inline">docs/GETTING_STARTED.md</code> for the full tour.</p>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

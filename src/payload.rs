@@ -12,7 +12,7 @@
 //! └──────────────────────────────────────────────┘
 //! ```
 
-use crate::kernel::{Route, State};
+use crate::kernel::{DelegationPacket, Route, State};
 use std::fmt::Write as _;
 
 /// The tiny worker contract. Workers are not smart; the orchestration layer
@@ -30,6 +30,12 @@ Rules:
 /// Produces the final prompt for a given route and state, with static content
 /// first and volatile content last.
 pub fn build(route: Route, st: &State) -> String {
+    // DELEGATE routes transmit the minimal contract — conclusions only, no
+    // history, no reasoning — serialized as a compact DelegationPacket.
+    if route == Route::Delegate {
+        return build_delegation(st);
+    }
+
     let mut b = String::with_capacity(1024);
 
     // --- STATIC BLOCK ---
@@ -51,9 +57,13 @@ pub fn build(route: Route, st: &State) -> String {
     let _ = writeln!(b, "ROUTE: {route}");
     let _ = writeln!(b, "GOAL: {}", st.goal);
     if !st.context.is_empty() {
+        // Evolution S28: the context block is distilled before transmission —
+        // trailing whitespace, blank-line runs and exact duplicate lines are
+        // removed. Pure formatting weight never reaches the provider.
+        let ctx = distill_context(&st.context);
         b.push_str("CONTEXT (minimum viable):\n");
-        b.push_str(&st.context);
-        if !st.context.ends_with('\n') {
+        b.push_str(&ctx);
+        if !ctx.ends_with('\n') {
             b.push('\n');
         }
     }
@@ -67,6 +77,79 @@ pub fn build(route: Route, st: &State) -> String {
         let _ = writeln!(b, "NEXT ACTION: {}", st.next_action);
     }
     b
+}
+
+/// Serializes the DELEGATE prompt around a `DelegationPacket`: the static
+/// kernel contract leads (cache-aligned), then the packet as compact JSON.
+/// State is preferred over summaries; the packet carries conclusions only.
+fn build_delegation(st: &State) -> String {
+    let packet = DelegationPacket {
+        task: st.goal.clone(),
+        scope: if st.context.is_empty() {
+            "self-contained; no external context required".to_string()
+        } else {
+            st.context.clone()
+        },
+        constraints: st.constraints.clone(),
+        acceptance: "output satisfies the task exactly; no scope expansion".to_string(),
+        next_step: if st.next_action.is_empty() {
+            "complete the delegated work and stop".to_string()
+        } else {
+            st.next_action.clone()
+        },
+    };
+    let mut b = String::with_capacity(1024);
+    b.push_str(KERNEL_CONTRACT);
+    b.push_str("\n\nROUTE: DELEGATE\nDELEGATION PACKET (complete contract; no further context will follow):\n");
+    b.push_str(&serde_json::to_string(&packet).unwrap_or_else(|_| st.goal.clone()));
+    b.push('\n');
+    if !st.failures.is_empty() {
+        b.push_str("FAILURE MEMORY (do not repeat):\n");
+        for f in &st.failures {
+            let _ = writeln!(b, "- failed: {} | reason: {}", f.action, f.reason);
+        }
+    }
+    b
+}
+
+/// Evolution S28: context distillation. A purely lossless-in-meaning,
+/// lossy-in-bytes pass over the context block:
+///
+/// 1. trailing whitespace stripped from every line,
+/// 2. runs of blank lines collapsed to a single blank line,
+/// 3. duplicate symbol-header lines (`// file:span [kind name]` — emitted by
+///    the surgical index) dropped after first occurrence; overlapping index
+///    hits are the dominant duplication source. Code lines are NEVER
+///    deduplicated — repeated code is legitimate.
+///
+/// Deterministic and order-preserving — same input, same bytes out — so the
+/// JIT cache alignment above it is never destabilized.
+pub fn distill_context(ctx: &str) -> String {
+    use std::collections::HashSet;
+    let mut seen_headers: HashSet<&str> = HashSet::new();
+    let mut out = String::with_capacity(ctx.len());
+    let mut prev_blank = false;
+    for line in ctx.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if !prev_blank && !out.is_empty() {
+                out.push('\n');
+            }
+            prev_blank = true;
+            continue;
+        }
+        prev_blank = false;
+        // Header lines from contextidx look like "// path:12-40 [fn name]".
+        let is_index_header =
+            trimmed.starts_with("// ") && trimmed.contains(':') && trimmed.ends_with(']');
+        if is_index_header && !seen_headers.insert(trimmed) {
+            continue;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out.truncate(out.trim_end_matches('\n').len());
+    out
 }
 
 /// Applies the strict output contract: prioritize Markdown fence extraction
@@ -121,6 +204,39 @@ mod tests {
     use super::*;
     use crate::kernel::State;
 
+    /// Evolution S28: distillation strips trailing whitespace, collapses
+    /// blank-line runs and drops duplicate index headers — but never code.
+    #[test]
+    fn distill_removes_formatting_weight_only() {
+        let ctx = "// src/a.rs:1-5 [fn alpha]   \nfn alpha() {}\n\n\n\n// src/a.rs:1-5 [fn alpha]\nfn alpha() {}\nlet x = 1;   \nlet x = 1;\n";
+        let d = distill_context(ctx);
+        // Duplicate header dropped; duplicate CODE retained.
+        assert_eq!(d.matches("[fn alpha]").count(), 1);
+        assert_eq!(d.matches("let x = 1;").count(), 2);
+        // Blank-line runs collapsed; no trailing spaces survive.
+        assert!(!d.contains("\n\n\n"));
+        assert!(!d.lines().any(|l| l.ends_with(' ')));
+    }
+
+    /// Evolution S28: distillation is deterministic and idempotent.
+    #[test]
+    fn distill_is_idempotent() {
+        let ctx = "// f.rs:1-2 [fn f]\nbody\n\n\nmore\n";
+        let once = distill_context(ctx);
+        assert_eq!(distill_context(&once), once);
+    }
+
+    /// Evolution S28: distilled context flows into the built payload.
+    #[test]
+    fn build_uses_distilled_context() {
+        let mut st = State::new("t", "goal");
+        st.context = "line one   \n\n\n\nline two\n".into();
+        let p = build(Route::Implement, &st);
+        assert!(p.contains("line one\n"));
+        assert!(!p.contains("line one   "));
+        assert!(!p.contains("\n\n\n\n"));
+    }
+
     #[test]
     fn static_block_leads() {
         let st = State::new("t", "do the thing");
@@ -165,5 +281,32 @@ mod tests {
     #[test]
     fn extract_plain_passthrough() {
         assert_eq!(extract_solution("  plain answer  "), "plain answer");
+    }
+
+    #[test]
+    fn delegate_route_emits_delegation_packet() {
+        let mut st = State::new("t", "migrate all 200 call sites to the new API");
+        st.constraints.push("no behavior changes".into());
+        let p = build(Route::Delegate, &st);
+        assert!(p.starts_with(KERNEL_CONTRACT), "static block must lead");
+        assert!(p.contains("DELEGATION PACKET"));
+        // The packet must be valid JSON carrying the goal and constraints.
+        let json_start = p.find('{').unwrap();
+        let json_end = p.rfind('}').unwrap();
+        let packet: crate::kernel::DelegationPacket =
+            serde_json::from_str(&p[json_start..=json_end]).unwrap();
+        assert_eq!(packet.task, "migrate all 200 call sites to the new API");
+        assert_eq!(packet.constraints, vec!["no behavior changes".to_string()]);
+        assert!(!packet.acceptance.is_empty());
+        assert!(!packet.next_step.is_empty());
+    }
+
+    #[test]
+    fn delegate_packet_carries_failure_memory() {
+        let mut st = State::new("t", "bulk rename");
+        st.remember_failure("approach A", "broke tests");
+        let p = build(Route::Delegate, &st);
+        assert!(p.contains("FAILURE MEMORY"));
+        assert!(p.contains("approach A"));
     }
 }

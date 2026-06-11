@@ -83,6 +83,11 @@ impl Detector {
 
 /// Levenshtein(a,b) / max(len(a),len(b)), with a size guard: oversized
 /// inputs compare only their leading MAX_COMPARE_CHARS chars.
+///
+/// Evolution section 22: the inner distance uses Myers' 1999 bit-parallel
+/// algorithm — 64 DP cells advance per machine word per pattern character,
+/// turning O(M*N) scalar work into O(ceil(M/64)*N) word operations. The
+/// pattern is the shorter string so the word count is minimal.
 pub fn normalized_distance(a: &str, b: &str) -> f64 {
     if a == b {
         return 0.0;
@@ -97,8 +102,93 @@ pub fn normalized_distance(a: &str, b: &str) -> f64 {
     levenshtein(&ra, &rb) as f64 / max_len as f64
 }
 
-/// Memory-efficient two-row dynamic program.
+/// Edit distance dispatcher: Myers bit-parallel for the common case, plain
+/// two-row DP as the small-input fallback (avoids setup overhead for tiny
+/// strings where it dominates).
 fn levenshtein(a: &[char], b: &[char]) -> usize {
+    let (la, lb) = (a.len(), b.len());
+    if la == 0 {
+        return lb;
+    }
+    if lb == 0 {
+        return la;
+    }
+    // Pattern = shorter string (fewer 64-bit blocks).
+    let (pat, txt) = if la <= lb { (a, b) } else { (b, a) };
+    if pat.len() <= 16 {
+        return levenshtein_two_row(pat, txt);
+    }
+    myers_levenshtein(pat, txt)
+}
+
+/// Myers bit-parallel Levenshtein, multiword variant per Hyyrö (2003),
+/// "A bit-vector algorithm for computing Levenshtein and Damerau edit
+/// distances". The pattern (vertical DP dimension) is split into 64-row
+/// blocks; horizontal deltas carry between vertically adjacent blocks. Each
+/// text character advances ceil(M/64) words instead of M scalar cells.
+fn myers_levenshtein(pat: &[char], txt: &[char]) -> usize {
+    use std::collections::HashMap;
+    let m = pat.len();
+    let blocks = m.div_ceil(64);
+
+    // Per-character match bitmasks, one u64 per block.
+    let mut peq: HashMap<char, Vec<u64>> = HashMap::new();
+    for (i, &c) in pat.iter().enumerate() {
+        peq.entry(c)
+            .or_insert_with(|| vec![0u64; blocks])[i / 64] |= 1u64 << (i % 64);
+    }
+    let zeros = vec![0u64; blocks];
+
+    let mut vp = vec![u64::MAX; blocks]; // vertical +1 deltas
+    let mut vn = vec![0u64; blocks];     // vertical -1 deltas
+    let mut score = m;
+    let last = blocks - 1;
+    let test_bit = 1u64 << ((m - 1) % 64);
+
+    for &tc in txt {
+        let eq_all = peq.get(&tc).unwrap_or(&zeros);
+        // Boundary row 0 has horizontal delta +1.
+        let mut ph_in = 1u64;
+        let mut mh_in = 0u64;
+
+        for blk in 0..blocks {
+            let pv = vp[blk];
+            let nv = vn[blk];
+            let eq = eq_all[blk];
+
+            let xv = eq | nv;
+            let eq_h = eq | mh_in;
+            let xh = ((eq_h & pv).wrapping_add(pv) ^ pv) | eq_h;
+
+            let ph = nv | !(xh | pv);
+            let mh = pv & xh;
+
+            if blk == last {
+                if ph & test_bit != 0 {
+                    score += 1;
+                } else if mh & test_bit != 0 {
+                    score -= 1;
+                }
+            }
+
+            let ph_out = ph >> 63;
+            let mh_out = mh >> 63;
+            let ph_sh = (ph << 1) | ph_in;
+            let mh_sh = (mh << 1) | mh_in;
+
+            vp[blk] = mh_sh | !(xv | ph_sh);
+            vn[blk] = ph_sh & xv;
+
+            ph_in = ph_out;
+            mh_in = mh_out;
+        }
+    }
+    score
+}
+
+/// Memory-efficient two-row dynamic program (small-input fallback and the
+/// reference oracle for the property test below).
+fn levenshtein_two_row(a: &[char], b: &[char]) -> usize {
     let (la, lb) = (a.len(), b.len());
     if la == 0 {
         return lb;
@@ -165,6 +255,52 @@ mod tests {
         let prior = vec!["the exact same failing output body".to_string()];
         let d = Detector::new().with_history(prior);
         assert!(d.would_loop("the exact same failing output body"));
+    }
+
+    #[test]
+    fn myers_matches_reference_dp() {
+        // Property check: bit-parallel result == classic DP on assorted
+        // pairs spanning block boundaries (63/64/65/100+ chars).
+        let cases: Vec<(String, String)> = vec![
+            ("kitten".into(), "sitting".into()),
+            ("a".repeat(63), format!("{}b", "a".repeat(63))),
+            ("x".repeat(64), "x".repeat(64)),
+            ("x".repeat(64), "y".repeat(64)),
+            ("ab".repeat(50), "ba".repeat(50)),
+            ("the quick brown fox jumps over the lazy dog".repeat(3),
+             "the quick brown cat jumps over the lazy dog".repeat(3)),
+            ("z".repeat(130), format!("{}q{}", "z".repeat(65), "z".repeat(64))),
+            ("hello".into(), "world-of-completely-different-content".into()),
+        ];
+        for (a, b) in cases {
+            let ca: Vec<char> = a.chars().collect();
+            let cb: Vec<char> = b.chars().collect();
+            let reference = levenshtein_two_row(&ca, &cb);
+            let (pat, txt) = if ca.len() <= cb.len() { (&ca, &cb) } else { (&cb, &ca) };
+            let fast = myers_levenshtein(pat, txt);
+            assert_eq!(fast, reference, "mismatch for {:?} vs {:?}", a, b);
+        }
+    }
+
+    #[test]
+    fn myers_multiblock_unicode() {
+        let a: String = "日本語テキスト".repeat(20); // 140 chars, 3 blocks
+        let mut b = a.clone();
+        b.push('変');
+        let ca: Vec<char> = a.chars().collect();
+        let cb: Vec<char> = b.chars().collect();
+        assert_eq!(myers_levenshtein(&ca, &cb), 1);
+    }
+
+    #[test]
+    fn large_inputs_stay_fast_and_correct() {
+        // 20k-char near-identical inputs: the 3% ceiling must trip, and the
+        // bit-parallel path must agree with the normalized expectation.
+        let a = "lorem ipsum dolor sit amet ".repeat(800); // ~21.6k chars
+        let mut b = a.clone();
+        b.replace_range(0..10, "XXXXXXXXXX");
+        let d = normalized_distance(&a, &b);
+        assert!(d < 0.03, "near-identical large inputs must loop: d={d}");
     }
 
     #[test]

@@ -3,24 +3,11 @@
 //! Deterministic, zero-token routing for LLM agents: route locally, spend
 //! upstream tokens only when a cheaper local action cannot finish the task.
 
-mod config;
-mod contextidx;
-mod engine;
-mod kernel;
-mod loopdetect;
-mod payload;
-mod pricing;
-mod provider;
-mod recorder;
-mod store;
-mod tokenizer;
-mod verify;
-mod webui;
-
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
-use engine::{Engine, Options};
 use std::sync::Arc;
+use tokenos::engine::{Engine, Options};
+use tokenos::{config, contextidx, provider, webui};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -128,14 +115,27 @@ enum Command {
         #[arg(long)]
         config: Option<String>,
     },
+    /// Launch the native desktop app (requires the "native" build feature)
+    App {
+        #[command(flatten)]
+        engine: EngineFlags,
+    },
     /// Launch the web control panel
     Serve {
         /// Listen port
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// Listen host
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Listen host (loopback by default; see --public)
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Explicitly allow binding a non-loopback interface.
+        /// Refused unless an auth token is also configured (finding 12.1).
+        #[arg(long)]
+        public: bool,
+        /// Bearer token required on every /api/* request.
+        /// Falls back to the TOKENOS_AUTH_TOKEN environment variable.
+        #[arg(long)]
+        auth_token: Option<String>,
         #[command(flatten)]
         engine: EngineFlags,
     },
@@ -157,10 +157,45 @@ fn build_engine(ef: &EngineFlags) -> Result<Engine> {
     Ok(eng)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
-    if let Err(e) = dispatch(cli).await {
+
+    // The native shell's event loop must OWN the main thread (a hard
+    // platform requirement on macOS, and the sane default everywhere), so
+    // `app` is dispatched before any tokio runtime exists — run_app spins
+    // up its own background runtime for the control plane.
+    if let Command::App { engine: ef } = &cli.command {
+        #[cfg(feature = "native")]
+        {
+            let result = build_engine(ef)
+                .map(Arc::new)
+                .and_then(tokenos::nativeapp::run_app);
+            if let Err(e) = result {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = ef;
+            eprintln!(
+                "error: this binary was built without the native desktop shell.\n\
+                 rebuild with: cargo build --release --features native\n\
+                 (or use the browser dashboard: tokenos serve)"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: failed to start async runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(dispatch(cli)) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     }
@@ -168,6 +203,8 @@ async fn main() {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        // Handled synchronously in main() before the runtime starts.
+        Command::App { .. } => unreachable!("app dispatches before the async runtime"),
         Command::Run { task, constraints, json, engine: ef } => {
             let task = task.join(" ").trim().to_string();
             if task.is_empty() {
@@ -290,6 +327,59 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     );
                 }
             }
+            // Live UCB1 bandit standings (S19) — process-local evidence.
+            // Always printed when arms exist: a fresh process legitimately
+            // shows every arm as unexplored (the evidence lives and dies
+            // with the serving process), and hiding the table entirely made
+            // operators think the bandit was disabled.
+            let ranked = eng.bandit.ranked();
+            if !ranked.is_empty() {
+                println!(
+                    "\n{:<14} {:>8} {:>13} {:>14} {:>12}",
+                    "BANDIT ARM", "PULLS", "MEAN_REWARD", "MEAN_LAT_MS", "UCB1"
+                );
+                let mut any_explored = false;
+                for (p, score) in &ranked {
+                    let (pulls, reward, lat) = eng.bandit.arm_stats(p);
+                    if pulls == 0 {
+                        println!("{:<14} {:>8} {:>13} {:>14} {:>12}", p, 0, "-", "-", "unexplored");
+                    } else {
+                        any_explored = true;
+                        println!(
+                            "{:<14} {:>8} {:>13.3} {:>14.0} {:>12.3}",
+                            p, pulls, reward, lat, score
+                        );
+                    }
+                }
+                if !any_explored {
+                    println!("(bandit evidence is process-local — arms gain pulls inside a serving process)");
+                }
+            }
+            // Verified solution cache (S25): durable, zero-token replays.
+            if let Ok((entries, hits)) = eng.store.solution_cache_stats() {
+                if entries > 0 {
+                    println!("\nSOLUTION CACHE: {entries} verified entr{} \u{00b7} {hits} zero-token hit{}",
+                        if entries == 1 { "y" } else { "ies" },
+                        if hits == 1 { "" } else { "s" });
+                }
+            }
+            // Estimator drift watchdog (S30) — process-local calibration.
+            let drift = eng.drift.all();
+            if !drift.is_empty() {
+                println!(
+                    "\n{:<14} {:>10} {:>12} {:>10}",
+                    "ESTIMATOR", "SAMPLES", "RATIO_EWMA", "STATUS"
+                );
+                for d in drift {
+                    println!(
+                        "{:<14} {:>10} {:>12.3} {:>10}",
+                        d.provider,
+                        d.samples,
+                        d.ratio_ewma,
+                        if d.drifting { "DRIFTING" } else { "ok" }
+                    );
+                }
+            }
             Ok(())
         }
         Command::Tasks { limit, engine: ef } => {
@@ -347,13 +437,42 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
-        Command::Serve { port, host, engine: ef } => {
+        Command::Serve { port, host, public, auth_token, engine: ef } => {
+            // Finding 12.1 (CWE-306): the dashboard binds loopback by default.
+            // A non-loopback bind requires BOTH --public and an auth token so
+            // an unauthenticated control plane can never face a network.
+            // An empty token ("") authenticates nothing — treat it as absent
+            // from BOTH sources so `--public --auth-token ""` is rejected the
+            // same way as a missing token (finding 12.1, CWE-306).
+            let token = auth_token
+                .filter(|t| !t.is_empty())
+                .or_else(|| std::env::var("TOKENOS_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
+            let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+            if !loopback {
+                if !public {
+                    return Err(anyhow!(
+                        "refusing to bind non-loopback host {:?} without --public                          (the dashboard can trigger paid API executions)",
+                        host
+                    ));
+                }
+                if token.is_none() {
+                    return Err(anyhow!(
+                        "--public requires an auth token: pass --auth-token or set                          TOKENOS_AUTH_TOKEN (finding 12.1, CWE-306)"
+                    ));
+                }
+                eprintln!(
+                    "WARNING: dashboard exposed on {host}:{port}; bearer auth is ENFORCED on /api/*"
+                );
+            }
             let eng = Arc::new(build_engine(&ef)?);
             println!(
-                "TokenOS control panel listening on http://{}:{} (dry-run={})",
-                host, port, ef.dry_run
+                "TokenOS control panel listening on http://{}:{} (dry-run={}, auth={})",
+                host,
+                port,
+                ef.dry_run,
+                if token.is_some() { "on" } else { "off (loopback only)" }
             );
-            webui::serve(eng, &host, port).await
+            webui::serve(eng, &host, port, token).await
         }
     }
 }

@@ -66,6 +66,23 @@ impl Route {
         self == Route::Ask || self.is_escalation()
     }
 
+    /// Route-scoped output budget (evolution S27): the maximum number of
+    /// output tokens a route is allowed to request from a provider. Paying
+    /// for more output headroom than the route's contract can use is pure
+    /// waste — an ASK is one question, a DIRECT answer is short, a PATCH is
+    /// a minimal diff. Only full builds get the wide ceiling.
+    pub fn max_output_tokens(self) -> i64 {
+        match self {
+            Route::Ask => 256,                       // exactly one question
+            Route::Direct => 1024,                   // trivial answer
+            Route::Delegate => 1024,                 // packet ack, not prose
+            Route::Verify => 1024,                   // verdict, not essay
+            Route::Reuse | Route::Patch => 2048,     // bounded modification
+            Route::Partial | Route::Implement => 4096, // full productive output
+            Route::EscalateConflict | Route::EscalateSafety | Route::EscalateExternal => 0, // never reach a provider
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Route::Direct => "DIRECT",
@@ -219,6 +236,21 @@ pub struct RouterPolicy {
     pub direct_max_tokens: usize,
     pub delegation_penalty: f64,
     pub delegation_min_scale: f64,
+    /// Budget sentinel (evolution S29): hard per-task cost ceiling in USD.
+    /// Providers whose shadow-priced estimate exceeds it are excluded from
+    /// the failover chain; if EVERY candidate exceeds it the run terminates
+    /// locally at zero token cost. 0 disables the sentinel.
+    #[serde(default)]
+    pub max_cost_per_task_usd: f64,
+    /// Verified solution cache (evolution S25): serve an exact goal +
+    /// constraints re-request from the durable cache at zero tokens.
+    /// Enabled by default; set false to always re-execute.
+    #[serde(default = "default_true")]
+    pub reuse_cache: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for RouterPolicy {
@@ -228,6 +260,8 @@ impl Default for RouterPolicy {
             direct_max_tokens: 600,
             delegation_penalty: 1500.0, // tokens-equivalent fixed cost
             delegation_min_scale: 1.5,  // savings must exceed 1.5x the penalty
+            max_cost_per_task_usd: 0.0, // 0 = sentinel disabled
+            reuse_cache: true,
         }
     }
 }
