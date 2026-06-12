@@ -99,7 +99,7 @@ Following a rigorous source audit and verification pass, the core TokenOS codeba
  
 - The default release build succeeds on Windows after installing Rust 1.96.0.
 - The optional `native` feature also builds successfully on Windows.
-- `cargo test --locked` passes: 192 tests passed, 0 failed.
+- `cargo test --locked` passes: 196 tests passed, 0 failed.
 - `cargo fmt --all -- --check` passes.
 - `cargo clippy --all-targets -- -D warnings` passes.
 - The default configuration is offline-capable through the mock provider.
@@ -3867,7 +3867,7 @@ Baseline: enabled API-key providers could be constructed with empty API keys, an
 
 **Evidence**  
 Baseline evidence: old provider construction used `unwrap_or_default()` for missing env vars; validation checked provider references and adapter presence only.  
-Remediation evidence: `Config::validate` now rejects unknown adapters, enabled live providers without `api_key_env`, proxy providers without endpoints, non-positive live context windows, and negative costs. Additionally, it enforces that policy numeric ranges (e.g. `ask_threshold`, `delegation_penalty`, `delegation_min_scale`, and `max_cost_per_task_usd`) are valid and non-negative, and that all route types in routing rules are valid TokenOS routes or the wildcard `*`. `Adapter::new` rejects live adapters when the resolved environment variable is empty. Tests cover invalid numeric boundaries, unknown adapters, missing env key name, live adapter credential failure, and invalid route names.
+Remediation evidence: `Config::validate` now rejects unknown adapters, enabled live providers without `api_key_env`, proxy providers without endpoints, non-positive live context windows, and negative costs. Additionally, it enforces that policy numeric ranges (e.g. `ask_threshold`, `delegation_penalty`, `delegation_min_scale`, and `max_cost_per_task_usd`) are valid and non-negative, and that all route types in routing rules are valid TokenOS routes or the wildcard `*`. It also validates that route keys in verification overrides (`verification_commands`) are valid. `Adapter::new` rejects live adapters when the resolved environment variable is empty. Tests cover invalid numeric boundaries, unknown adapters, missing env key name, live adapter credential failure, invalid route names, and invalid verification command routes.
 
 **Root Cause**  
 Config validation was structural, not semantic. Current validation covers the most important semantic live-provider invariants, routing route types, and policy limits.
@@ -3969,7 +3969,7 @@ Baseline: executions table recorded final run outcomes, while failed failover at
 
 **Evidence**  
 Baseline evidence: `Store::record_trace` existed with no source usage.  
-Remediation evidence: engine recorder writes now flow through `record_event`, which writes both the recorder journal/blob and SQLite trace metadata; `flight_recorder_events_are_indexed_in_store` asserts recorder events and SQL trace rows stay in sync. Furthermore, provider execution attempts are now modeled as first-class rows in a new `execution_attempts` table database schema. These attempts record task ID, provider name, model name, tokens used, latency, retry status, and error messages, which are populated during engine execution and failover logic in `Engine::run`.
+Remediation evidence: engine recorder writes now flow through `record_event`, which writes both the recorder journal/blob and SQLite trace metadata; `flight_recorder_events_are_indexed_in_store` asserts recorder events and SQL trace rows stay in sync. Furthermore, provider execution attempts are now modeled as first-class rows in a new `execution_attempts` table database schema. These attempts record task ID, provider name, model name, tokens used, latency, retry status, and error messages. Additionally, the engine now persists estimator drift watchdog EWMA ratios and sample counts in the `drift_ratios` SQLite table, ensuring provider health state survives restarts.
 
 **Root Cause**  
 Diagnostic systems evolved in parallel. Trace indexing and execution attempts telemetry are now unified and queryable directly in SQLite.
@@ -4125,7 +4125,7 @@ The verification module described a tiered budget including targeted tests and L
 **Evidence**  
 Verification doc comment: `src/verify.rs:1-8`.  
 Engine call: `src/engine.rs` now calls `verify_output` which integrates the static checks and runs the configured external verification test command.  
-Remediation evidence: `RouterPolicy::verification_command` allows users to specify an arbitrary validation shell command. `verify_output` runs this command and marks the task as failed if it exits with a non-zero status. The database schema for `executions` and `solution_cache` has been updated to persist `verification_tier` ('static' or 'tests'). The test suite includes `verification_command_runs_on_success` and `verification_command_fails_on_error` to pin this behavior.
+Remediation evidence: `RouterPolicy::verification_command` allows users to specify an arbitrary validation shell command, and `RouterPolicy::verification_commands` supports route-specific override commands. `verify_output` runs the route-specific or global command and marks the task as failed if it exits with a non-zero status. The database schema for `executions` and `solution_cache` has been updated to persist `verification_tier` ('static' or 'tests'). The test suite includes `verification_command_runs_on_success`, `verification_command_fails_on_error`, and `route_specific_verification_command_overrides_global` to pin this behavior.
 
 **Root Cause**  
 Verification roadmap was documented in comments, but only the first (static) tier was implemented. Live command testing has now been added.
@@ -4176,7 +4176,7 @@ Baseline: the endpoint had a per-request timeout and request body limit, but no 
 
 **Evidence**  
 Baseline evidence: run timeout and body limit existed; no semaphore/rate limiter was present.  
-Remediation evidence: `MAX_CONCURRENT_RUNS` and `WebState.run_limiter` implement a process-local concurrency limit of 4 in `src/webui.rs`, returning HTTP `429` on saturation. Additionally, `SecurityPolicy` contains `daily_spend_limit_usd` and `monthly_spend_limit_usd` configurations. In `Engine::run`, before task execution, the engine queries the SQLite database using `aggregate_spend_usd` to sum estimated costs of executions within the current day and month. If the limit is exceeded, execution is blocked and an error is returned immediately.
+Remediation evidence: `MAX_CONCURRENT_RUNS` and `WebState.run_limiter` implement a process-local concurrency limit of 4 in `src/webui.rs`, returning HTTP `429` on saturation. Additionally, `SecurityPolicy` contains `daily_spend_limit_usd` and `monthly_spend_limit_usd` configurations. In `Engine::run`, before task execution, the engine queries the SQLite database using `aggregate_spend_usd` to sum estimated costs of executions within the current day and month. If the limit is exceeded, execution is blocked and an error is returned immediately. The system also supports scoped API tokens (`api_tokens` in `SecurityPolicy`) with path-scoped routing middleware for fine-grained budget and capability governance (e.g. `read`, `run`, and `admin` scopes).
 
 **Root Cause**  
 Single-user local assumption. The concurrency limit protects resources, and the database-backed spend limits protect against API token cost overruns.
@@ -4227,7 +4227,7 @@ Baseline: docs were extensive but contained multiple drift points, and a large u
 
 **Evidence**  
 Baseline evidence: README said 177 tests while local test count was 180; README implied zero-warning gates while fmt/clippy failed; `git status --short` reported `?? "TokenOS Main Report.txt"`.  
-Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 192 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, and cache replay guards. `TokenOS Main Report.txt` is now fully tracked, integrated, and polished.
+Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 196 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, and cache replay guards. `TokenOS Main Report.txt` is now fully tracked, integrated, and polished.
 
 **Root Cause**  
 Documentation drift came from manual updates without active CI. CI is now active for code quality, and documentation is kept in sync with the codebase state.
@@ -4315,7 +4315,7 @@ Checks:
 ```text
 cargo test --locked
 EXIT=0
-192 passed; 0 failed
+196 passed; 0 failed
 
 cargo build --release --locked
 EXIT=0

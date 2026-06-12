@@ -176,6 +176,13 @@ impl Engine {
             }
         }
 
+        // Backfill drift ratios from the store to make decisions durable
+        if let Ok(ratios) = engine.store.load_drift_ratios() {
+            for (provider, (ewma, samples)) in ratios {
+                engine.drift.set_ratio(&provider, ewma, samples);
+            }
+        }
+
         Ok(engine)
     }
 
@@ -694,6 +701,7 @@ impl Engine {
                 dec.route.as_str(),
                 &out_masked,
                 &self.cfg.policy.verification_command,
+                &self.cfg.policy.verification_commands,
             );
             res.verified = Some(v.clone());
             if !v.pass {
@@ -768,6 +776,10 @@ impl Engine {
                     tokenizer::estimate(&prompt) as i64,
                     resp.tokens_in,
                 );
+                let status = self.drift.status(&prov_name);
+                let _ = self
+                    .store
+                    .save_drift_ratio(&prov_name, status.ratio_ewma, status.samples);
             }
 
             let tokens_in = if resp.tokens_in == 0 {
@@ -1178,7 +1190,7 @@ mod tests {
 
         let (dec, _) = e.route_only_with_constraints(task, &constraints);
         assert_eq!(dec.route, Route::Reuse);
-        let (_entries, hits) = e.store.solution_cache_stats().unwrap();
+        let (_entries, _, hits) = e.store.solution_cache_stats().unwrap();
         assert_eq!(hits, 0, "route preview must not count as a cache replay");
     }
 
@@ -1312,7 +1324,7 @@ mod tests {
             r2.output, r1.output,
             "cache must return the verified output verbatim"
         );
-        let (entries, hits) = e.store.solution_cache_stats().unwrap();
+        let (entries, _, hits) = e.store.solution_cache_stats().unwrap();
         assert!(entries >= 1 && hits >= 1);
     }
 
@@ -1597,8 +1609,12 @@ mod tests {
         } else {
             "echo success".to_string()
         };
-        let res =
-            crate::verify::verify_output("IMPLEMENT", "fn main() {}", &policy.verification_command);
+        let res = crate::verify::verify_output(
+            "IMPLEMENT",
+            "fn main() {}",
+            &policy.verification_command,
+            &policy.verification_commands,
+        );
         assert!(res.pass);
         assert_eq!(res.tier, "tests");
     }
@@ -1612,11 +1628,52 @@ mod tests {
         } else {
             "exit 1".to_string()
         };
-        let res =
-            crate::verify::verify_output("IMPLEMENT", "fn main() {}", &policy.verification_command);
+        let res = crate::verify::verify_output(
+            "IMPLEMENT",
+            "fn main() {}",
+            &policy.verification_command,
+            &policy.verification_commands,
+        );
         assert!(!res.pass);
         assert_eq!(res.tier, "tests");
         assert!(res.issues[0].contains("failed") || res.issues[0].contains("exit"));
+    }
+
+    #[tokio::test]
+    async fn route_specific_verification_command_overrides_global() {
+        let e = test_engine();
+        let mut policy = e.cfg.policy.clone();
+        policy.verification_command = if cfg!(target_os = "windows") {
+            "powershell -Command exit 1".to_string()
+        } else {
+            "exit 1".to_string()
+        };
+        policy.verification_commands.insert(
+            "PATCH".to_string(),
+            if cfg!(target_os = "windows") {
+                "echo 'success'".to_string()
+            } else {
+                "echo success".to_string()
+            },
+        );
+
+        let res_patch = crate::verify::verify_output(
+            "PATCH",
+            "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y",
+            &policy.verification_command,
+            &policy.verification_commands,
+        );
+        assert!(res_patch.pass);
+        assert_eq!(res_patch.tier, "tests");
+
+        let res_impl = crate::verify::verify_output(
+            "IMPLEMENT",
+            "fn main() {}",
+            &policy.verification_command,
+            &policy.verification_commands,
+        );
+        assert!(!res_impl.pass);
+        assert_eq!(res_impl.tier, "tests");
     }
 
     #[tokio::test]

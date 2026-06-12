@@ -252,6 +252,9 @@ pub struct RouterPolicy {
     /// Verification command for code tasks (F-12)
     #[serde(default)]
     pub verification_command: String,
+    /// Route-specific verification commands (F-12 / Long-term)
+    #[serde(default)]
+    pub verification_commands: std::collections::HashMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -268,6 +271,7 @@ impl Default for RouterPolicy {
             max_cost_per_task_usd: 0.0, // 0 = sentinel disabled
             reuse_cache: true,
             verification_command: String::new(),
+            verification_commands: std::collections::HashMap::new(),
         }
     }
 }

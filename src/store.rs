@@ -115,7 +115,6 @@ CREATE TABLE IF NOT EXISTS solution_cache (
     last_hit_at TEXT
 );
 
--- Evolution F-09: execution attempts table for failover and retry visibility.
 CREATE TABLE IF NOT EXISTS execution_attempts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id       TEXT NOT NULL,
@@ -129,6 +128,13 @@ CREATE TABLE IF NOT EXISTS execution_attempts (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_exec_att_task ON execution_attempts(task_id);
+
+CREATE TABLE IF NOT EXISTS drift_ratios (
+    provider    TEXT PRIMARY KEY,
+    ewma_ratio  REAL NOT NULL,
+    samples     INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL
+);
 "#;
 
 impl Store {
@@ -542,13 +548,13 @@ impl Store {
         Ok(())
     }
 
-    /// (entries, total_hits) for the solution cache — surfaced in telemetry.
-    pub fn solution_cache_stats(&self) -> Result<(i64, i64)> {
+    /// (total_entries, tests_entries, total_hits) for the solution cache — surfaced in telemetry.
+    pub fn solution_cache_stats(&self) -> Result<(i64, i64, i64)> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT COUNT(1), COALESCE(SUM(hits), 0) FROM solution_cache",
+            "SELECT COUNT(1), COALESCE(SUM(CASE WHEN verification_tier = 'tests' THEN 1 ELSE 0 END), 0), COALESCE(SUM(hits), 0) FROM solution_cache",
             [],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
         )?;
         Ok(row)
     }
@@ -807,6 +813,40 @@ impl Store {
         )
         .map_err(Into::into)
     }
+
+    /// Saves a provider's drift ratio and sample count.
+    pub fn save_drift_ratio(&self, provider: &str, ewma_ratio: f64, samples: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO drift_ratios (provider, ewma_ratio, samples, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider) DO UPDATE SET
+                ewma_ratio = excluded.ewma_ratio,
+                samples = excluded.samples,
+                updated_at = excluded.updated_at",
+            params![provider, ewma_ratio, samples, now],
+        )?;
+        Ok(())
+    }
+
+    /// Loads all saved drift ratios.
+    pub fn load_drift_ratios(&self) -> Result<std::collections::HashMap<String, (f64, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT provider, ewma_ratio, samples FROM drift_ratios")?;
+        let rows = stmt.query_map([], |row| {
+            let provider: String = row.get(0)?;
+            let ewma_ratio: f64 = row.get(1)?;
+            let samples: u64 = row.get(2)?;
+            Ok((provider, (ewma_ratio, samples)))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (p, val) = r?;
+            map.insert(p, val);
+        }
+        Ok(map)
+    }
 }
 
 /// One telemetry event.
@@ -887,8 +927,8 @@ mod tests {
         assert_eq!(route, "IMPLEMENT");
         assert_eq!(out, "the answer");
         assert_eq!(tier, "static");
-        let (entries, hits) = s.solution_cache_stats().unwrap();
-        assert_eq!((entries, hits), (1, 1));
+        let (entries, tests_entries, hits) = s.solution_cache_stats().unwrap();
+        assert_eq!((entries, tests_entries, hits), (1, 0, 1));
         // Re-admission refreshes the stored output.
         s.cache_solution("k1", "PATCH", "newer answer", "tests")
             .unwrap();
@@ -897,6 +937,8 @@ mod tests {
             (route2.as_str(), out2.as_str(), tier2.as_str()),
             ("PATCH", "newer answer", "tests")
         );
+        let (entries2, tests_entries2, hits2) = s.solution_cache_stats().unwrap();
+        assert_eq!((entries2, tests_entries2, hits2), (1, 1, 2));
         // Eviction makes it a miss again.
         s.evict_solution("k1").unwrap();
         assert!(s.cached_solution("k1").unwrap().is_none());
@@ -1062,5 +1104,34 @@ mod tests {
         assert!((sum.cost_per_success - 0.006).abs() < 1e-9);
         let routes = s.stats_by_route().unwrap();
         assert_eq!(routes[0].runs, 2);
+    }
+
+    #[test]
+    fn drift_ratio_lifecycle() {
+        let s = mem();
+        // Initially empty
+        let map = s.load_drift_ratios().unwrap();
+        assert!(map.is_empty());
+
+        // Save one
+        s.save_drift_ratio("openai", 1.25, 42).unwrap();
+        let map = s.load_drift_ratios().unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("openai").unwrap().0, 1.25);
+        assert_eq!(map.get("openai").unwrap().1, 42);
+
+        // Update existing (upsert)
+        s.save_drift_ratio("openai", 0.95, 43).unwrap();
+        let map = s.load_drift_ratios().unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("openai").unwrap().0, 0.95);
+        assert_eq!(map.get("openai").unwrap().1, 43);
+
+        // Add another provider
+        s.save_drift_ratio("anthropic", 1.05, 10).unwrap();
+        let map = s.load_drift_ratios().unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("anthropic").unwrap().0, 1.05);
+        assert_eq!(map.get("anthropic").unwrap().1, 10);
     }
 }

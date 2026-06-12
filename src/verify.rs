@@ -72,21 +72,29 @@ pub fn static_check(route: &str, output: &str) -> VerifyResult {
 
 /// Tiered verification entry point (F-12). Checks static rules first, then runs
 /// a configured local verification command on code outputs if provided.
-pub fn verify_output(route: &str, output: &str, test_command: &str) -> VerifyResult {
+pub fn verify_output(
+    route: &str,
+    output: &str,
+    test_command: &str,
+    route_commands: &std::collections::HashMap<String, String>,
+) -> VerifyResult {
     let mut res = static_check(route, output);
     if !res.pass {
         return res;
     }
 
-    if !test_command.is_empty() {
+    let cmd = route_commands
+        .get(route)
+        .map(|s| s.as_str())
+        .unwrap_or(test_command);
+
+    if !cmd.is_empty() {
         let cmd_res = if cfg!(target_os = "windows") {
             std::process::Command::new("powershell")
-                .args(["-Command", test_command])
+                .args(["-Command", cmd])
                 .output()
         } else {
-            std::process::Command::new("sh")
-                .args(["-c", test_command])
-                .output()
+            std::process::Command::new("sh").args(["-c", cmd]).output()
         };
 
         match cmd_res {

@@ -83,7 +83,7 @@ $("#authClear")?.addEventListener("click", () => {
 
 /* Plain-language explanations shown to newcomers in the route preview. */
 const ROUTE_EXPLAIN = {
-  REUSE: "A verified answer for this exact goal is already cached — it will be served for zero tokens.",
+  REUSE: "A verified or statically-checked answer for this exact goal is already cached — it will be served for zero tokens.",
   DIRECT: "Small and unambiguous — answered with a minimal prompt on the cheapest viable provider.",
   PATCH: "A well-scoped edit — only the relevant context is sent, keeping the prompt tiny.",
   IMPLEMENT: "Real generation work — the full pipeline runs with verification of the output.",
@@ -268,7 +268,7 @@ async function loadDashboard() {
       if (cl) {
         if (drift && drift.solution_cache) {
           const c = drift.solution_cache;
-          cl.textContent = `Solution cache: ${c.entries} verified entr${c.entries === 1 ? "y" : "ies"} · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
+          cl.textContent = `Solution cache: ${c.entries} cache entr${c.entries === 1 ? "y" : "ies"} (statically-checked: ${c.static_checked}, test-verified: ${c.test_verified}) · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
         } else {
           // Clear stale telemetry after a partial refresh failure.
           cl.textContent = "";

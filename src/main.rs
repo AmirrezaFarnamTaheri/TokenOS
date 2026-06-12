@@ -382,9 +382,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
             // Verified solution cache (S25): durable, zero-token replays.
-            if let Ok((entries, hits)) = eng.store.solution_cache_stats() {
+            if let Ok((entries, test_verified, hits)) = eng.store.solution_cache_stats() {
                 if entries > 0 {
-                    println!("\nSOLUTION CACHE: {entries} verified entr{} \u{00b7} {hits} zero-token hit{}",
+                    let static_checked = entries - test_verified;
+                    println!("\nSOLUTION CACHE: {entries} cache entr{} (statically-checked: {static_checked}, test-verified: {test_verified}) \u{00b7} {hits} zero-token hit{}",
                         if entries == 1 { "y" } else { "ies" },
                         if hits == 1 { "" } else { "s" });
                 }

@@ -220,7 +220,7 @@
 
       <h3>Route types</h3>
       <table class="help-table">
-        <tr><td><span class="badge route-REUSE">REUSE</span></td><td>A verified answer for this exact goal already exists — served from cache for zero tokens.</td></tr>
+        <tr><td><span class="badge route-REUSE">REUSE</span></td><td>A verified or statically-checked answer for this exact goal already exists — served from cache for zero tokens.</td></tr>
         <tr><td><span class="badge route-DIRECT">DIRECT</span></td><td>Tiny, unambiguous task — answered with a minimal prompt on the cheapest provider.</td></tr>
         <tr><td><span class="badge route-PATCH">PATCH</span></td><td>Small, well-scoped edit to existing material.</td></tr>
         <tr><td><span class="badge route-IMPLEMENT">IMPLEMENT</span></td><td>Real generation work — full pipeline with verification.</td></tr>
@@ -236,7 +236,7 @@
         <tr><td><b>Shadow pricing</b></td><td>Every candidate provider is priced in code before any call; the cheapest viable one goes first.</td></tr>
         <tr><td><b>UCB1 bandit</b></td><td>A learning algorithm that balances trying providers (exploration) with using the proven best one (exploitation).</td></tr>
         <tr><td><b>Drift watchdog</b></td><td>Compares billed token counts to local estimates; flags providers whose cost predictions are off.</td></tr>
-        <tr><td><b>Solution cache</b></td><td>Verified outputs keyed by goal + constraints; an identical request is replayed for zero tokens.</td></tr>
+        <tr><td><b>Solution cache</b></td><td>Outputs statically-checked or verified by tests, keyed by goal + constraints; an identical request is replayed for zero tokens.</td></tr>
         <tr><td><b>Flight recorder</b></td><td>A per-task trace of decisions, prompts, responses, rescues and verification — open any task to inspect it.</td></tr>
       </table>
 

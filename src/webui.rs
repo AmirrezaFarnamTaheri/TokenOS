@@ -37,15 +37,11 @@ const MAX_CONCURRENT_RUNS: usize = 4;
 /// hardening — a task description never legitimately approaches this).
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
-/// Bearer-token gate for /api/* (finding 12.1, CWE-306). `None` means the
-/// server is loopback-only and auth is not enforced.
-#[derive(Clone)]
-struct AuthToken(Option<Arc<String>>);
-
 #[derive(Clone)]
 struct WebState {
     engine: Arc<Engine>,
     run_limiter: Arc<Semaphore>,
+    cli_auth_token: Option<Arc<String>>,
 }
 
 /// Constant-time byte comparison so token checks don't leak length-prefix
@@ -61,23 +57,59 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-async fn require_bearer(State(auth): State<AuthToken>, req: Request, next: Next) -> Response {
-    let Some(expected) = auth.0.as_ref() else {
+async fn require_bearer(State(state): State<WebState>, req: Request, next: Next) -> Response {
+    let cli_token = state.cli_auth_token.as_ref();
+    let api_tokens = &state.engine.cfg.security.api_tokens;
+    if cli_token.is_none() && api_tokens.is_empty() {
         return next.run(req).await; // loopback-only mode: no token configured
-    };
-    let ok = req
+    }
+
+    let Some(header_val) = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
-        .unwrap_or(false);
-    if ok {
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing or invalid bearer token" })),
+        )
+            .into_response();
+    };
+
+    // Determine the required scope based on path
+    let path = req.uri().path();
+    let required_scope = if path == "/api/run" || path == "/api/route" {
+        "run"
+    } else if path.starts_with("/api/traces/") {
+        "admin"
+    } else {
+        "read"
+    };
+
+    // 1. Check CLI token (admin scope, satisfies everything)
+    if let Some(expected) = cli_token {
+        if ct_eq(header_val.as_bytes(), expected.as_bytes()) {
+            return next.run(req).await;
+        }
+    }
+
+    // 2. Check config API tokens (constant-time check for each)
+    let mut authenticated = false;
+    for (cfg_token, scopes) in api_tokens {
+        if ct_eq(header_val.as_bytes(), cfg_token.as_bytes())
+            && scopes.iter().any(|s| s == required_scope || s == "admin")
+        {
+            authenticated = true;
+        }
+    }
+
+    if authenticated {
         next.run(req).await
     } else {
         (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "missing or invalid bearer token" })),
+            Json(json!({ "error": "insufficient permissions or invalid token" })),
         )
             .into_response()
     }
@@ -109,13 +141,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
     router_with_auth(engine, None)
 }
 
-/// Builds the full app router. When `auth_token` is Some, every /api/* route
-/// requires `Authorization: Bearer <token>` (finding 12.1).
 pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Router {
-    let auth = AuthToken(auth_token.map(Arc::new));
     let state = WebState {
         engine,
         run_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_RUNS)),
+        cli_auth_token: auth_token.map(Arc::new),
     };
     let api = Router::new()
         .route("/api/meta", get(handle_meta))
@@ -130,7 +160,10 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/traces/:task_id", get(handle_traces))
         .route("/api/route", post(handle_route_preview))
         .route("/api/run", post(handle_run))
-        .layer(middleware::from_fn_with_state(auth, require_bearer))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
     Router::new()
@@ -261,10 +294,16 @@ async fn handle_bandit_stats(State(state): State<WebState>) -> Response {
 /// (evolution S25).
 async fn handle_drift_stats(State(state): State<WebState>) -> Response {
     let eng = state.engine;
-    let (cache_entries, cache_hits) = eng.store.solution_cache_stats().unwrap_or((0, 0));
+    let (cache_entries, test_verified, cache_hits) =
+        eng.store.solution_cache_stats().unwrap_or((0, 0, 0));
     ok_json(json!({
         "providers": eng.drift.all(),
-        "solution_cache": { "entries": cache_entries, "zero_token_hits": cache_hits },
+        "solution_cache": {
+            "entries": cache_entries,
+            "test_verified": test_verified,
+            "static_checked": cache_entries - test_verified,
+            "zero_token_hits": cache_hits
+        },
     }))
 }
 
@@ -376,7 +415,7 @@ async fn handle_run(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::pricing::Tracker;
+    use crate::pricing::{DriftWatchdog, Tracker, Ucb1Router};
     use crate::recorder::Recorder;
     use crate::store::Store;
     use axum::body::Body;
@@ -581,6 +620,7 @@ mod tests {
         let state = WebState {
             engine,
             run_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_RUNS)),
+            cli_auth_token: None,
         };
 
         // Acquire 4 permits to fully saturate the semaphore
@@ -612,5 +652,117 @@ mod tests {
         drop(p2);
         drop(p3);
         drop(p4);
+    }
+
+    #[tokio::test]
+    async fn api_scopes_governance() {
+        let mut cfg = Config::default();
+        cfg.security
+            .api_tokens
+            .insert("read_token".into(), vec!["read".into()]);
+        cfg.security
+            .api_tokens
+            .insert("run_token".into(), vec!["run".into()]);
+        cfg.security
+            .api_tokens
+            .insert("admin_token".into(), vec!["admin".into()]);
+        let arms: Vec<String> = cfg.providers.keys().cloned().collect();
+
+        let engine = Arc::new(Engine {
+            cfg,
+            store: Store::open(Some(std::path::Path::new(":memory:"))).unwrap(),
+            recorder: Recorder::new(Some(std::path::Path::new(&format!(
+                "{}/tokenos-web-scope-test-{}",
+                std::env::temp_dir().display(),
+                std::process::id()
+            ))))
+            .unwrap(),
+            tracker: Tracker::new(),
+            bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
+            indexer: None,
+            dry_run: true,
+            adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
+        });
+
+        let app = router_with_auth(engine, None);
+
+        // 1. read_token can access read endpoint, but not run
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/summary")
+                    .header("authorization", "Bearer read_token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/run")
+                    .header("authorization", "Bearer read_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task":"rename variable"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. run_token can access run endpoint, but not read
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/summary")
+                    .header("authorization", "Bearer run_token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/run")
+                    .header("authorization", "Bearer run_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task":"rename variable"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 3. admin_token can access both read and run
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/summary")
+                    .header("authorization", "Bearer admin_token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/run")
+                    .header("authorization", "Bearer admin_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task":"rename variable"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

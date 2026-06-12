@@ -141,3 +141,4 @@ sudo systemctl status tokenos
 1. **Never Bind Publicly Without Auth**: If you bind the service directly (e.g. `serve --host 0.0.0.0`), you **must** supply a non-empty bearer token (via `--token`) otherwise the server will refuse to start.
 2. **Reverse Proxy TLS Enforced**: Always proxy remote traffic through TLS (port 443) using Nginx, Apache, or Caddy. Transmitting bearer tokens or API execution payloads over plain HTTP exposes them to eavesdropping.
 3. **Database and trace permissions**: Standard SQLite and traces are stored in the user profile directory. If running as a system service, ensure `/var/lib/tokenos` is locked down with owner-only access permissions (`chmod 700`).
+4. **Scoped API Tokens**: Instead of sharing the single master/admin CLI token, use the `security.api_tokens` section in `config.yaml` to define granular, scoped credentials (e.g. `read`-only access for dashboards, `run` access for automation/agents, and `admin` for operations).

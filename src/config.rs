@@ -160,6 +160,9 @@ pub struct SecurityPolicy {
     /// Monthly spend limit in USD (0.0 = no limit)
     #[serde(default)]
     pub monthly_spend_limit_usd: f64,
+    /// Map of scoped API tokens (token -> list of scopes)
+    #[serde(default)]
+    pub api_tokens: std::collections::HashMap<String, Vec<String>>,
 }
 
 fn default_retention_days() -> usize {
@@ -178,6 +181,7 @@ impl Default for SecurityPolicy {
             owner_only_permissions: true,
             daily_spend_limit_usd: 0.0,
             monthly_spend_limit_usd: 0.0,
+            api_tokens: std::collections::HashMap::new(),
         }
     }
 }
@@ -379,6 +383,17 @@ impl Config {
         }
         if self.policy.max_cost_per_task_usd < 0.0 {
             bail!("config: policy.max_cost_per_task_usd must be non-negative");
+        }
+        for route_name in self.policy.verification_commands.keys() {
+            match route_name.as_str() {
+                "DIRECT" | "REUSE" | "PATCH" | "IMPLEMENT" | "PARTIAL" | "DELEGATE" | "ASK"
+                | "VERIFY" | "ESCALATE-CONFLICT" | "ESCALATE-SAFETY" | "ESCALATE-EXTERNAL"
+                | "*" => {}
+                other => bail!(
+                    "config: policy.verification_commands contains unknown route type {:?}",
+                    other
+                ),
+            }
         }
 
         for (name, p) in &self.providers {
@@ -642,5 +657,18 @@ mod tests {
         cfg.routing[0].route_types.push("INVALID-ROUTE".into());
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("unknown route type"), "{err}");
+    }
+
+    #[test]
+    fn invalid_verification_command_route_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.policy
+            .verification_commands
+            .insert("INVALID-ROUTE".into(), "echo 'test'".into());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("policy.verification_commands contains unknown route type"),
+            "{err}"
+        );
     }
 }

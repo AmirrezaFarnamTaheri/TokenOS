@@ -435,6 +435,12 @@ impl DriftWatchdog {
         Self::default()
     }
 
+    /// Sets the drift ratio and sample count for a provider (e.g. from database startup backfill).
+    pub fn set_ratio(&self, provider: &str, ewma: f64, samples: u64) {
+        let mut st = self.state.lock().unwrap();
+        st.insert(provider.to_string(), (ewma, samples));
+    }
+
     /// Feeds one observation: the estimate made before the call and the
     /// actual billed input tokens reported by the provider. Ignores calls
     /// where either side is zero (mock adapters, missing usage blocks).

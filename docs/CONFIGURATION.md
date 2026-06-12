@@ -40,6 +40,10 @@ policy:
   delegation_min_scale: 1.5   # savings must exceed penalty * this scale
   max_cost_per_task_usd: 0    # budget sentinel (S29); 0 = disabled
   reuse_cache: true           # verified solution cache (S25)
+  verification_command: ""    # global local verification command
+  verification_commands:      # route-specific local verification commands
+    PATCH: "cargo check"
+    IMPLEMENT: "cargo test"
 ```
 
 | Field | Type | Default | Meaning |
@@ -50,6 +54,8 @@ policy:
 | `delegation_min_scale` | float | `1.5` | Estimated savings must exceed `delegation_penalty × delegation_min_scale` before `DELEGATE` is chosen. |
 | `max_cost_per_task_usd` | float | `0` | Budget sentinel (S29): hard per-task USD ceiling. Over-budget providers are pruned from the failover chain; if **every** candidate exceeds it, the run terminates locally at zero token cost. `0` disables. |
 | `reuse_cache` | bool | `true` | Verified solution cache (S25): identical goal+constraints re-requests are served from SQLite at zero tokens. Only verified successes are cached; a later failure of the goal evicts the entry. |
+| `verification_command` | string | `""` | Optional global verification shell command. Runs on successful execution of tasks. |
+| `verification_commands` | map | `{}` | Optional route-specific verification shell commands overrides (keys are route types, e.g. `PATCH` or `IMPLEMENT`). |
 
 ## `providers` — provider profiles
 
@@ -213,6 +219,34 @@ execution_routing:
     fallback: mock
     timeout_ms: 60000
 ```
+
+## `security` — security & governance policies
+
+Configures traces retention, spend limits, and scoped API tokens.
+
+```yaml
+security:
+  disable_traces: false           # set true to disable all out-of-band flight logs
+  retention_days: 30              # auto-pruning window for database & traces (0 = forever)
+  owner_only_permissions: true    # enforces owner-only (0o600/0o700) file permissions on Unix
+  daily_spend_limit_usd: 0.0      # daily cost ceiling; 0 disables
+  monthly_spend_limit_usd: 0.0    # monthly cost ceiling; 0 disables
+  api_tokens:
+    read_only_token_abc: ["read"]
+    runner_token_xyz: ["run", "read"]
+    admin_token_123: ["admin"]
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `disable_traces` | bool | `false` | If true, trace files are not written to disk. |
+| `retention_days` | int | `30` | Auto-pruning window for loop history, telemetry records, and traces on startup. |
+| `owner_only_permissions` | bool | `true` | Enforces owner-only file permissions on traces and state files. |
+| `daily_spend_limit_usd` | float | `0.0` | Saturated daily spend blocks further execution; 0 disables. |
+| `monthly_spend_limit_usd` | float | `0.0` | Saturated monthly spend blocks further execution; 0 disables. |
+| `api_tokens` | map | `{}` | Map of API bearer token to list of authorized scopes (`read`, `run`, `admin`). |
+
+---
 
 ## Validation
 
