@@ -83,7 +83,7 @@ placeholder, the response leg restores the original value. Properties:
 
 All routing and masking regexes use the Rust `regex` crate, which compiles
 to finite automata with **linear-time matching** — catastrophic backtracking
-is impossible by construction, no matter what the model emits.
+is not part of this regex engine's execution model.
 
 ### Bounded Levenshtein
 

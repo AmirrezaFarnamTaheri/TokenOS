@@ -30,6 +30,7 @@ pub struct Event {
 /// Recorder writes trace events under a base directory.
 pub struct Recorder {
     base: PathBuf,
+    owner_only_permissions: bool,
 }
 
 /// Canonical trace directory: $TOKENOS_TRACES or ~/.local/state/tokenos/traces.
@@ -52,26 +53,32 @@ pub fn default_dir() -> PathBuf {
 impl Recorder {
     /// Create a Recorder rooted at dir (None = default_dir()).
     pub fn new(dir: Option<&Path>) -> Result<Self> {
+        Self::new_with_owner_permissions(dir, true)
+    }
+
+    /// Create a Recorder rooted at dir and optionally harden Unix filesystem
+    /// permissions to owner-only access.
+    pub fn new_with_owner_permissions(
+        dir: Option<&Path>,
+        owner_only_permissions: bool,
+    ) -> Result<Self> {
         let base = match dir {
             Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
             _ => default_dir(),
         };
         fs::create_dir_all(&base)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&base, Permissions::from_mode(0o700));
+        if owner_only_permissions {
+            harden_dir(&base);
         }
         let obj_dir = base.join("objects");
         fs::create_dir_all(&obj_dir)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&obj_dir, Permissions::from_mode(0o700));
+        if owner_only_permissions {
+            harden_dir(&obj_dir);
         }
-        Ok(Self { base })
+        Ok(Self {
+            base,
+            owner_only_permissions,
+        })
     }
 
     /// Store content-addressed payload bytes, returning the SHA-256 hex.
@@ -84,18 +91,12 @@ impl Recorder {
             return Ok(sha); // already stored
         }
         fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dir, Permissions::from_mode(0o700));
+        if self.owner_only_permissions {
+            harden_dir(&dir);
         }
         fs::write(&path, data)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, Permissions::from_mode(0o600));
+        if self.owner_only_permissions {
+            harden_file(&path);
         }
         Ok(sha)
     }
@@ -127,11 +128,8 @@ impl Recorder {
             .create(true)
             .append(true)
             .open(&journal)?;
-        #[cfg(unix)]
-        {
-            use std::fs::Permissions;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&journal, Permissions::from_mode(0o600));
+        if self.owner_only_permissions {
+            harden_file(&journal);
         }
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
@@ -228,6 +226,26 @@ impl Recorder {
         Ok(pruned_count)
     }
 }
+
+#[cfg(unix)]
+fn harden_dir(path: &Path) {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn harden_dir(_path: &Path) {}
+
+#[cfg(unix)]
+fn harden_file(path: &Path) {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn harden_file(_path: &Path) {}
 
 fn sanitize(s: &str) -> String {
     s.chars()

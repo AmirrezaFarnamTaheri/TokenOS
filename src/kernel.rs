@@ -287,7 +287,7 @@ pub struct Decision {
 
 /// Applies the kernel's strict priority ladder. Earliest applicable route
 /// wins. Escalations and information blocks preempt everything because they
-/// cost the least and prevent guaranteed waste.
+/// cost the least and prevent likely wasted provider calls.
 pub fn decide(s: Signals, p: &RouterPolicy) -> Decision {
     let (route, reason) = if s.safety_violation {
         (

@@ -63,7 +63,7 @@ struct Health {
     calls: Vec<Instant>,
     /// Evolution S26: rate-limit circuit breaker. A 429 opens the breaker
     /// until this instant; while open the provider is skipped in failover
-    /// (retrying a provider that just told us "stop" is guaranteed waste).
+    /// because retrying a recent 429 is almost always wasted work.
     cooldown_until: Option<Instant>,
     /// Consecutive 429s drive exponential backoff.
     consecutive_429s: u32,

@@ -64,9 +64,9 @@ maintains, and where the zero-token boundaries are.
         +-----------------------+
 ```
 
-Everything above and below the provider adapter is pure CPU work. The kernel
-guarantees that routing, context selection, verification, loop detection, and
-provider ordering never consume a single token.
+Everything above and below the provider adapter is local CPU work. Routing,
+context selection, verification, loop detection, and provider ordering do not
+consume provider tokens.
 
 ## 2. Crate layout
 

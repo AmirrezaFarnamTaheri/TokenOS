@@ -1,9 +1,9 @@
 # TokenOS Due-Diligence, Security, Reliability, and Engineering Audit
 
 Audit date: 2026-06-12  
-Finalization pass: 2026-06-12 after remediation and verification  
+Finalization pass: 2026-06-13 after remediation, risk acceptance, verification, and commit closure
 Repository root: `D:\GitHub\TokenOS`  
-Branch observed: `main` at `02c157b` tracking `origin/genspark_ai_developer`  
+Branch observed: `development` finalization branch
 Assessment type: executive-grade technical due diligence, source audit, security review, reliability review, operational readiness review  
 Scope: tracked repository files, local build/test/lint execution, local CLI smoke tests, static dependency audit, documentation consistency review, remediation verification  
 Out of scope: live provider API compatibility, cloud deployment posture, GitHub repository settings, issue tracker history, external penetration test, production telemetry
@@ -16,7 +16,7 @@ The project has several strong foundations and, after this refinement pass, seve
 
 - The default release build succeeds on Windows after installing Rust 1.96.0.
 - The optional `native` feature also builds successfully on Windows.
-- `cargo test --locked` passes: 186 tests passed, 0 failed.
+- `cargo test --locked` passes: 197 tests passed, 0 failed.
 - `cargo fmt --all -- --check` passes.
 - `cargo clippy --all-targets -- -D warnings` passes.
 - The default configuration is offline-capable through the mock provider.
@@ -27,17 +27,19 @@ The project has several strong foundations and, after this refinement pass, seve
 - ASK now terminates locally with one deterministic clarifying question and zero provider/tokens.
 - REUSE is now driven by an exact verified solution-cache hit, not by workspace context.
 - Active CI now exists at `.github/workflows/ci.yml` with blocking fmt, clippy, audit, build, test, and native build jobs.
+- Route-specific verification commands now run after static checks and before cache admission.
+- Execution attempts are first-class SQLite telemetry rows.
+- Trace/state retention, trace disablement, and Unix owner-only permission hardening are implemented.
+- `/api/run` has process-local backpressure, scoped API-token middleware, and engine-enforced daily/monthly spend limits.
+- Static responses include CSP and common hardening headers.
 - The dependency audit found no known RustSec vulnerabilities in the lockfile at the time tested.
 
 The most decision-relevant residual issues are now narrower:
 
-- **Verification remains shallow:** the live engine still relies on static output checks, not semantic tests or an independent verifier.
-- **Native supply-chain warnings remain:** `cargo audit` reports 11 unmaintained GTK3-family crates and 1 unsound `glib` advisory in the lockfile, primarily pulled through optional native GUI dependencies.
-- **Trace/data-at-rest governance remains local-only:** traces and SQLite state are masked where designed but not encrypted, retained, pruned, or permission-hardened beyond default filesystem behavior.
-- **Remote/multi-user serving remains limited:** `/api/run` has a process-local concurrency limit, timeout, body limit, and bearer auth, but no TLS, per-token scopes, per-user rate limits, or aggregate spend quotas.
-- **Supply-chain warnings exist for optional native dependencies:** `cargo audit` reports 11 unmaintained GTK3-family crates and 1 unsound `glib` advisory in the lockfile, primarily pulled through optional native GUI dependencies.
+- **Native supply-chain warnings remain:** `cargo audit` reports 11 unmaintained GTK3-family crates and 1 unsound `glib` advisory in the lockfile, primarily pulled through optional native GUI dependencies; this is formally risk-accepted for the optional `native` feature in `docs/RISK_ACCEPTANCE.md`.
+- **Remote/multi-user serving remains limited:** `/api/run` has process-local concurrency, timeout, body-size, bearer-auth, scoped-token, and spend guardrails, but no native TLS or distributed rate limiter. `docs/RISK_ACCEPTANCE.md` documents the required external controls.
 
-Executive verdict: TokenOS is materially stronger after remediation. The former P0 routing defects, inactive CI, fmt/clippy failures, browser-auth gap, trace-index gap, and `/api/run` process backpressure gap are closed and covered by tests or smoke checks. It is now credible as a local-first, single-user execution kernel prototype with strong deterministic controls. It should still not be marketed as a fully production-grade multi-tenant agent platform until semantic verification, data-retention/encryption controls, native dependency governance, and remote deployment controls mature.
+Executive verdict: TokenOS is materially stronger after remediation. The former P0 routing defects, inactive CI, fmt/clippy failures, browser-auth gap, trace-index gap, verification-tier gap, first-class attempt telemetry gap, trace-governance gap, and `/api/run` backpressure/spend gap are closed and covered by tests or smoke checks. It is now credible as a local-first, single-user execution kernel with strong deterministic controls. It should still not be marketed as a native multi-tenant cloud service without TLS termination, distributed quotas/rate limits, hosted branch-protection verification, and formal acceptance of optional native dependency advisories.
 
 ## 2. System Overview
 
@@ -91,7 +93,7 @@ Logical flow:
 6. `maskcodec::mask_prompt` redacts outbound prompt secrets.
 7. `pricing::quote_all` scores candidate providers.
 8. `provider::Adapter::execute` calls mock/OpenAI/Anthropic/Gemini/proxy.
-9. `payload::extract_solution`, optional `jsonrescue`, and `verify::static_check` process output.
+9. `payload::extract_solution`, optional `jsonrescue`, and `verify::verify_output` process output.
 10. `store` records task state and execution telemetry.
 11. `recorder` writes forensic events and blobs.
 12. `webui` and CLI expose state, traces, telemetry, config, and run controls.
@@ -116,7 +118,7 @@ Runtime is process-local:
 - Bandit: atomic counters and atomic f64 wrappers.
 - Web handlers: shared `Arc<Engine>` plus process-local `/api/run` semaphore.
 
-Concurrency is generally scoped well: no global web handler lock is held across network calls, and `/api/run` is now capped by a process-local semaphore. SQLite and filesystem operations remain synchronous inside async handlers, and there is still no per-user/per-token aggregate spend limiter.
+Concurrency is generally scoped well: no global web handler lock is held across network calls, and `/api/run` is now capped by a process-local semaphore. SQLite and filesystem operations remain synchronous inside async handlers. Server-side daily/monthly spend limits and scoped API tokens exist; distributed rate limiting and multi-process quota coordination remain out of scope.
 
 ### Deployment Architecture
 
@@ -126,7 +128,7 @@ Current deployment options:
 - Local web dashboard via `tokenos serve`.
 - Optional native shell via `cargo build --release --features native` and `tokenos app`.
 
-CI/release architecture is active under `.github/workflows/ci.yml`; local verification confirms the same fmt, clippy, test, audit, and build gates are currently clean except for known informational native dependency warnings from `cargo audit`.
+CI/release architecture is active under `.github/workflows/ci.yml`; it runs on `main`, `development`, `feat/**`, `fix/**`, and `codex/**` pushes plus PRs into `main` or `development`. Local verification confirms the same fmt, clippy, test, audit, and build gates are currently clean except for known informational native dependency warnings from `cargo audit`.
 
 ## 4. Component Inventory
 
@@ -135,25 +137,25 @@ CI/release architecture is active under `.github/workflows/ci.yml`; local verifi
 | `src/main.rs` | CLI, command dispatch, public bind guard | Core maintainer inferred | `clap`, `Engine`, `webui` | CLI/docs drift remains possible; public bind guard depends on correct operator token handling | Medium | Critical |
 | `src/lib.rs` | Public library root | Core maintainer inferred | All modules | Very broad public API surface | Medium | High |
 | `src/kernel.rs` | Route enum, task state, signal extraction, route ladder | Core maintainer inferred | `regex`, `chrono`, `serde` | Heuristic route errors directly affect cost/correctness | Medium | Critical |
-| `src/engine.rs` | End-to-end orchestration | Core maintainer inferred | Most modules | Highest blast radius; semantic verification remains shallow | Medium | Critical |
+| `src/engine.rs` | End-to-end orchestration | Core maintainer inferred | Most modules | Highest blast radius; verification command quality depends on operator configuration | Medium | Critical |
 | `src/provider.rs` | Mock/OpenAI/Anthropic/Gemini/proxy adapters | Core maintainer inferred | `reqwest`, provider APIs | Live API compatibility unverified; provider manifests can drift | Medium | Critical |
 | `src/pricing.rs` | Provider shadow pricing, health, cooldown, bandit, drift | Core maintainer inferred | atomics, mutex maps | Process-local learning; no durable provider health | Medium | High |
 | `src/payload.rs` | Prompt contract and extraction | Core maintainer inferred | `serde_json` | Prompt contract overclaims output quality; extraction heuristic risk | Medium | High |
-| `src/verify.rs` | Static verification | Core maintainer inferred | `regex` | "Verified" means shallow static checks only | Low-Medium | Critical |
+| `src/verify.rs` | Static plus configured command verification | Core maintainer inferred | `regex`, shell command runner | External verification is only as strong as configured commands | Medium | Critical |
 | `src/tokenizer.rs` | Token estimation and truncation | Core maintainer inferred | embedded vocab | Estimator approximate; drift watchdog mitigates but does not eliminate model-tokenizer divergence | Medium | High |
 | `src/jsonrescue.rs` | Lenient truncated JSON repair | Core maintainer inferred | `serde_json` | Can salvage partial data; semantic correctness not guaranteed | Medium | Medium |
 | `src/maskcodec.rs` | Secret redaction and unmasking | Core maintainer inferred | `regex` | Pattern coverage incomplete by nature; generated new secrets remain residual risk | Medium | Critical |
 | `src/loopdetect.rs` | Semantic loop detection | Core maintainer inferred | custom Levenshtein | False positives/negatives; scope keyed only by task text | Medium | High |
 | `src/contextidx.rs` | Symbol extraction and SQLite FTS/LIKE search | Core maintainer inferred | `rusqlite`, `walkdir`, `regex` | Search quality affects prompt relevance; no semantic code understanding | Medium | Critical |
-| `src/store.rs` | SQLite persistence | Core maintainer inferred | `rusqlite`, `serde_json` | No encryption/ACL hardening; trace/cache retention controls absent | Medium | Critical |
-| `src/recorder.rs` | File-based trace journals and CAS blobs | Core maintainer inferred | filesystem, SHA-256 | Sensitive business content at rest; no retention controls | Medium | High |
-| `src/webui.rs` | Axum API and embedded assets | Core maintainer inferred | `axum`, `tokio` | No TLS/CSP/security headers; rate limiting is process-local only | Medium | High |
+| `src/store.rs` | SQLite persistence | Core maintainer inferred | `rusqlite`, `serde_json` | No encryption; retention and Unix owner-only permissions are implemented | Medium | Critical |
+| `src/recorder.rs` | File-based trace journals and CAS blobs | Core maintainer inferred | filesystem, SHA-256 | Sensitive business content at rest; retention and Unix owner-only permissions are implemented | Medium | High |
+| `src/webui.rs` | Axum API and embedded assets | Core maintainer inferred | `axum`, `tokio` | No native TLS; security headers and process-local backpressure are implemented | Medium | High |
 | `src/nativeapp.rs` | Optional desktop shell | Core maintainer inferred | `tao`, `wry` | Optional dependency warnings; platform-specific runtime risk | Low-Medium | Medium |
 | `static/app.js` | Dashboard behavior | Core maintainer inferred | Browser APIs only | In-memory/session token handling; XSS mostly mitigated via escaping | Medium | Medium |
 | `static/index.html` | Dashboard shell | Core maintainer inferred | `app.js`, `style.css` | Help text can drift from engine semantics | Medium | Medium |
 | `static/style.css` | Dashboard styling | Core maintainer inferred | none | Low technical risk | Medium | Low |
 | `docs/*.md` | User/operator docs | Core maintainer inferred | Code behavior | Drift risk reduced but ongoing governance needed | Medium | High |
-| `.github/workflows/ci.yml` | Active CI/release | Core maintainer inferred | GitHub Actions | Repository branch protection not verified from local audit | Medium | Critical |
+| `.github/workflows/ci.yml` | Active CI/release | Core maintainer inferred | GitHub Actions | Hosted branch protection still requires authenticated GitHub verification | Medium | Critical |
 | `Cargo.toml` | Build manifest | Core maintainer inferred | Rust toolchain | Optional GUI dependencies widen lockfile | Medium | Critical |
 | `Cargo.lock` | Locked dependency graph | Core maintainer inferred | crates.io | 409 deps per cargo audit lockfile summary | Medium | Critical |
 | `TokenOS Main Report.txt` | Untracked large report-like artifact | Unknown | Unknown | Not in git; may confuse evidence provenance | Unknown | Low-Medium |
@@ -253,7 +255,7 @@ Evidence:
 - Banditized order: `src/engine.rs:761-795`.
 - Execution loop: `src/engine.rs:389-637`.
 
-Risk: failed failover attempts are recorded in recorder/failure memory, but not as first-class execution telemetry rows.
+Risk: provider failover attempts are now first-class `execution_attempts` rows, but there is not yet a dedicated dashboard/API view over that table.
 
 ### Workflow: Persistence and Trace Replay
 
@@ -271,7 +273,7 @@ Evidence:
 - CLI trace: `src/main.rs:402-421`.
 - Web trace: `src/webui.rs:275-281`.
 
-Current status: trace indexing remediated. Regression test `flight_recorder_events_are_indexed_in_store` asserts SQLite trace count equals recorder event count for a run. Residual risk: failed failover attempts remain trace events rather than first-class execution-attempt telemetry rows.
+Current status: trace indexing and first-class execution-attempt telemetry are remediated. Regression test `flight_recorder_events_are_indexed_in_store` asserts SQLite trace count equals recorder event count for a run; engine failover branches record failed transport, failed verification, loop-escalation, and successful provider attempts into `execution_attempts`. Residual risk: the dashboard does not yet expose a dedicated attempts view.
 
 ## 6. Dependency Analysis
 
@@ -330,7 +332,7 @@ Strengths:
 Weaknesses:
 
 - No TLS is served by TokenOS itself; docs require reverse proxy for remote.
-- No CSP or common security headers are set for static assets.
+- CSP and common browser hardening headers are emitted by the static/API router.
 - No server-side RBAC: token equals full control.
 - Token storage is browser memory by default with opt-in sessionStorage; no cookie/session invalidation model exists.
 
@@ -376,7 +378,7 @@ Most credible attacks:
 
 Strengths:
 
-- Unit test count is meaningful for codebase size: 186 tests passed locally.
+- Unit test count is meaningful for codebase size: 197 tests passed locally.
 - Release build succeeds.
 - Native release build succeeds on Windows.
 - SQLite uses WAL and busy timeout: `src/store.rs:132-134`.
@@ -388,7 +390,7 @@ Strengths:
 
 Weaknesses:
 
-- Static verification is shallow but feeds "verified solution cache".
+- Verification begins with static checks and can require configured global or route-specific local test commands before cache admission.
 - No automatic recovery/repair for corrupted SQLite rows; listing functions silently drop deserialization failures.
 - Bandit and drift data are process-local, not durable.
 - Recorder writes do not use explicit per-task journal locking.
@@ -409,11 +411,11 @@ Scaling positives:
 Scaling limits:
 
 - SQLite connection is serialized through one mutex.
-- Web `/api/run` has no per-token, per-user, daily, monthly, or organization-level budget governor.
+- Web/API executions have daily and monthly spend governors in the engine; distributed or organization-level quotas remain out of scope.
 - Indexing is synchronous and in-memory by default for CLI workspace usage.
 - Provider health and bandit learning do not survive process restarts.
 - No queue, admission control, or cancellation API exists.
-- Trace retention is unbounded.
+- Trace and SQLite telemetry retention are pruned on engine startup according to `security.retention_days`.
 
 ## 10. Operational Assessment
 
@@ -428,7 +430,7 @@ Operational strengths:
 Operational risks:
 
 - No deployment guide for a hardened remote service beyond high-level reverse proxy guidance.
-- No log retention or trace retention controls.
+- Trace retention and telemetry pruning controls exist; external log retention remains deployment-specific.
 - No structured incident response workflow.
 - Release provenance depends on GitHub Actions/tag discipline; branch protection was not verified locally.
 - No documented ownership or codeowners.
@@ -450,7 +452,7 @@ Documented correctly:
 Former drift or overclaims corrected in this pass:
 
 - ASK zero-token behavior now matches code and docs.
-- README test count now reflects 186 tests.
+- README test count now reflects 197 tests.
 - README build section documents fmt/clippy gates explicitly.
 - API/CLI/security/troubleshooting docs describe dashboard bearer-token entry.
 - REUSE is documented as exact verified solution-cache replay, while workspace context is documented as prompt context only.
@@ -580,7 +582,7 @@ Remediation evidence: `.github/workflows/ci.yml` now contains blocking fmt, clip
 Repository automation permission limitation led to staged workflow workaround.
 
 **Technical Impact**  
-No guaranteed automated build/test/lint gate on pushes or PRs.
+Without hosted branch protection or rulesets, GitHub may not require the existing automated build/test/lint gate before merges.
 
 **Operational Impact**  
 Broken changes can merge unnoticed.
@@ -607,7 +609,7 @@ Baseline: High. Current residual severity: Medium until branch protection is ver
 High.
 
 **Remediation**  
-Implemented: active workflow added at `.github/workflows/ci.yml`; staged workflow files removed. Still recommended: configure branch protection in GitHub to require these checks.
+Implemented: active workflow added at `.github/workflows/ci.yml`; workflow now covers `development` as well as `main` and feature/fix/codex branches; staged workflow files removed. Still required externally: configure branch protection or rulesets in GitHub to require these checks.
 
 **Effort**  
 S.
@@ -616,7 +618,7 @@ S.
 P1 baseline; repository-file portion closed.
 
 **Validation Method**  
-Open a PR and verify required GitHub checks run and block failures. Local source audit cannot verify hosted branch protection.
+Open a PR and verify required GitHub checks run and block failures. Local source audit cannot verify hosted branch protection without GitHub authentication; `gh auth status` reports no authenticated GitHub host in this workspace.
 
 ### F-04: Current Quality Gates Fail Under Rust 1.96.0 (Remediated)
 
@@ -626,7 +628,7 @@ Baseline: local test/build passed, but `cargo fmt --check` and clippy failed. Cu
 **Evidence**  
 Installed toolchain: `rustc 1.96.0`, `cargo 1.96.0`.  
 Baseline evidence: `cargo fmt --all -- --check` exited 1 and `cargo clippy --all-targets -- -D warnings` exited 101.  
-Remediation evidence: `cargo fmt --all -- --check` exits 0; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo test --locked` exits 0 with 186 passed; release and native release builds exit 0.
+Remediation evidence: `cargo fmt --all -- --check` exits 0; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo test --locked` exits 0 with 197 passed; release and native release builds exit 0.
 
 **Root Cause**  
 Formatting drift accumulated because CI did not enforce it; current active CI makes these gates blocking.
@@ -772,20 +774,20 @@ P2 baseline; closed.
 **Validation Method**  
 Unit test behavior and review implementation. Optionally benchmark mismatch paths for no early-return behavior.
 
-### F-07: Config Validation Does Not Fail Fast on Missing Live Provider Secrets or Invalid Economic Values (Mostly Remediated)
+### F-07: Config Validation Does Not Fail Fast on Missing Live Provider Secrets or Invalid Economic Values (Remediated)
 
 **Description**  
-Baseline: enabled API-key providers could be constructed with empty API keys, and config validation checked only basic provider/routing references. Current status: **Mostly remediated**.
+Baseline: enabled API-key providers could be constructed with empty API keys, and config validation checked only basic provider/routing references. Current status: **Remediated**.
 
 **Evidence**  
 Baseline evidence: old provider construction used `unwrap_or_default()` for missing env vars; validation checked provider references and adapter presence only.  
-Remediation evidence: `Config::validate` now rejects unknown adapters, enabled live providers without `api_key_env`, proxy providers without endpoints, non-positive live context windows, and negative costs. `Adapter::new` rejects live adapters when the resolved environment variable is empty. Tests cover unknown adapter, missing env key name, and live adapter credential failure.
+Remediation evidence: `Config::validate` now rejects unknown adapters, enabled live providers without `api_key_env`, proxy providers without endpoints, non-positive live context windows, negative costs, unknown route names, invalid verification-command route keys, and invalid policy numeric ranges. `Adapter::new` rejects live adapters when the resolved environment variable is empty. Tests cover unknown adapter, missing env key name, invalid route type, invalid verification route, invalid policy ranges, and live adapter credential failure.
 
 **Root Cause**  
 Config validation was structural, not semantic. Current validation covers the most important semantic live-provider invariants.
 
 **Technical Impact**  
-Most missing-key and invalid-provider cases now fail before or during adapter construction with specific messages.
+Missing-key and invalid-provider/policy cases now fail before or during adapter construction with specific messages.
 
 **Operational Impact**  
 Operators diagnose auth failures later than necessary.
@@ -803,25 +805,25 @@ Misconfigured fleets degrade routing and telemetry.
 Cost and provider reliability metrics become unreliable.
 
 **Likelihood**  
-Baseline: Medium-High. Current residual likelihood: Medium.
+Baseline: Medium-High. Current residual likelihood: Low-Medium.
 
 **Severity**  
-Baseline: Medium. Current residual severity: Low-Medium.
+Baseline: Medium. Current residual severity: Low.
 
 **Confidence**  
 High.
 
 **Remediation**  
-Implemented: required live env var names, non-empty resolved live keys at adapter construction, non-negative costs, positive context windows for live providers, valid adapter enum, and proxy endpoint checks. Residual recommended work: validate route names and policy numeric ranges more exhaustively.
+Implemented: required live env var names, non-empty resolved live keys at adapter construction, non-negative costs, positive context windows for live providers, valid adapter enum, proxy endpoint checks, route-name validation, verification-command route validation, and policy numeric range validation.
 
 **Effort**  
 M.
 
 **Priority**  
-P1 baseline; mostly closed.
+P1 baseline; closed.
 
 **Validation Method**  
-Completed for missing env key name, invalid adapter, and adapter-level missing credential. Add route-name/policy-range tests as future hardening.
+Completed for missing env key name, invalid adapter, adapter-level missing credential, invalid route names, invalid verification-command routes, and invalid policy ranges.
 
 ### F-08: Verified Solution Cache Can Return Masked Placeholders Instead of User-Facing Secrets (Remediated)
 
@@ -874,56 +876,56 @@ P2 baseline; closed.
 **Validation Method**  
 Completed via durable-sink regression test and cache replay guard. Future test can add explicit second-run coverage for a stale manually inserted placeholder cache row.
 
-### F-09: Telemetry and Trace Persistence Are Split in a Way That Weakens Auditability (Partially Remediated)
+### F-09: Telemetry and Trace Persistence Are Split in a Way That Weakens Auditability (Remediated)
 
 **Description**  
-Baseline: executions table recorded final run outcomes, while failed failover attempts lived only in recorder/failure memory; the `traces` SQLite table existed but was unused. Current status: **Partially remediated**.
+Baseline: executions table recorded final run outcomes, while failed failover attempts lived only in recorder/failure memory; the `traces` SQLite table existed but was unused. Current status: **Remediated**.
 
 **Evidence**  
 Baseline evidence: `Store::record_trace` existed with no source usage.  
-Remediation evidence: engine recorder writes now flow through `record_event`, which writes both the recorder journal/blob and SQLite trace metadata; `flight_recorder_events_are_indexed_in_store` asserts recorder events and SQL trace rows stay in sync. Residual evidence: provider attempts are still not modeled as first-class `execution_attempts` rows.
+Remediation evidence: engine recorder writes now flow through `record_event`, which writes both the recorder journal/blob and SQLite trace metadata; `flight_recorder_events_are_indexed_in_store` asserts recorder events and SQL trace rows stay in sync. Provider attempts are modeled as first-class `execution_attempts` rows with task ID, provider, model, route, token counts, latency, success, error text, cost, and timestamp.
 
 **Root Cause**  
-Two diagnostic systems evolved in parallel. Trace indexing is now unified, but execution-attempt telemetry remains separate from final execution rows.
+Two diagnostic systems evolved in parallel. Trace indexing is now unified and provider-attempt telemetry is stored separately from final execution rows so retries and final outcomes can both be queried.
 
 **Technical Impact**  
-Trace metadata is queryable, but provider failure rates and retry reasons still require recorder replay rather than SQL attempt aggregation.
+Trace metadata and provider attempts are queryable without recorder replay.
 
 **Operational Impact**  
-Dashboards underreport failover pain.
+Operators can aggregate failover pain, retry latency, token use, and error reasons from SQLite telemetry.
 
 **Security Impact**  
-Incident review may miss events if filesystem traces are unavailable.
+Incident review has both filesystem traces and SQL metadata for attempt-level events.
 
 **Reliability Impact**  
-Root-cause analysis is slower.
+Root-cause analysis is faster because failed attempts are structured rows.
 
 **Scalability Impact**  
-Ad hoc trace files become harder to aggregate.
+Attempt telemetry is structured in a relational table for aggregation.
 
 **Business Impact**  
-Weak cost/reliability evidence for provider selection.
+Better cost/reliability evidence for provider selection.
 
 **Likelihood**  
-Baseline: High. Current residual likelihood: Medium.
+Baseline: High. Current residual likelihood: Low.
 
 **Severity**  
-Medium; partially reduced.
+Baseline: Medium. Current residual severity: Low.
 
 **Confidence**  
 High.
 
 **Remediation**  
-Implemented: wired recorder events into the trace table. Remaining remediation: create a unified `execution_attempts` table with task_id, provider, model, route, attempt_index, status, error_class, latency, tokens, and cost.
+Implemented: wired recorder events into the trace table, created `execution_attempts`, and record failed transport attempts, failed verification attempts, loop-escalation attempts, and successful provider attempts.
 
 **Effort**  
 M.
 
 **Priority**  
-P2; partially closed.
+P2; closed.
 
 **Validation Method**  
-Completed for trace indexing. Remaining validation: inject provider failures and assert attempts appear in first-class SQL telemetry and web API once `execution_attempts` exists.
+Completed for trace indexing and attempt recording through unit tests and source-level verification of the engine failover branches.
 
 ### F-10: Optional Native Dependency Chain Has RustSec Informational Warnings
 
@@ -966,7 +968,7 @@ Medium.
 Medium-High.
 
 **Remediation**  
-Track native dependency advisories separately. Evaluate newer `wry`/GTK4-compatible paths when available. Consider making native release experimental until warnings are cleared or risk-accepted.
+Track native dependency advisories separately. Current status is formal risk acceptance for the optional `native` feature in `docs/RISK_ACCEPTANCE.md`. Evaluate newer `wry`/GTK4-compatible paths when available.
 
 **Effort**  
 M-L.
@@ -977,213 +979,213 @@ P2.
 **Validation Method**  
 Run `cargo audit`, `cargo build --features native`, and smoke tests on Linux/macOS/Windows in active CI.
 
-### F-11: Sensitive Local Artifacts Lack Implementation-Level Retention and Permission Controls
+### F-11: Sensitive Local Artifacts Lack Implementation-Level Retention and Permission Controls (Remediated)
 
 **Description**  
-SQLite state and trace files are created under default user paths, but no explicit permissions, encryption, retention, or scrubbing controls are implemented.
+SQLite state and trace files are created under default user paths. Current status: **Remediated for retention, trace disablement, and Unix owner-only permissions**; encryption-at-rest remains deployment guidance rather than an embedded feature.
 
 **Evidence**  
 Default DB path: `src/store.rs:24-34`.  
 Default trace path: `src/recorder.rs:35-46`.  
-Directories created with `create_dir_all`: `src/store.rs:119-129`, `src/recorder.rs:50-56`.  
-Security docs warn traces contain business content: `docs/SECURITY.md:97-112`.
+Remediation evidence: `SecurityPolicy` includes `disable_traces`, `retention_days`, and `owner_only_permissions`. `Engine::new` calls `Store::open_with_owner_permissions`, `Recorder::new_with_owner_permissions`, `prune_old_records`, and `prune_old_traces`. `src/store.rs` hardens Unix DB directories/files and SQLite WAL/SHM sidecars to owner-only permissions when enabled. `src/recorder.rs` hardens trace directories, object files, and journals to owner-only permissions when enabled.
 
 **Root Cause**  
-Local-first prototype uses default filesystem security.
+The local-first prototype originally used default filesystem security. It now applies portable retention controls and Unix permission hardening where the platform exposes POSIX modes.
 
 **Technical Impact**  
-Data protection depends on OS/user profile defaults.
+Data protection no longer depends solely on OS/user profile defaults on Unix; encryption-at-rest remains an operator deployment decision.
 
 **Operational Impact**  
-Shared machines and backups can retain sensitive prompts/responses indefinitely.
+Shared machines and backups are less exposed because traces can be disabled and records/traces are pruned by retention policy.
 
 **Security Impact**  
-Business-sensitive content can persist unencrypted.
+Business-sensitive content can persist unencrypted, but owner-only permissions and retention reduce local exposure.
 
 **Reliability Impact**  
-Trace growth can consume disk over time.
+Trace growth is bounded by `security.retention_days` on engine startup.
 
 **Scalability Impact**  
-No retention policy for long-running use.
+Retention policy exists for long-running use.
 
 **Business Impact**  
-Compliance and customer-data concerns.
+Residual compliance concern is encryption/key-management, not basic retention or filesystem permissions.
 
 **Likelihood**  
-Medium.
+Baseline: Medium. Current residual likelihood: Low-Medium.
 
 **Severity**  
-Medium.
+Baseline: Medium. Current residual severity: Low-Medium.
 
 **Confidence**  
 High.
 
 **Remediation**  
-Add retention settings, trace pruning, optional trace disablement, explicit permission hardening where portable, and documented encryption-at-rest guidance. Consider SQLCipher or OS keychain integration for sensitive deployments.
+Implemented: retention settings, trace pruning, optional trace disablement, explicit Unix permission hardening for SQLite/trace artifacts, and documented encryption-at-rest guidance. Future sensitive deployments can add SQLCipher or OS keychain integration.
 
 **Effort**  
 M-L.
 
 **Priority**  
-P2.
+P2; closed for the stated remediation scope.
 
 **Validation Method**  
-Run integration tests confirming file mode/ACL where applicable, retention pruning, and trace disablement.
+Validation completed through retention/pruning tests, source verification of trace disablement, and final `cargo test --locked` pass.
 
-### F-12: "Verified Success" Is Based on Shallow Static Checks Only
+### F-12: "Verified Success" Is Based on Shallow Static Checks Only (Remediated)
 
 **Description**  
-The verification module describes a tiered budget including targeted tests and LLM verifier, but live engine execution calls only `verify::static_check`.
+The verification module described a tiered budget including targeted tests and LLM verifier, but live engine execution originally called only `verify::static_check`. Current status: **Remediated** for configured local test-command verification before success/cache admission.
 
 **Evidence**  
 Verification doc comment: `src/verify.rs:1-8`.  
-Engine call: `src/engine.rs:521-526`.  
-Static check implementation: `src/verify.rs:28-71`.  
-`Status::Verifying` exists but was not found in live usage beyond enum definition.
+Engine now calls `verify::verify_output`, which runs static checks first and then a global or route-specific configured local verification command.
+`RouterPolicy` exposes `verification_command` and `verification_commands`.
+`executions` and `solution_cache` persist `verification_tier`.
+Tests cover successful command verification, failed command verification, and route-specific command override.
 
 **Root Cause**  
-Verification roadmap is documented in comments, but only first tier is implemented.
+Verification roadmap originally stopped at static checks. Local command verification is now implemented and wired into the engine.
 
 **Technical Impact**  
-Outputs can be cached after passing format checks, not semantic correctness checks.
+Outputs can be cached only after static checks and any configured command verification pass.
 
 **Operational Impact**  
-Telemetry "success" can overstate actual task completion.
+Telemetry records `verification_tier`, making static-only versus test-verified success explicit.
 
 **Security Impact**  
-Malicious or unsafe model output can pass if structurally plausible.
+Malicious or unsafe model output can still pass if operators configure no test command, but the system now supports blocking command-level validation.
 
 **Reliability Impact**  
-False positives in success/cache admission.
+False positives are reduced by optional command verification before success/cache admission.
 
 **Scalability Impact**  
-Bad cached answers can propagate cheaply.
+Bad cached answers are less likely to propagate when verification commands are configured; static-only cache entries remain labeled.
 
 **Business Impact**  
-Due-diligence concern: "verified" is not equivalent to tested.
+Due-diligence concern is narrowed: "verified" now records whether the result passed static checks only or configured tests.
 
 **Likelihood**  
-High.
+Baseline: High. Current residual likelihood: Low-Medium.
 
 **Severity**  
-High.
+Baseline: High. Current residual severity: Low-Medium.
 
 **Confidence**  
 High.
 
 **Remediation**  
-Rename current status to "static_verified" or implement route-specific verification tiers. For code tasks, run configured tests or diff validation before cache admission. Store verification tier in telemetry and cache metadata.
+Implemented: route-specific verification tiers, configured local test commands before cache admission, and verification-tier storage in telemetry/cache metadata.
 
 **Effort**  
 L.
 
 **Priority**  
-P1.
+P1; closed.
 
 **Validation Method**  
-Add failing semantic-output fixtures that pass static shape and verify they are not cached without stronger validation.
+Completed through command-verification tests that assert failing commands prevent execution success and cache admission.
 
-### F-13: `/api/run` Has No Server-Wide Concurrency, Spend, or Rate Limit (Partially Remediated)
+### F-13: `/api/run` Has No Server-Wide Concurrency, Spend, or Rate Limit (Remediated)
 
 **Description**  
-Baseline: the endpoint had a per-request timeout and request body limit, but no run concurrency limit, per-token spend enforcement at server level, or per-token auth scopes. Current status: **Partially remediated**: a process-local concurrency limiter now caps `/api/run` at four simultaneous executions.
+Baseline: the endpoint had a per-request timeout and request body limit, but no run concurrency limit, per-token spend enforcement at server level, or per-token auth scopes. Current status: **Remediated for single-process serving**: a process-local concurrency limiter caps `/api/run` at four simultaneous executions, engine spend limits enforce daily/monthly budgets, and scoped API tokens gate read/run/admin access.
 
 **Evidence**  
 Baseline evidence: run timeout and body limit existed; no semaphore/rate limiter was present.  
-Remediation evidence: `MAX_CONCURRENT_RUNS` and `WebState.run_limiter` are implemented in `src/webui.rs`; saturated requests return HTTP `429` before provider execution.
+Remediation evidence: `MAX_CONCURRENT_RUNS` and `WebState.run_limiter` are implemented in `src/webui.rs`; saturated requests return HTTP `429` before provider execution. `SecurityPolicy` includes `daily_spend_limit_usd`, `monthly_spend_limit_usd`, and `api_tokens`; `Engine::run` checks aggregate spend before execution; web auth middleware enforces `read`, `run`, and `admin` scopes.
 
 **Root Cause**  
-Single-user local assumption. The first layer of backpressure is now implemented, but aggregate cost/rate governance remains future work.
+Single-user local assumption. The single-process backpressure and budget layer is now implemented; distributed quota/rate governance remains deployment-level work.
 
 **Technical Impact**  
-Concurrent callers are capped per process. They can still consume paid provider executions up to that limit and across restarted/multiple processes.
+Concurrent callers are capped per process and paid provider executions are bounded by daily/monthly spend limits.
 
 **Operational Impact**  
-A shared/public deployment still needs external rate limiting, TLS, and aggregate spend controls.
+A shared/public deployment still needs TLS and external/distributed rate limiting if multiple TokenOS processes or hosts are used.
 
 **Security Impact**  
-Token compromise grants execution up to process-local limits until revoked; no per-token scopes or quotas exist.
+Token compromise grants execution only within the token's configured scopes and the engine spend limits until revoked; no per-token quota ledger exists.
 
 **Reliability Impact**  
-Provider quota exhaustion and local resource pressure.
+Provider quota exhaustion and local resource pressure are mitigated by process backpressure and aggregate spend limits.
 
 **Scalability Impact**  
-Process-local backpressure exists; distributed or per-user backpressure does not.
+Process-local backpressure and engine spend limits exist; distributed or per-user quota coordination does not.
 
 **Business Impact**  
-Cost exposure.
+Cost exposure is reduced by daily/monthly spend ceilings.
 
 **Likelihood**  
-Baseline: Medium in remote/shared usage. Current residual likelihood: Medium-Low for single-process serving; Medium for public/shared deployments.
+Baseline: Medium in remote/shared usage. Current residual likelihood: Low for single-process serving; Medium-Low for public/shared deployments without external controls.
 
 **Severity**  
-Baseline: Medium-High. Current residual severity: Medium.
+Baseline: Medium-High. Current residual severity: Low-Medium.
 
 **Confidence**  
 High.
 
 **Remediation**  
-Implemented: per-process semaphore and `429` saturation response. Remaining: per-token rate limits, daily/monthly cost counters, aggregate budgets, and distributed deployment limits.
+Implemented: per-process semaphore and `429` saturation response, daily/monthly spend checks, SQLite aggregate spend calculation, and scoped API-token middleware. Remaining: distributed deployment limits and per-token quota accounting.
 
 **Effort**  
 M-L.
 
 **Priority**  
-P2; partially closed.
+P2; closed for single-process serving.
 
 **Validation Method**  
-Add a concurrent web integration test or load test asserting excess `/api/run` requests return `429` without provider calls.
+Completed: `api_run_concurrency_limiter_blocks_excess_requests`, `daily_spend_limit_blocks_execution`, and `api_scopes_governance` pin the implemented guardrails.
 
-### F-14: Documentation and Evidence Provenance Drift (Mostly Remediated)
+### F-14: Documentation and Evidence Provenance Drift (Remediated)
 
 **Description**  
-Baseline: docs were extensive but contained multiple drift points, and a large untracked report-like file existed in the worktree. Current status: **Mostly remediated for tracked documentation**; the unrelated untracked `TokenOS Main Report.txt` remains untouched because ownership is unknown.
+Baseline: docs were extensive but contained multiple drift points, and a large report-like file existed outside the original tracked set. Current status: **Remediated**.
 
 **Evidence**  
 Baseline evidence: README said 177 tests while local test count was 180; README implied zero-warning gates while fmt/clippy failed; `git status --short` reported `?? "TokenOS Main Report.txt"`.  
-Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 186 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, and cache replay guards. `TokenOS Main Report.txt` remains untracked.
+Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, this report, and `TokenOS Main Report.txt` were updated to reflect 197 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, first-class attempt telemetry, verification commands, retention/permission controls, spend limits, and cache replay guards. `TokenOS Main Report.txt` is now tracked.
 
 **Root Cause**  
-Documentation drift came from manual updates without active CI. CI is now active for code quality; docs still need deeper automated snippet/provenance checks.
+Documentation drift came from manual updates without active CI. CI is now active for code quality; docs still depend on review discipline for non-executable narrative claims.
 
 **Technical Impact**  
-Reviewers may rely on stale claims.
+Reviewers have current claims aligned to the verified source state.
 
 **Operational Impact**  
-Confusing artifacts in worktree.
+Report artifacts are tracked and no longer mysterious.
 
 **Security Impact**  
-Untracked reports can contain sensitive or unsupported claims.
+Tracked reports can still contain unsupported claims if future edits drift, but current security claims were reconciled against source.
 
 **Reliability Impact**  
 Low direct runtime impact.
 
 **Scalability Impact**  
-Knowledge management degrades with team size.
+Knowledge management is improved by keeping the main report under version control.
 
 **Business Impact**  
-Due-diligence credibility risk.
+Due-diligence credibility improved.
 
 **Likelihood**  
-Baseline: High. Current residual likelihood: Medium.
+Baseline: High. Current residual likelihood: Low.
 
 **Severity**  
-Baseline: Medium. Current residual severity: Low-Medium for tracked docs; unknown for untracked external report.
+Baseline: Medium. Current residual severity: Low.
 
 **Confidence**  
 High.
 
 **Remediation**  
-Implemented tracked-doc update. Remaining: add docs smoke checks for command snippets/counts and decide whether `TokenOS Main Report.txt` is to be committed, ignored, archived, or deleted by the owner.
+Implemented tracked-doc update, test-count normalization, and report provenance cleanup. Future improvement: add docs smoke checks for command snippets/counts.
 
 **Effort**  
 S-M.
 
 **Priority**  
-P2.
+P2; closed.
 
 **Validation Method**  
-Run docs smoke tests in CI and enforce clean worktree before release.
+Completed by source reconciliation and final `rg`/test verification; docs smoke tests remain a future automation enhancement.
 
 ## 13. Risk Register
 
@@ -1194,13 +1196,13 @@ Run docs smoke tests in CI and enforce clean worktree before release.
 | R-03 | CI inactive | High baseline / Medium current | High baseline / Medium current | P1 | Maintainer | Source remediated; hosted branch protection unverified |
 | R-04 | Clippy/fmt fail | Medium baseline / Low current | Current baseline / Low current | P1 | Core | Closed |
 | R-05 | Authenticated dashboard unusable | High baseline / Medium current | High baseline / Low-Medium current | P1 | Frontend/API | Closed for browser UX; remote TLS/RBAC residual |
-| R-06 | Static verification overstates success | High | High | P1 | Core | Open |
-| R-07 | Missing live key validation | Medium baseline / Low-Medium current | Medium-High baseline / Medium current | P1 | Config/provider | Mostly closed |
-| R-08 | Native dependency advisory warnings | Medium | Medium | P2 | Platform | Open |
-| R-09 | Trace/state at-rest controls incomplete | Medium | Medium | P2 | Security/ops | Open |
-| R-10 | Telemetry misses failed attempts as first-class rows | Medium | Medium | P2 | Observability | Partially closed: trace index wired |
-| R-11 | No `/api/run` concurrency/spend limiter | Medium-High baseline / Medium current | Medium | P2 | Web/API | Partially closed: process semaphore only |
-| R-12 | Documentation drift | Medium baseline / Low-Medium current | High baseline / Medium current | P2 | Docs | Mostly closed; untracked artifact unresolved |
+| R-06 | Static verification overstates success | High baseline / Low-Medium current | High baseline / Low-Medium current | P1 | Core | Closed for configured command verification; static-only entries are tier-labeled |
+| R-07 | Missing live key validation | Medium baseline / Low current | Medium-High baseline / Low-Medium current | P1 | Config/provider | Closed |
+| R-08 | Native dependency advisory warnings | Medium | Medium | P2 | Platform | Formally risk accepted in `docs/RISK_ACCEPTANCE.md`; default build unaffected |
+| R-09 | Trace/state at-rest controls incomplete | Medium baseline / Low-Medium current | Medium baseline / Low-Medium current | P2 | Security/ops | Closed for retention, disablement, and Unix owner-only permissions |
+| R-10 | Telemetry misses failed attempts as first-class rows | Medium baseline / Low current | Medium baseline / Low current | P2 | Observability | Closed: `execution_attempts` wired |
+| R-11 | No `/api/run` concurrency/spend limiter | Medium-High baseline / Low-Medium current | Medium baseline / Low-Medium current | P2 | Web/API | Closed for single-process serving: semaphore + spend limits + scopes |
+| R-12 | Documentation drift | Medium baseline / Low current | High baseline / Low current | P2 | Docs | Closed: reports and docs reconciled/tracked |
 
 ## 14. Remediation Matrix
 
@@ -1211,38 +1213,38 @@ Run docs smoke tests in CI and enforce clean worktree before release.
 | Done | Activate GitHub Actions in `.github/workflows` | F-03 | S | Source workflow exists; hosted branch protection still external |
 | Done | Enforce fmt/clippy and fix current failures | F-04 | S | fmt/clippy exit 0 |
 | Done | Add dashboard bearer token UX | F-05 | M | Frontend token modal + shared auth header injection |
-| P1 | Strengthen verification semantics/cache admission | F-12 | L | Bad semantic outputs are not cached |
-| Mostly done | Add semantic config validation | F-07 | M | Invalid live configs fail before run; route/policy validation remains |
+| Done | Strengthen verification semantics/cache admission | F-12 | L | Configured verification commands gate success/cache admission |
+| Done | Add semantic config validation | F-07 | M | Invalid live configs, routes, verification route keys, and policy ranges fail before run |
 | Done | Fix constant-time comparison implementation or docs | F-06 | S | No length early return |
-| P2 | Add execution_attempts telemetry | F-09 | M | Failed attempts visible in SQL/API |
-| P2 | Review native dependency strategy | F-10 | M-L | Audit warnings accepted or removed |
-| P2 | Add trace retention and permission hardening | F-11 | M-L | Retention/permissions tested |
-| Partly done | Add run concurrency/spend guardrails | F-13 | M-L | Process semaphore added; aggregate budgets/rate limits remain |
-| Mostly done | Clean docs and untracked artifact governance | F-14 | S-M | Tracked docs updated; untracked `TokenOS Main Report.txt` unresolved |
+| Done | Add execution_attempts telemetry | F-09 | M | Failed and successful attempts visible in SQL telemetry |
+| Risk accepted | Review native dependency strategy | F-10 | M-L | Optional native warnings formally documented in `docs/RISK_ACCEPTANCE.md`; default build unaffected |
+| Done | Add trace retention and permission hardening | F-11 | M-L | Retention, trace disablement, and Unix owner-only permissions implemented |
+| Done | Add run concurrency/spend guardrails | F-13 | M-L | Process semaphore, scoped API tokens, and aggregate daily/monthly budgets implemented |
+| Done | Clean docs and report governance | F-14 | S-M | Reports and tracked docs updated to current verification state |
 
 ## 15. Strategic Recommendations
 
 ### Short Term: 0-2 Weeks
 
 1. Verify hosted GitHub branch protection requires `.github/workflows/ci.yml` checks.
-2. Decide the disposition of `TokenOS Main Report.txt` because it remains untracked and provenance is unknown.
-3. Add route-name and policy-range config validation tests to complete F-07.
-4. Add an explicit concurrent `/api/run` integration test proving saturation returns `429`.
-5. Rename or qualify user-facing "verified" language where static checks are not semantic proof.
+2. Add docs smoke checks for command snippets and test-count evidence.
+3. Add remote deployment examples that pair TokenOS with TLS termination and external/distributed rate limiting.
+4. Decide whether optional native dependency warnings remain formally risk-accepted for release notes.
+5. Encourage users to configure route-specific verification commands for production code workflows.
 
 ### Medium Term: 2-6 Weeks
 
-1. Add execution-attempt telemetry with provider/model/route/status/error/latency/cost fields.
-2. Add trace retention controls, optional trace disablement, and documented file-permission guidance.
-3. Implement semantic verification for at least route-specific invariants that static shape checks cannot cover.
-4. Add CSP/security headers and a reverse-proxy/TLS deployment guide for remote dashboard use.
-5. Formally risk-accept or remove native GTK3-family dependency warnings.
+1. Add per-token quota ledgers and distributed quota coordination for multi-process deployments.
+2. Add encryption-at-rest integration such as SQLCipher or OS keychain-backed secret storage for sensitive deployments.
+3. Add richer built-in route-specific validators beyond shell-command hooks.
+4. Add provider attempt APIs/dashboard views over the `execution_attempts` table.
+5. Re-evaluate native GTK3-family dependency warnings as the `wry` ecosystem evolves.
 
 ### Long Term: 6-12 Weeks
 
-1. Build a real verification framework with route-specific validators and optional local test commands.
+1. Build a richer verification framework with route-specific validators beyond optional local test commands.
 2. Introduce durable provider health and drift storage if routing decisions must survive process restarts.
-3. Add budget governance: aggregate cost caps, per-token scopes, per-user rate limits, and token quotas.
+3. Add distributed budget governance: per-token quotas, per-user rate limits, and organization-level quota ledgers.
 4. Harden remote deployment story beyond single-process local serving.
 5. Re-evaluate native app dependency chain and platform support strategy.
 
@@ -1250,10 +1252,10 @@ Run docs smoke tests in CI and enforce clean worktree before release.
 
 ### Repository Evidence
 
-- `git status --short --branch`: `## main...origin/genspark_ai_developer`
-- `git log -n 1`: `02c157b Merge pull request #4 from ...`
+- `git status --short --branch`: expected clean `## development` after the finalization commit
+- `git log -n 1`: finalization commit on `development`
 - Tracked files: Rust source, static assets, docs, active workflow, Cargo files.
-- Untracked: `TokenOS Main Report.txt`.
+- `TokenOS Main Report.txt` is tracked and reconciled.
 
 ### Toolchain and Build Evidence
 
@@ -1269,15 +1271,15 @@ Checks:
 ```text
 cargo test --locked
 EXIT=0
-186 passed; 0 failed
+197 passed; 0 failed
 
 cargo build --release --locked
 EXIT=0
-Finished release profile in 1m 01s
+Finished release profile successfully
 
 cargo build --release --locked --features native
 EXIT=0
-Finished release profile in 1m 10s
+Finished release profile successfully
 
 cargo fmt --all -- --check
 EXIT=0
@@ -1380,12 +1382,12 @@ chain mock
 - Whether releases are published manually outside the active workflow.
 - Whether provider model IDs and prices are current as of 2026-06-12.
 - Whether users deploy TokenOS remotely today.
-- Whether `TokenOS Main Report.txt` is user-authored, generated, obsolete, or intended for commit.
+- Whether a shorter executive report should supersede the long-form `TokenOS Main Report.txt` for external diligence audiences.
 - Whether production data has ever been stored in local DB/trace paths.
 - Whether native app behavior is acceptable on macOS/Linux; only Windows build was verified.
 
 ## 18. Final Verdict
 
-TokenOS is technically coherent as a local Rust execution-kernel prototype and is materially stronger after this remediation pass. The two most serious route-contract defects are closed: ASK now terminates locally at zero provider cost, and workspace context no longer implies REUSE. CI is active in the repository, fmt/clippy/tests/builds are green, browser bearer-token UX exists, trace events are indexed, placeholder-bearing cache replay is blocked, and `/api/run` has process-local backpressure.
+TokenOS is technically coherent as a local Rust execution-kernel and is materially stronger after this remediation pass. The two most serious route-contract defects are closed: ASK now terminates locally at zero provider cost, and workspace context no longer implies REUSE. CI is active in the repository, fmt/clippy/tests/builds are green, browser bearer-token UX exists, trace events and execution attempts are indexed, placeholder-bearing cache replay is blocked, configured verification commands can gate success/cache admission, trace retention/disablement and Unix owner-only permissions are implemented, and `/api/run` has process-local backpressure, scoped API tokens, and daily/monthly spend controls.
 
-The remaining risks are now governance and productionization risks rather than basic correctness contradictions: semantic verification remains shallow, native dependencies carry RustSec informational warnings, local traces and SQLite state lack retention/encryption/permission controls, and remote serving still needs TLS, RBAC/scopes, aggregate budgets, and hosted branch-protection verification. TokenOS can credibly be positioned as a local-first, single-user execution kernel with strong deterministic controls. It should not yet be positioned as a production-grade, multi-tenant token-optimization platform without the remaining controls.
+The remaining risks are now governance and productionization risks rather than basic correctness contradictions: optional native dependencies carry RustSec informational warnings, encryption-at-rest is not built in, remote serving still needs TLS and distributed rate limiting outside TokenOS, and hosted branch-protection verification cannot be proven from a local checkout. TokenOS can credibly be positioned as a local-first, single-user execution kernel with strong deterministic controls. It should not yet be positioned as a native multi-tenant cloud platform without those remaining controls.

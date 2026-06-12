@@ -1,6 +1,6 @@
 # TokenOS Production Deployment Guide
 
-This guide describes how to deploy the **TokenOS** local execution kernel securely in a remote or server environment. 
+This guide describes how to deploy the **TokenOS** local execution kernel securely in a remote or server environment.
 
 By default, TokenOS binds to loopback (`127.0.0.1`) and enforces token-based authentication. For remote access, it is highly recommended to place TokenOS behind a secure reverse proxy (e.g. Nginx) with TLS/HTTPS enabled, rather than exposing the raw TokenOS binding directly to the network.
 
@@ -40,8 +40,8 @@ server {
     add_header Referrer-Policy "no-referrer" always;
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
 
-    # Max body payload limit matching TokenOS backend limit (e.g. 10MB)
-    client_max_body_size 10M;
+    # Max body payload limit matching the TokenOS backend default (256 KiB)
+    client_max_body_size 256k;
 
     # Location blocks for TokenOS Web UI and REST API
     location / {
@@ -91,7 +91,7 @@ WorkingDirectory=/var/lib/tokenos
 EnvironmentFile=/etc/tokenos/tokenos.env
 
 # Execute tokenos server binding only to localhost
-ExecStart=/usr/local/bin/tokenos serve --host 127.0.0.1 --port 3000 --token ${TOKENOS_AUTH_TOKEN}
+ExecStart=/usr/local/bin/tokenos serve --host 127.0.0.1 --port 3000 --auth-token ${TOKENOS_AUTH_TOKEN}
 
 Restart=always
 RestartSec=5
@@ -138,7 +138,7 @@ sudo systemctl status tokenos
 
 ## 3. Remote Serving Best Practices
 
-1. **Never Bind Publicly Without Auth**: If you bind the service directly (e.g. `serve --host 0.0.0.0`), you **must** supply a non-empty bearer token (via `--token`) otherwise the server will refuse to start.
+1. **Never Bind Publicly Without Auth**: If you bind the service directly (e.g. `serve --host 0.0.0.0`), you **must** supply a non-empty bearer token (via `--auth-token`) otherwise the server will refuse to start.
 2. **Reverse Proxy TLS Enforced**: Always proxy remote traffic through TLS (port 443) using Nginx, Apache, or Caddy. Transmitting bearer tokens or API execution payloads over plain HTTP exposes them to eavesdropping.
 3. **Database and trace permissions**: Standard SQLite and traces are stored in the user profile directory. If running as a system service, ensure `/var/lib/tokenos` is locked down with owner-only access permissions (`chmod 700`).
 4. **Scoped API Tokens**: Instead of sharing the single master/admin CLI token, use the `security.api_tokens` section in `config.yaml` to define granular, scoped credentials (e.g. `read`-only access for dashboards, `run` access for automation/agents, and `admin` for operations).

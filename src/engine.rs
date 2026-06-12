@@ -143,8 +143,15 @@ impl Engine {
     /// Builds an Engine with all subsystems initialized.
     pub fn new(opt: Options) -> Result<Self> {
         let cfg = Config::load(opt.config_path.as_deref().map(Path::new))?;
-        let store = Store::open(opt.db_path.as_deref().map(Path::new))?;
-        let recorder = Recorder::new(opt.trace_dir.as_deref().map(Path::new))?;
+        let owner_only_permissions = cfg.security.owner_only_permissions;
+        let store = Store::open_with_owner_permissions(
+            opt.db_path.as_deref().map(Path::new),
+            owner_only_permissions,
+        )?;
+        let recorder = Recorder::new_with_owner_permissions(
+            opt.trace_dir.as_deref().map(Path::new),
+            owner_only_permissions,
+        )?;
         let arms: Vec<String> = cfg.providers.keys().cloned().collect();
         let engine = Engine {
             cfg,
@@ -558,7 +565,7 @@ impl Engine {
             }
             // Evolution S26: rate-limit circuit breaker. A provider that
             // recently answered 429 is skipped while its cooldown is open —
-            // retrying it is guaranteed waste.
+            // retrying it is almost always wasted work.
             if self.tracker.in_cooldown(&prov_name) {
                 last_err = Some(anyhow!(
                     "provider {prov_name} skipped: rate-limit cooldown open"
@@ -750,7 +757,7 @@ impl Engine {
                 // Finding 12.2: persist the failed attempt into the durable
                 // loop window AND feed the live detector. A mid-run loop hit
                 // aborts the failover ladder — burning more attempts on a
-                // semantically identical output is guaranteed waste.
+                // semantically identical output is almost always wasted work.
                 // Masked form only: the loop window is durable SQLite state.
                 warn_persist(
                     "loop window",

@@ -60,7 +60,7 @@
 **Part VIII — Integration, Verification, and Final Verdict**
 38. Implementation Priorities and Phased Roadmap
 39. Verification Procedures and Build Validation
-40. Ultimate Domination Matrix
+40. Hyperscale Roadmap Matrix
 41. Final Strategic Verdict
 42. Reference Materials
 
@@ -70,24 +70,24 @@
 
 ## 1. Executive Summary and Strategic Framework
 
-This master document consolidates the complete technical, architectural, security, and competitive analysis of **TokenOS** — a compiled native Rust microkernel for AI orchestration distributed in the codebase `amirrezafarnamtaheri/tokenos_2` (also referenced under the artifact identifier `TokenOS-02c157b687760b32438513c0dcc0bd8d19f1955f`). It unifies multiple audit passes, comparative studies, granular porting specifications, and hyperscale extension proposals into a single, authoritative engineering reference.
+This master document consolidates the complete technical, architectural, security, and competitive analysis of **TokenOS** — a compiled native Rust microkernel for AI orchestration distributed in the codebase `amirrezafarnamtaheri/tokenos_2` and finalized in the `development` branch package. It unifies multiple audit passes, comparative studies, granular porting specifications, and hyperscale extension proposals into a single, authoritative engineering reference.
 
 ### 1.1 Evaluative Framework
 
 The analysis provides a comparative, audit-grade systems engineering assessment of TokenOS against six peer ecosystems within the open-source agentic software engineering and model orchestration space:
 
-1. **`lbjlaq/Antigravity-Manager`** — Tauri v2 + React + Rust desktop application acting as an IDE account injection and language server controller.
+1. **`lbjlaq/Antigravity-Manager`** — Tauri v2 + React + Rust desktop application acting as an IDE account-management and language-server controller.
 2. **`decolua/9router`** — Universal Node.js tool-output token compressor proxy with an OpenAI-compatible local endpoint.
 3. **`Alishahryar1/free-claude-code`** — Python (FastAPI/Uvicorn) transparent proxy for the official Anthropic Messages API.
 4. **`bytedance/UI-TARS-desktop`** — Electron-based multimodal Vision-Language Model (VLM)-driven GUI execution agent built on the Seed VLM series.
 5. **`tashfeenahmed/freellmapi`** — Node.js/TypeScript intelligent Multi-Armed Bandit gateway reverse proxy with multi-tenant aggregation.
 6. **`12britz/awesome-free-models`** — Curated zero-auth API directory and static index manifest.
 
-The strategic focus is to evaluate how TokenOS — as a compiled native Rust microkernel — compares with, absorbs, or dominates these systems across the dimensions of runtime latency, memory safety, token economics, attack surfaces, and architectural complexity.
+The strategic focus is to evaluate how TokenOS — as a compiled native Rust microkernel — compares with these systems and which patterns it can safely emulate across runtime latency, memory safety, token economics, attack surfaces, and architectural complexity.
 
 ### 1.2 Document Scope
 
-This document preserves every meaningful technical detail, code excerpt, design rationale, edge case, security concern, mathematical formulation, and integration step from all upstream materials. Nothing has been summarized away, abbreviated beyond the source, or simplified. Where multiple passes addressed the same component (for example, multiple forensic re-audits of the same upstream project), all passes are preserved in dedicated sections to retain the layered depth of analysis.
+This document preserves the material technical details, code excerpts, design rationale, edge cases, security concerns, mathematical formulations, and integration steps from the upstream analysis while applying source-audit corrections where claims were broader than the current implementation. Where multiple passes addressed the same component, the layered analysis is retained with clearer current-versus-roadmap boundaries.
 
 ---
  
@@ -99,7 +99,7 @@ Following a rigorous source audit and verification pass, the core TokenOS codeba
  
 - The default release build succeeds on Windows after installing Rust 1.96.0.
 - The optional `native` feature also builds successfully on Windows.
-- `cargo test --locked` passes: 196 tests passed, 0 failed.
+- `cargo test --locked` passes: 197 tests passed, 0 failed.
 - `cargo fmt --all -- --check` passes.
 - `cargo clippy --all-targets -- -D warnings` passes.
 - The default configuration is offline-capable through the mock provider.
@@ -118,16 +118,16 @@ Following a rigorous source audit and verification pass, the core TokenOS codeba
  
 ### 1.5 Residual Critical Gaps & Posture
  
-- **Native supply-chain warnings remain:** `cargo audit` reports 11 unmaintained GTK3-family crates and 1 unsound `glib` advisory in the lockfile, primarily pulled through optional native GUI dependencies (tao/wry). Standard builds without the `native` feature are unaffected.
-- **Remote/multi-user serving remains limited:** `/api/run` has process-local concurrency limits, timeout, body limits, bearer auth, and daily/monthly spend limits, but lacks distributed rate limits, per-token granular scopes, or native TLS (recommends reverse-proxy deployment).
+- **Native supply-chain warnings remain:** `cargo audit` reports 11 unmaintained GTK3-family crates and 1 unsound `glib` advisory in the lockfile, primarily pulled through optional native GUI dependencies (tao/wry). Standard builds without the `native` feature are unaffected, and the optional native risk is formally accepted in `docs/RISK_ACCEPTANCE.md`.
+- **Remote/multi-user serving remains limited:** `/api/run` has process-local concurrency limits, timeout, body limits, bearer auth, scoped tokens, and daily/monthly spend limits, but lacks native TLS and distributed rate limits. `docs/RISK_ACCEPTANCE.md` documents the required external controls.
  
 ### 1.6 Executive Verdict & Production-Readiness
  
-Executive verdict: TokenOS is materially stronger after remediation. The P0 routing defects, inactive CI, fmt/clippy failures, browser-auth gap, trace-index gap, `/api/run` process backpressure gap, lack of test verification, missing spend/rate boundaries, and trace governance are fully resolved and covered by tests. It is now highly robust as a local-first, single-user execution kernel with strong deterministic controls. It should be deployed behind a standard secure reverse proxy (with TLS and external rate limiting) if served over a remote network.
+Executive verdict: TokenOS is materially stronger after remediation. The P0 routing defects, inactive CI source gap, fmt/clippy failures, browser-auth gap, trace-index gap, `/api/run` process backpressure gap, lack of configured test verification, missing local spend boundaries, and trace-governance gaps are resolved in local source and covered by tests. It is robust as a local-first, single-user execution kernel with strong deterministic controls. It still requires the external controls documented in `docs/RISK_ACCEPTANCE.md` for remote, multi-process, or production deployments.
 
 ## 2. Core Architectural Inversion: The TokenOS Thesis
 
-The definitive differentiator discovered during the codebase audit is that while the target competitors operate as heavy mid-tier network proxies, multi-agent frameworks, or user-interface scripts, **TokenOS treats token optimization as an in-process, compiled hardware allocation problem**.
+A central differentiator discovered during the codebase audit is that while the target competitors operate as heavy mid-tier network proxies, multi-agent frameworks, or user-interface scripts, **TokenOS treats token optimization as an in-process, compiled resource-scheduling problem**.
 
 By moving meta-cognition, context pruning, failure memory tracking, full-text symbol context slicing, fallback logic processing, validation stages, and structural self-healing entirely out of both remote model contexts and heavy high-level language runtimes (such as Python or Node.js), TokenOS reduces orchestration overhead down to native CPU instructions.
 
@@ -194,10 +194,10 @@ The primary runtime boundary is local:
 │ - Free-Claude-Code (FastAPI)    │             │                                 │
 ├─────────────────────────────────┤             ├─────────────────────────────────┤
 │ Core Limitations:               │             │ System Advantages:              │
-│ ❌ Central Network Hop Penalties│             │ ⚡ Sub-microsecond Local Loops  │
-│ ❌ Dynamic Heap Allocations     │             │ ⚡ Zero-Copy Byte Array Slicing │
+│ ❌ Central Network Hop Penalties│             │ ⚡ Low-Latency Local Loops      │
+│ ❌ Dynamic Heap Allocations     │             │ ⚡ Structured Byte Processing   │
 │ ❌ Volatile Loop State Amnesia  │             │ ⚡ Durable SQLite Goal-Hashes   │
-│ ❌ Plaintext Credential Leaks   │             │ ⚡ Edge Cryptographic Redaction │
+│ ❌ Plaintext Credential Leaks   │             │ ⚡ Edge Secret Redaction        │
 └─────────────────────────────────┘             └─────────────────────────────────┘
 ```
 
@@ -256,7 +256,7 @@ Runtime is process-local:
 - Bandit: atomic counters and atomic f64 wrappers.
 - Web handlers: shared `Arc<Engine>` plus process-local `/api/run` semaphore.
 
-Concurrency is generally scoped well: no global web handler lock is held across network calls, and `/api/run` is now capped by a process-local semaphore. SQLite and filesystem operations remain synchronous inside async handlers, and there is still no per-user/per-token aggregate spend limiter.
+Concurrency is generally scoped well: no global web handler lock is held across network calls, and `/api/run` is now capped by a process-local semaphore. SQLite and filesystem operations remain synchronous inside async handlers. Server-side daily/monthly spend limits and scoped API tokens exist; distributed rate limiting and multi-process quota coordination remain out of scope.
 
 ### Deployment Architecture
 
@@ -266,7 +266,7 @@ Current deployment options:
 - Local web dashboard via `tokenos serve`.
 - Optional native shell via `cargo build --release --features native` and `tokenos app`.
 
-CI/release architecture is active under `.github/workflows/ci.yml`; local verification confirms the same fmt, clippy, test, audit, and build gates are currently clean except for known informational native dependency warnings from `cargo audit`.
+CI/release architecture is active under `.github/workflows/ci.yml`; it runs on `main`, `development`, `feat/**`, `fix/**`, and `codex/**` pushes plus PRs into `main` or `development`. Local verification confirms the same fmt, clippy, test, audit, and build gates are currently clean except for known informational native dependency warnings from `cargo audit`.
 
 ## 4. The Rival Fleet: Project-by-Project Overview
 
@@ -274,7 +274,7 @@ Each rival in the fleet represents a different category of compromise. The follo
 
 ### 4.1 `lbjlaq/Antigravity-Manager`
 
-Antigravity-Manager operates as a professional utility designed to bypass multi-account quota constraints within the Antigravity IDE ecosystem. It uses a Tauri v2 + React/Rust tech stack to coordinate unlimited Google Gemini and Claude account pools via OAuth, displaying live progress bars and controlling the lifecycle of the native `ls_core` language server binary.
+Antigravity-Manager operates as a utility designed to manage multi-account quota constraints within the Antigravity IDE ecosystem. It uses a Tauri v2 + React/Rust tech stack to coordinate Google Gemini and Claude account pools via OAuth, displaying live progress bars and controlling the lifecycle of the native `ls_core` language server binary.
 
 ### 4.2 `decolua/9router`
 
@@ -310,7 +310,7 @@ The following comparative matrix consolidates two cross-cutting evaluations: a b
 | **Orchestration Runtime Latency** | < 15 µs (Lock-free atomic state evaluation) | 10 ms – 50 ms (Spawns shell/process calls to `ls_core`) | 5 ms – 35 ms (Programs parsing string hooks via V8 event loop) | 12 ms – 65 ms (Python runtime mapping payload dictionaries) | 800 ms – 2,500 ms (High VLM inference and token generation delay) | 4 ms – 25 ms (V8 event loop processing middleware layers) | Static Infinite (No active computational runtime engine) |
 | **Token Growth Mechanics** | O(1) Bounded State Contracts (Purges chat logs; limits failure metrics) | Model Dependent (Dependent on the parent IDE workspace context parameters) | Dynamic Truncation (Compresses `tool_result` via filters) | Passive Mirroring (Passes full raw chat history directly to free endpoints) | Extremely High O(N) (Feeds large image frames and mouse coordinate strings) | Passive Proxying (Tracks volume pools without code-level pruning) | Static Zero (Asset catalog does not consume tokens directly) |
 | **Memory Allocation Strategy** | Zero-Copy Byte Offsets (Single-pass pointers over buffer arrays) | Heap Allocated JSON Objects (Serde object copies across IPC walls) | Heap String Clones (Heavy garbage collection tracking in V8) | Dynamic Python Dicts (High runtime allocation and reference overhead) | Massive Tensor Allocations (Requires local/remote high-VRAM GPU matrices) | Heap Allocated JSON Elements (Frequent un-serialization layers) | Static Zero (No computational memory allocation footprints) |
-| **Network Security Posture** | Edge Anonymization & Encrypted Headers | Local SQLite Injection (Modifies IDE `state.vscdb` states) | Unprotected Local Intercept (Stores open plain-text system configurations) | Plaintext Token Buffers (Exposes authorization parameters in text logs) | High Host Exposure (Requires OS native mouse/keyboard event loops) | CORS and Tenant Leak Risks (Shared multi-user network pools) | Static Zero (No transport actions or network operations) |
+| **Network Security Posture** | Local redaction and header-based provider keys | Local SQLite Injection (Modifies IDE `state.vscdb` states) | Unprotected Local Intercept (Stores open plain-text system configurations) | Plaintext Token Buffers (Exposes authorization parameters in text logs) | High Host Exposure (Requires OS native mouse/keyboard event loops) | CORS and Tenant Leak Risks (Shared multi-user network pools) | Static Zero (No transport actions or network operations) |
 
 ### 5.2 Focused Feature Vector Matrix
 
@@ -330,9 +330,9 @@ Each subsection that follows offers a four-part teardown — Description, Archit
 
 ### 6.1 `lbjlaq/Antigravity-Manager`
 
-**Description.** Antigravity-Manager operates as a professional utility designed to bypass multi-account quota constraints within the Antigravity IDE ecosystem. It uses a Tauri v2 + React/Rust tech stack to coordinate unlimited Google Gemini and Claude account pools via OAuth, displaying live progress bars and controlling the lifecycle of the native `ls_core` language server binary.
+**Description.** Antigravity-Manager operates as a utility designed to manage multi-account quota constraints within the Antigravity IDE ecosystem. It uses a Tauri v2 + React/Rust tech stack to coordinate Google Gemini and Claude account pools via OAuth, displaying live progress bars and controlling the lifecycle of the native `ls_core` language server binary.
 
-**Architectural Root Cause & Design Drivers.** It exists because developers exhaust single-account quotas quickly when utilizing agentic features inside IDEs. To handle account switching seamlessly, it directly injects access tokens into the IDE's localized database file (`state.vscdb`) using atomic writes, force-closing and restarting the editor process to apply changes.
+**Architectural Root Cause & Design Drivers.** It exists because developers exhaust single-account quotas quickly when utilizing agentic features inside IDEs. To handle account switching, it directly injects access tokens into the IDE's localized database file (`state.vscdb`) using atomic writes, force-closing and restarting the editor process to apply changes.
 
 ```
 Antigravity-Manager Mutation Flow:
@@ -344,7 +344,7 @@ Antigravity-Manager Mutation Flow:
 * *IDE Database File Corruption*: If the application crashes mid-transaction while writing to `state.vscdb`, it can leave the IDE's configuration file corrupted, causing the editor to freeze or lose user settings.
 * *Local Privilege Escalation (LPE)*: The tool relies on shell execution calls (`Command::new`) to locate and terminate editor processes across macOS, Windows, and Linux. If an attacker tricks the environment configuration into pointing to a malicious binary path, the app will execute it with the permissions of the running developer.
 
-**Token-Optimal Comparison & Trade-offs.** Antigravity-Manager manages account access parameters at the operating system level, introducing high execution friction (killing processes, reloading databases). In contrast, TokenOS handles multi-account scheduling seamlessly at the network layer. By passing clean tokens via secure headers (`X-Goog-Api-Key`) over a single, lock-free HTTP/2 pipeline, TokenOS manages account rotation instantly without interrupting the developer's active workspace or killing running processes.
+**Token-Optimal Comparison & Trade-offs.** Antigravity-Manager manages account access parameters at the operating system level, introducing high execution friction (killing processes, reloading databases). In contrast, TokenOS keeps provider selection inside its local routing layer and passes Gemini API keys via `X-Goog-Api-Key` headers instead of query strings. Account rotation and quota pooling remain deployment/provider configuration concerns rather than a guaranteed built-in multi-account platform.
 
 ### 6.2 `decolua/9router`
 
@@ -357,7 +357,7 @@ Antigravity-Manager Mutation Flow:
 * *Event Loop Blocking*: 9Router executes its text truncation and log deduplication filters synchronously on the primary Node.js event loop thread. When processing large code outputs (such as a 15 MB `git diff` from a major merge), the V8 engine freezes, stalling concurrent requests and spiking turnaround latencies.
 * *Heuristic Filter Failure*: The code relies on soft string sniffing to apply filters. If an output format tricks the scanner, 9Router can accidentally truncate critical semantic code signatures, causing the model to return broken patches due to missing context.
 
-**Token-Optimal Comparison & Trade-offs.** 9Router treats token conservation as a superficial string-manipulation task, leading to high garbage collection overhead and potential context loss in the V8 heap. TokenOS delivers far superior context optimization by using a **Surgical Symbol Indexer**. Instead of performing heavy string manipulations on the fly, TokenOS uses an embedded SQLite database to extract precise, minimal code symbols (functions, structs) under a strict 2,000-token cap, maintaining exact context boundaries with zero processing overhead.
+**Token-Optimal Comparison & Trade-offs.** 9Router treats token conservation primarily as string manipulation, which can lead to garbage collection overhead and potential context loss in the V8 heap. TokenOS uses a **Surgical Symbol Indexer** instead. Rather than forwarding full files by default, TokenOS can extract bounded code symbols (functions, structs) under a strict prompt-context cap, producing more structured context with low local overhead.
 
 ### 6.3 `Alishahryar1/free-claude-code`
 
@@ -375,7 +375,7 @@ Free-Claude-Code Mapping Layer:
 * *High Memory Overhead*: Python's dynamic type system allocates a large number of runtime heap objects when mapping nested payload dictionaries across format conversions. This introduces high processing overhead compared to compiled low-level approaches.
 * *Authentication Bypass and Token Storage*: The proxy uses a hardcoded local authentication token (`freecc`) to bypass security checks. If this local endpoint is exposed on a shared network interface, any local observer can hijack the tunnel and exploit the underlying provider accounts.
 
-**Token-Optimal Comparison & Trade-offs.** Free-Claude-Code functions as a basic protocol-matching proxy script with no awareness of token budgets or execution efficiency. It passes full raw chat histories directly to free endpoints, risking rapid rate-limiting. TokenOS operates on an entirely different engineering tier, utilizing an active **Multi-Armed Bandit (UCB1) Optimization Engine**. TokenOS dynamically tracks real-time provider latency records, cost metrics, and error rates, automatically routing tasks down an optimized fallback chain while preserving prefix cache hits across multi-turn loops.
+**Token-Optimal Comparison & Trade-offs.** Free-Claude-Code functions as a protocol-matching proxy script with limited awareness of token budgets or execution efficiency. It can pass full raw chat histories directly to free endpoints, risking rapid rate-limiting. TokenOS uses a different engineering approach: an active **Multi-Armed Bandit (UCB1) Optimization Engine** that tracks provider latency, cost metrics, and error rates and routes tasks through configured fallback chains.
 
 ### 6.4 `bytedance/UI-TARS-desktop`
 
@@ -406,7 +406,7 @@ UI-TARS Visual Control Loop:
 * *Single-Threaded Event Loop Bottlenecks*: Heavy runtime calculations — such as running BPE token estimation loops or parsing large JSON payloads — execute synchronously on the primary Node.js thread, which can stall the event loop under heavy concurrent workloads.
 * *CORS Credential Exposure*: Loose configurations in the proxy's middleware layers can introduce Cross-Origin Resource Sharing (CORS) exposure risks, allowing malicious scripts running in external browser sessions to intercept data or hijack active session tokens.
 
-**Token-Optimal Comparison & Trade-offs.** FreeLLMAPI requires a centralized gateway network hop, which increases transit latencies, compromises data privacy boundaries, and exposes workflows to remote server downtime. TokenOS eliminates this middleman entirely by internalizing the proxy's core intelligence — such as banditized selection loops and soft-boundary JSON repair routines — directly within a lock-free compiled Rust microkernel. This allows TokenOS to handle routing and error recovery locally at the edge in microseconds, with zero network hop overhead or central points of failure.
+**Token-Optimal Comparison & Trade-offs.** FreeLLMAPI requires a centralized gateway network hop, which increases transit latencies, changes data privacy boundaries, and exposes workflows to remote server downtime. TokenOS can avoid a central middleman for local-first use by keeping routing, bandit scoring, and soft-boundary JSON repair inside the Rust process. This reduces local orchestration overhead and external operational dependencies for single-user deployments.
 
 ### 6.6 `12britz/awesome-free-models`
 
@@ -430,17 +430,17 @@ To evaluate how these systems perform under hostile, high-throughput, or resourc
 ### 7.1 Memory Allocation and Thread Contention Patterns
 
 * **The Competitor Bottleneck.** Python and Node.js-based proxies (Free-Claude-Code, 9Router, FreeLLMAPI) handle text context mutations by dynamically allocating strings and processing objects within their runtime heaps. During multi-step generation tasks involving large files, this practice triggers frequent garbage collection spikes, which increases turnaround latencies and stalls concurrent requests.
-* **The TokenOS Invariant.** TokenOS implements thread-safe concurrency management using a lock-free asynchronous `Arc<Engine>` environment, restricting synchronous locks exclusively to brief in-memory cache checks. Furthermore, its `jsonrescue::rescue` module processes incoming network buffers sequentially using single-pass pointer index offsets. This zero-copy approach eliminates heap allocation overhead and prevents thread starvation during data recovery steps.
+* **The TokenOS Invariant.** TokenOS implements thread-safe concurrency management using a shared asynchronous `Arc<Engine>` environment and keeps synchronous locks scoped to brief state operations. Its `jsonrescue::rescue` module processes incoming buffers sequentially using single-pass pointer-style offsets. This approach limits avoidable allocation overhead during data recovery steps.
 
 ### 7.2 Semantic Loop Protections Across Process Lifecycles
 
-* **The Competitor Bottleneck.** Mainstream proxy engines maintain their execution loop tracking arrays in volatile memory blocks. If an automated script triggers consecutive commands through short-lived CLI invocations, the process history is wiped on every exit, rendering loop protection completely non-functional.
+* **The Competitor Bottleneck.** Mainstream proxy engines often maintain their execution loop tracking arrays in volatile memory blocks. If an automated script triggers consecutive commands through short-lived CLI invocations, the process history is wiped on every exit, making loop protection ineffective across processes.
 * **The TokenOS Invariant.** TokenOS maps its `LoopDetector` and `FailureMemory` subsystems directly onto the persistent SQLite storage layer. Transaction records are keyed by a stable, whitespace-trimmed `goal_hash`, ensuring that loop metrics and retry contexts remain durable across cold process restarts.
 
 ### 7.3 Outbound Data Exposure and Credential Transport Boundaries
 
 * **The Competitor Bottleneck.** Generic API adapters frequently append private credentials directly into URL paths as unencrypted query parameters or log raw prompt outputs in plaintext files for troubleshooting. This exposes sensitive corporate data, private keys, and passwords to intermediate intercepting proxies and log collectors.
-* **The TokenOS Invariant.** TokenOS secures transport paths by routing Gemini API keys through encrypted `X-Goog-Api-Key` headers. More importantly, its `MaskCodec` layer uses local pattern matching to redact sensitive variables (such as private keys or passwords) into opaque placeholders like `«SECRET:kN»` *before* the prompt payload is transmitted over public networks. Raw data is restored only at the final boundary before returning output to the caller, keeping secrets completely invisible to upstream provider logs.
+* **The TokenOS Invariant.** TokenOS avoids query-string key exposure by routing Gemini API keys through `X-Goog-Api-Key` headers; confidentiality of those headers depends on the configured TLS transport. Its `MaskCodec` layer uses local pattern matching to redact sensitive variables (such as private keys or passwords) into opaque placeholders like `«SECRET:kN»` before the prompt payload is transmitted. Raw data is restored only at the final boundary before returning output to the caller, reducing the chance that upstream prompt logs contain those secrets.
 
 ### 7.4 Enterprise Security Boundaries and Injection Vector Shielding
 
@@ -485,7 +485,7 @@ Strengths:
 Weaknesses:
 
 - No TLS is served by TokenOS itself; docs require reverse proxy for remote.
-- No CSP or common security headers are set for static assets.
+- CSP and common browser hardening headers are emitted by the static/API router.
 - No server-side RBAC: token equals full control.
 - Token storage is browser memory by default with opt-in sessionStorage; no cookie/session invalidation model exists.
 
@@ -533,7 +533,7 @@ Reliability Assessment
 
 Strengths:
 
-- Unit test count is meaningful for codebase size: 186 tests passed locally.
+- Unit test count is meaningful for codebase size: 197 tests passed locally.
 - Release build succeeds.
 - Native release build succeeds on Windows.
 - SQLite uses WAL and busy timeout: `src/store.rs:132-134`.
@@ -572,7 +572,7 @@ Scaling limits:
 - Indexing is synchronous and in-memory by default for CLI workspace usage.
 - Provider health and bandit learning do not survive process restarts.
 - No queue, admission control, or cancellation API exists.
-- Trace retention is unbounded.
+- Trace and SQLite telemetry retention are pruned on engine startup according to `security.retention_days`.
  
 ### 7.8 Core Operational Assessment (Strengths, Risks)
  
@@ -589,7 +589,7 @@ Operational strengths:
 Operational risks:
 
 - No deployment guide for a hardened remote service beyond high-level reverse proxy guidance.
-- No log retention or trace retention controls.
+- Trace retention and telemetry pruning controls exist; external log retention remains deployment-specific.
 - No structured incident response workflow.
 - Release provenance depends on GitHub Actions/tag discipline; branch protection was not verified locally.
 - No documented ownership or codeowners.
@@ -613,7 +613,7 @@ Documented correctly:
 Former drift or overclaims corrected in this pass:
 
 - ASK zero-token behavior now matches code and docs.
-- README test count now reflects 186 tests.
+- README test count now reflects 197 tests.
 - README build section documents fmt/clippy gates explicitly.
 - API/CLI/security/troubleshooting docs describe dashboard bearer-token entry.
 - REUSE is documented as exact verified solution-cache replay, while workspace context is documented as prompt context only.
@@ -659,7 +659,7 @@ Component Inventory
 | `src/main.rs` | CLI, command dispatch, public bind guard | Core maintainer inferred | `clap`, `Engine`, `webui` | CLI/docs drift remains possible; public bind guard depends on correct operator token handling | Medium | Critical |
 | `src/lib.rs` | Public library root | Core maintainer inferred | All modules | Very broad public API surface | Medium | High |
 | `src/kernel.rs` | Route enum, task state, signal extraction, route ladder | Core maintainer inferred | `regex`, `chrono`, `serde` | Heuristic route errors directly affect cost/correctness | Medium | Critical |
-| `src/engine.rs` | End-to-end orchestration | Core maintainer inferred | Most modules | Highest blast radius; semantic verification remains shallow | Medium | Critical |
+| `src/engine.rs` | End-to-end orchestration | Core maintainer inferred | Most modules | Highest blast radius; verification command quality depends on operator configuration | Medium | Critical |
 | `src/provider.rs` | Mock/OpenAI/Anthropic/Gemini/proxy adapters | Core maintainer inferred | `reqwest`, provider APIs | Live API compatibility unverified; provider manifests can drift | Medium | Critical |
 | `src/pricing.rs` | Provider shadow pricing, health, cooldown, bandit, drift | Core maintainer inferred | atomics, mutex maps | Process-local learning; no durable provider health | Medium | High |
 | `src/payload.rs` | Prompt contract and extraction | Core maintainer inferred | `serde_json` | Prompt contract overclaims output quality; extraction heuristic risk | Medium | High |
@@ -669,15 +669,15 @@ Component Inventory
 | `src/maskcodec.rs` | Secret redaction and unmasking | Core maintainer inferred | `regex` | Pattern coverage incomplete by nature; generated new secrets remain residual risk | Medium | Critical |
 | `src/loopdetect.rs` | Semantic loop detection | Core maintainer inferred | custom Levenshtein | False positives/negatives; scope keyed only by task text | Medium | High |
 | `src/contextidx.rs` | Symbol extraction and SQLite FTS/LIKE search | Core maintainer inferred | `rusqlite`, `walkdir`, `regex` | Search quality affects prompt relevance; no semantic code understanding | Medium | Critical |
-| `src/store.rs` | SQLite persistence | Core maintainer inferred | `rusqlite`, `serde_json` | No encryption/ACL hardening; trace/cache retention controls absent | Medium | Critical |
-| `src/recorder.rs` | File-based trace journals and CAS blobs | Core maintainer inferred | filesystem, SHA-256 | Sensitive business content at rest; no retention controls | Medium | High |
-| `src/webui.rs` | Axum API and embedded assets | Core maintainer inferred | `axum`, `tokio` | No TLS/CSP/security headers; rate limiting is process-local only | Medium | High |
+| `src/store.rs` | SQLite persistence | Core maintainer inferred | `rusqlite`, `serde_json` | No encryption; retention and Unix owner-only permissions are implemented | Medium | Critical |
+| `src/recorder.rs` | File-based trace journals and CAS blobs | Core maintainer inferred | filesystem, SHA-256 | Sensitive business content at rest; retention and Unix owner-only permissions are implemented | Medium | High |
+| `src/webui.rs` | Axum API and embedded assets | Core maintainer inferred | `axum`, `tokio` | No native TLS; security headers and process-local backpressure are implemented | Medium | High |
 | `src/nativeapp.rs` | Optional desktop shell | Core maintainer inferred | `tao`, `wry` | Optional dependency warnings; platform-specific runtime risk | Low-Medium | Medium |
 | `static/app.js` | Dashboard behavior | Core maintainer inferred | Browser APIs only | In-memory/session token handling; XSS mostly mitigated via escaping | Medium | Medium |
 | `static/index.html` | Dashboard shell | Core maintainer inferred | `app.js`, `style.css` | Help text can drift from engine semantics | Medium | Medium |
 | `static/style.css` | Dashboard styling | Core maintainer inferred | none | Low technical risk | Medium | Low |
 | `docs/*.md` | User/operator docs | Core maintainer inferred | Code behavior | Drift risk reduced but ongoing governance needed | Medium | High |
-| `.github/workflows/ci.yml` | Active CI/release | Core maintainer inferred | GitHub Actions | Repository branch protection not verified from local audit | Medium | Critical |
+| `.github/workflows/ci.yml` | Active CI/release | Core maintainer inferred | GitHub Actions | Hosted branch protection still requires authenticated GitHub verification | Medium | Critical |
 | `Cargo.toml` | Build manifest | Core maintainer inferred | Rust toolchain | Optional GUI dependencies widen lockfile | Medium | Critical |
 | `Cargo.lock` | Locked dependency graph | Core maintainer inferred | crates.io | 409 deps per cargo audit lockfile summary | Medium | Critical |
 | `TokenOS Main Report.txt` | Untracked large report-like artifact | Unknown | Unknown | Not in git; may confuse evidence provenance | Unknown | Low-Medium |
@@ -779,7 +779,7 @@ Evidence:
 - Banditized order: `src/engine.rs:761-795`.
 - Execution loop: `src/engine.rs:389-637`.
 
-Risk: failed failover attempts are recorded in recorder/failure memory, but not as first-class execution telemetry rows.
+Risk: provider failover attempts are now first-class `execution_attempts` rows, but there is not yet a dedicated dashboard/API view over that table.
 
 ### Workflow: Persistence and Trace Replay
 
@@ -797,7 +797,7 @@ Evidence:
 - CLI trace: `src/main.rs:402-421`.
 - Web trace: `src/webui.rs:275-281`.
 
-Current status: trace indexing remediated. Regression test `flight_recorder_events_are_indexed_in_store` asserts SQLite trace count equals recorder event count for a run. Residual risk: failed failover attempts remain trace events rather than first-class execution-attempt telemetry rows.
+Current status: trace indexing and first-class execution-attempt telemetry are remediated. Regression test `flight_recorder_events_are_indexed_in_store` asserts SQLite trace count equals recorder event count for a run; engine failover branches record failed transport, failed verification, loop-escalation, and successful provider attempts into `execution_attempts`. Residual risk: the dashboard does not yet expose a dedicated attempts view.
  
 ### 8.5 Core Dependency Topology and Security Audit (Lockfile & Audit Evidence)
  
@@ -1004,7 +1004,7 @@ The `MaskCodec` layer is one of the defining features of TokenOS's security mode
 * Sensitive variables are redacted into inert, opaque placeholders such as `«SECRET:k1»` before any data bytes leave the process boundaries.
 * Long-term database tables, out-of-band flight logs, and failure memory blocks only ever recor
 * **Masking Invariants.** Masked prompt templates are stored in database logs and trace files to prevent sensitive API keys or credentials from entering persistent storage.
-* **Deterministic Decoding.** Unmasking is done in memory at the absolute boundary before returning the final solution to the client, using a temporary lookup map.
+* **Deterministic Decoding.** Unmasking is done in memory at the final return boundary before returning the final solution to the client, using a temporary lookup map.
 * **Regular Expression Safety.** Built-in patterns cover standard formats: AWS keys, SSH keys, Stripe API keys, database connection strings, passwords, and private identifiers.
 
 ---
@@ -1039,7 +1039,7 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
 }
 ```
 
-By ensuring that loop execution time remains identical regardless of the character mismatch position or length mismatch, timing-based credential harvesting is rendered mathematically impossible.
+By avoiding early exits on character mismatch, constant-time token comparison reduces timing leakage in ordinary bearer-token checks.
 
 ---
 
@@ -1236,12 +1236,12 @@ A forensic re-audit of the `12britz/awesome-free-models` catalog reveals an enti
 
 ## 21. Free-Tier Enterprise Provider Arsenal
 
-In addition to the hardware-accelerated tier above, the following enterprise-grade and free-tier providers must be integrated into the TokenOS provider fleet to maximize availability, cost optimization, and protocol coverage.
+In addition to the hardware-accelerated tier above, the following enterprise-grade and free-tier providers are roadmap candidates that could be evaluated to improve availability, cost optimization, and protocol coverage.
 
-* **Antigravity IDE Native Proxy Endpoints.** Bypasses secondary proxy configurations by targeting cloud endpoints directly.
+* **Antigravity IDE Native Proxy Endpoints.** Evaluate only provider-sanctioned endpoints and documented integration paths.
 * **Google Vertex AI OAuth Client Gateways.** Exposes secure OAuth2 refresh tokens for Vertex AI service accounts.
 * **Google Imagen 3.** Direct support for Google's image generation models.
-* **Gemini Web Session Endpoints.** Uses the `__Secure-1PSID` cookie to route traffic through the free consumer web UI rather than the paid developer API.
+* **Gemini-compatible endpoints.** Use documented developer APIs and provider-approved authentication flows; consumer web-session cookie reuse is out of scope.
 * **Cline / Cline-Proxy Channels.** Standardized protocol wrappers used to handle tool-calling extensions.
 * **Local Developer IDE Loopbacks.** Local connection bridges designed to intercept Cursor and Windsurf workspace channels.
 * **NVIDIA NIM Endpoints.** Hosted cloud API infrastructure that maps specialized model inference streams (for example `nvidia/nemotron-3-super-120b-a12b`).
@@ -1249,15 +1249,15 @@ In addition to the hardware-accelerated tier above, the following enterprise-gra
 * **LM Studio / LocalAI Runtimes.** Local model execution pipelines utilizing OpenAI-compatible interfaces. Air-gapped, zero-token local execution for sensitive code.
 * **ByteDance Volcengine.** Specifically the `doubao-1-5-thinking-vision-pro` models.
 * **Alibaba Cloud Qwen-VL.** High-tier multimodal vision models.
-* **Cloudflare Workers AI Core.** Distributed edge inference matrix executing open-weight model instances. Cheap edge-distributed inference for the DIRECT route. Uses global edge nodes, perfect for TokenOS's "Zero Network Hop" philosophy.
+* **Cloudflare Workers AI Core.** Distributed edge inference for open-weight models; validate latency, pricing, auth, and terms before adding as a DIRECT-route option.
 * **Cohere Command API Adapters.** Specialized models optimized for processing corporate semantic search data.
 * **Hugging Face Serverless Inference APIs.** Extracting direct REST endpoints for community models.
 * **Perplexity Labs.** Integrating free inference tiers for Llama 3 and open-weight models. Real-time internet search capabilities for the ASK route.
-* **AWS Bedrock.** While not "free," Bedrock provides highly secure enterprise endpoints. TokenOS must port the AWS SigV4 request signing logic to communicate with Bedrock natively.
+* **AWS Bedrock.** While not "free," Bedrock provides enterprise endpoints. A future adapter would need AWS SigV4 request signing and live compatibility tests.
 * **MagicAPI & ChatAnyLLM.** Dedicated high-availability AI gateways.
 * **Composer API.** Proxies specifically designed to integrate with Cursor Composer environments.
-* **Moonshot AI (Kimi).** A powerhouse API for handling massive context windows (up to 2 million tokens) at a fraction of Anthropic's cost. TokenOS must port its adapter to use this specifically when the `ContextSlider` detects payloads over 200k tokens.
-* **Zhipu AI (GLM-4).** Top-tier reasoning endpoints that offer massive free-tier subsidies to developers, acting as a perfect drop-in replacement for GPT-4o during API outages.
+* **Moonshot AI (Kimi).** A large-context API candidate; a future adapter could be selected for very large payloads after live validation.
+* **Zhipu AI (GLM-4).** A reasoning-endpoint candidate; suitability depends on current pricing, terms, latency, and API compatibility.
 * **Pollinations AI.** Specifically optimized for free, rapid creative and text inference.
 * **LLM7.** A specialized gateway proxying many open-source models at scale.
 * **GitHub Models.** Enterprise-grade inference endpoints for Llama, Mistral, and Phi-3, usually authenticated via GitHub tokens.
@@ -1324,93 +1324,16 @@ impl WorkspaceStateSync {
 }
 ```
 
-### 22.3 OAuth 2.0 Web-Session Harvester and Rotator
+### 22.3 OAuth 2.0 and Web-Session Boundary
 
-A complementary extraction targets the live web-session harvesting capability. TokenOS currently relies on static API keys. Antigravity-Manager bypasses API limits by harvesting live web session tokens (for example by extracting browser cookies for Claude or Gemini web interfaces) and translating them into API-compliant requests.
-
-* **Implementation.** TokenOS implements an embedded Headless OAuth Intercept layer. Instead of rejecting a task when the official API key hits a `429 Too Many Requests`, TokenOS spawns a lightweight headless background thread, refreshes an authenticated web session cookie, and wraps the web endpoint to emulate a standard REST API.
-
-```rust
-// src/session_harvester.rs
-// Ported concept from Antigravity-Manager: Background OAuth Harvester
-
-use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-pub struct AuthSessionPool {
-    // Stores harvested web-session cookies (e.g., __Secure-1PSID for Gemini)
-    pub active_cookies: Arc<RwLock<Vec<String>>>, 
-}
-
-impl AuthSessionPool {
-    /// Attempts to extract live session cookies from local browser profiles securely 
-    /// (macOS/Linux/Windows). This provides a fallback auth method when API quotas fail.
-    pub async fn harvest_local_sessions() -> anyhow::Result<Self> {
-        let mut extracted_cookies = Vec::new();
-
-        // 1. Identify local OS Chrome/Firefox SQLite cookie databases safely
-        if let Some(cookie_db_path) = find_browser_cookie_db() {
-            // 2. Read cookies with read-only SQLite connections (no process killing required)
-            let conn = rusqlite::Connection::open_with_flags(
-                cookie_db_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-
-            // Example query targeting Gemini's authentication cookie
-            let mut stmt = conn.prepare(
-                "SELECT value FROM cookies WHERE host_key LIKE '%google.com' AND name = '__Secure-1PSID'"
-            )?;
-            
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let token: String = row.get(0)?;
-                extracted_cookies.push(token);
-            }
-        }
-
-        Ok(Self {
-            active_cookies: Arc::new(RwLock::new(extracted_cookies)),
-        })
-    }
-
-    /// Generates a secure, browser-aligned HeaderMap for outbound requests using harvested cookies
-    pub async fn build_spoofed_headers(&self) -> Option<HeaderMap> {
-        let pool = self.active_cookies.read().await;
-        if pool.is_empty() { return None; }
-
-        let active_token = pool.first().unwrap(); // Simple rotation logic
-        
-        let mut headers = HeaderMap::new();
-        // Emulate standard browser User-Agent to bypass WAF heuristics
-        headers.insert(
-            USER_AGENT, 
-            HeaderValue::from_static("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-        );
-        
-        // Inject the harvested session cookie directly into the request
-        let cookie_str = format!("__Secure-1PSID={};", active_token);
-        if let Ok(cookie_val) = HeaderValue::from_str(&cookie_str) {
-            headers.insert(COOKIE, cookie_val);
-        }
-
-        Some(headers)
-    }
-}
-
-// Helper to locate standard OS paths
-fn find_browser_cookie_db() -> Option<std::path::PathBuf> {
-    // OS-specific path resolution logic...
-    None
-}
-```
+The source-audit position is that TokenOS should use provider-sanctioned API keys, OAuth flows, service-account flows, or documented enterprise authentication mechanisms only. Browser cookie harvesting, consumer web-session reuse, WAF evasion, and hidden session rotation are explicitly out of scope for a production-ready TokenOS release.
 
 ### 22.4 Systems Impact
 
-By integrating this extracted pattern:
+By rejecting browser-session harvesting as an implementation path:
 
-1. *Absolute Resilience.* If a developer runs out of API credits mid-task, TokenOS automatically falls back to utilizing their active, free web-browser session tokens.
-2. *Zero Process Disruption.* Unlike Antigravity-Manager, TokenOS handles this at the network transport layer (`src/provider.rs`), so the IDE or CLI tool never has to be restarted or modified. The developer just sees the code continue to generate.
+1. *Compliance Boundary.* TokenOS avoids embedding behavior that could violate provider terms or expose users' browser sessions.
+2. *Operational Clarity.* When API credentials hit quota or fail, TokenOS should report the failure, rotate only among configured compliant credentials, or route to another configured provider.
 
 ---
 
@@ -1418,66 +1341,19 @@ By integrating this extracted pattern:
 
 A second forensic re-audit of Antigravity-Manager surfaces four additional, enterprise-critical capabilities beyond the OAuth Session Harvester and SQLite State Injector.
 
-### 23.1 Cryptographic Hardware Telemetry Spoofing
+### 23.1 Provider-Compliant Account and Device Boundaries
 
-**Mechanism.** When Antigravity-Manager rotates a user's account to bypass a `429 Too Many Requests` block, it doesn't just change the OAuth token. It actively rewrites the IDE's telemetry identifiers (`macMachineId`, `machineId`, `sqmId`, `devDeviceId`). Without this, upstream AI servers flag the rapid account rotation on a single machine as abuse and issue a shadow-ban or hardware-level block.
+**Mechanism.** Some account-management tools alter local device or telemetry identifiers while rotating accounts. That pattern can violate provider terms and can be interpreted as evasion rather than reliability engineering.
 
-**Port.** TokenOS internalizes this capability inside its network transport layer (`src/provider.rs`). When the Multi-Armed Bandit detects a rate limit and rotates to a fallback account/session, TokenOS dynamically synthesizes a new cryptographic hardware fingerprint and injects it into the outbound HTTP headers to cleanly bypass Device-ID tracking.
+**Audit Position.** TokenOS should not synthesize hardware fingerprints, spoof device identifiers, or rotate identity telemetry to evade rate limits or enforcement. The compliant path is explicit provider configuration, documented API credentials, rate-limit handling, and transparent failure reporting.
 
-```rust
-// src/telemetry_spoof.rs
-use uuid::Uuid;
-use sha2::{Sha256, Digest};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-
-pub struct HardwareFingerprint {
-    pub machine_id: String,
-    pub mac_machine_id: String,
-    pub sqm_id: String,
-}
-
-impl HardwareFingerprint {
-    /// generate_synthetic_identity creates a cryptographically valid, 
-    /// mathematically random hardware profile to bypass server-side device bans.
-    pub fn generate_synthetic_identity() -> Self {
-        let raw_uuid = Uuid::new_v4().to_string();
-        
-        // Emulate Apple/Windows hardware hash generation signatures
-        let mut hasher = Sha256::new();
-        hasher.update(raw_uuid.as_bytes());
-        let mac_hash = hex::encode(hasher.finalize());
-
-        Self {
-            machine_id: Uuid::new_v4().to_string(),
-            mac_machine_id: mac_hash,
-            sqm_id: format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase()),
-        }
-    }
-
-    /// inject_spoofed_headers intercepts the HTTP/2 pipeline and overwrites 
-    /// tracking headers before they hit the upstream proxy.
-    pub fn inject_spoofed_headers(&self, headers: &mut HeaderMap) {
-        headers.insert(
-            HeaderName::from_static("x-machine-id"),
-            HeaderValue::from_str(&self.machine_id).unwrap(),
-        );
-        headers.insert(
-            HeaderName::from_static("x-mac-machine-id"),
-            HeaderValue::from_str(&self.mac_machine_id).unwrap(),
-        );
-        headers.insert(
-            HeaderName::from_static("x-sqm-id"),
-            HeaderValue::from_str(&self.sqm_id).unwrap(),
-        );
-    }
-}
-```
+No implementation excerpt is included for this rejected pattern.
 
 ### 23.2 Zero-Config Local PKCE OAuth Loop
 
 **Mechanism.** Antigravity doesn't force users to paste `.env` tokens. It acts as a local OAuth client, spins up a temporary TCP listener, opens the user's browser, catches the `localhost` redirect callback, and securely stores the refresh token.
 
-**Port.** TokenOS currently relies on hardcoded environment variables. The **Local PKCE (Proof Key for Code Exchange) Loop** is ported so that, when a user types `tokenos auth google`, the microkernel spawns an ephemeral Axum listener on a random high port, handles the secure OAuth handshake, and saves the encrypted refresh token to the SQLite vault.
+**Roadmap Port.** TokenOS currently relies on configured environment variables. A future **Local PKCE (Proof Key for Code Exchange) Loop** could let a user run an auth command, open a provider-sanctioned OAuth flow, handle the redirect callback on an ephemeral loopback listener, and save the refresh token to an encrypted vault or platform keychain.
 
 ```rust
 // src/oauth_loop.rs
@@ -1490,8 +1366,8 @@ use tokio::sync::oneshot;
 pub struct LocalAuthDaemon;
 
 impl LocalAuthDaemon {
-    /// execute_pkce_flow spins up an ephemeral, allocation-free local server 
-    /// to catch OAuth callbacks, securely extracting tokens without manual user input.
+    /// execute_pkce_flow spins up an ephemeral local server to catch OAuth
+    /// callbacks for a provider-sanctioned authorization-code flow.
     pub async fn execute_pkce_flow(auth_url: &str) -> anyhow::Result<String> {
         let (tx, rx) = oneshot::channel();
         
@@ -1531,7 +1407,7 @@ impl LocalAuthDaemon {
 
 **Mechanism.** Antigravity-Manager runs locally, but local desktop environments are vulnerable. If a local proxy or manager exposes a REST API on `127.0.0.1:8080`, any malicious script or webpage running on the host machine can execute Cross-Site WebSocket Hijacking (CSWSH) to steal keys or issue commands. Antigravity uses Tauri's secure IPC pipes to prevent this.
 
-**Port.** TokenOS's current control daemon uses `TcpListener`. It is ported to use **Unix Domain Sockets (UDS)** on Linux/macOS (and Named Pipes on Windows). This mathematically guarantees that *only* processes running under the current user's exact permissions can communicate with the TokenOS engine, locking out network-based localhost attacks.
+**Roadmap Port.** TokenOS currently serves the dashboard/API over loopback TCP with bearer-token protection. A future daemon variant could use **Unix Domain Sockets (UDS)** on Linux/macOS and Named Pipes on Windows to bind control-plane access more tightly to local OS permissions, reducing exposure to network-based localhost attacks.
 
 ```rust
 // src/webui_uds.rs
@@ -1567,7 +1443,7 @@ pub async fn start_secure_daemon(engine: Arc<Engine>, socket_path: &str) -> anyh
 
 **Mechanism.** Antigravity-Manager controls the lifecycle of the IDE's internal `ls_core` (Language Server). It doesn't guess context; it leverages the compiler daemon.
 
-**Port.** TokenOS currently relies on a regex-based Surgical Slicer to find code blocks. This can be vastly enriched by porting a **Background LSP Supervisor**. TokenOS spawns `rust-analyzer`, `tsserver`, or `pylsp` as child processes, communicates via JSON-RPC over `stdin`/`stdout`, and asks the actual compiler for exact "Go to Definition" and "Find References" data. This guarantees 100 % accurate context slicing without hallucination.
+**Roadmap Port.** TokenOS currently relies on a regex-based Surgical Slicer to find code blocks. This could be enriched by porting a **Background LSP Supervisor**. A future implementation would spawn `rust-analyzer`, `tsserver`, or `pylsp` as child processes, communicate via JSON-RPC over `stdin`/`stdout`, and ask the compiler for "Go to Definition" and "Find References" data. That would improve context precision, subject to language-server quality and workspace configuration.
 
 ```rust
 // src/lsp_supervisor.rs
@@ -1627,12 +1503,12 @@ impl LspSupervisor {
 
 ### 23.5 Verification Summary
 
-The four implementations elevate TokenOS from a highly optimized router into a completely self-sufficient, stealthy, and compiler-aware **Orchestration Operating System**:
+The four roadmap implementations would move TokenOS from a local router toward a more self-contained, compiler-aware orchestration kernel:
 
-1. **Anti-Ban Identity Shifting.** The `HardwareFingerprint` module ensures that when TokenOS rotates an overloaded API key, it also rotates the HTTP device telemetry, completely evading server-side shadow bans.
-2. **Zero-Touch Deployment.** The `LocalAuthDaemon` allows TokenOS to bootstrap its own encrypted credentials via native PKCE browser flows, eliminating `.env` file management.
-3. **Local Host Security.** The transition to `UnixListener` mathematically locks out local malware from hijacking the TokenOS control plane.
-4. **Compiler-Grade Context.** The `LspSupervisor` upgrades TokenOS's context slicing from "Regex Guessing" to "Mathematical Certainty" by talking directly to the user's background compilers.
+1. **Provider-Compliant Identity Separation.** Future account/key handling should preserve provider terms and avoid ban-evasion behavior; rotating overloaded keys is a quota-governance concern, not a stealth feature.
+2. **Credential Bootstrap.** A future `LocalAuthDaemon` could bootstrap encrypted credentials via native PKCE browser flows, reducing `.env` file management.
+3. **Local Host Security.** A UDS/Named Pipe control-plane variant could reduce localhost attack surface beyond bearer-token protection.
+4. **Compiler-Grade Context.** A future `LspSupervisor` could upgrade context slicing from regex-based heuristics to compiler-assisted navigation.
 
 ---
 
@@ -1653,7 +1529,7 @@ Autonomous coding agents (Cursor, Cline, Claude Code) execute shell commands (`n
 
 ### 24.2 Surgical Tool-Output Compactor Layer
 
-TokenOS optimizes this capability by building an **AST-Driven Tool-Output Compressor** directly into the prompt serialization engine (`src/payload.rs`). When tool data (such as large terminal dumps or compilation logs) is captured, the compressor screens the data stream linearly using an allocation-free token byte filter. It collapses redundant lines, filters out binary blocks, and applies line-boundary truncation without allocation overhead, protecting input token budgets from context inflation.
+A future RTK-style layer could optimize this capability by adding an **AST-Driven Tool-Output Compressor** near prompt serialization. When tool data (such as large terminal dumps or compilation logs) is captured, the compressor would screen the data stream linearly, collapse redundant lines, filter binary blocks, and apply line-boundary truncation to protect input token budgets from context inflation.
 
 ```rust
 // src/tool_compress.rs
@@ -1900,9 +1776,9 @@ ContentBlock::ToolResult { tool_use_id, content, is_error } => {
 
 ### 24.5 Systems Impact
 
-1. **Mathematical Cost Reduction.** A 10,000-line `package-lock.json` diff typically costs ~30,000 input tokens ($0.09 on Claude 3.5 Sonnet). TokenOS reduces this to exactly 10 tokens ($0.00003) instantaneously, without the LLM losing any actual code-logic context.
-2. **Infinite Log Protection.** If an agent accidentally writes a `while(true)` loop that prints to stdout, the RTK byte filter catches the repeating lines and truncates them, preventing the payload from blowing past the 200,000 token context window and crashing the API request.
-3. **Hardware Supremacy.** Because TokenOS executes this in Rust using `&[u8]` slice iterators, processing a 50 MB text payload takes less than **2 milliseconds** of CPU time with zero heap allocations, completely destroying the performance limits of Node.js-based proxies.
+1. **Cost Reduction Target.** A 10,000-line `package-lock.json` diff can cost tens of thousands of input tokens. A validated compressor should preserve the actionable error/context lines while removing repeated boilerplate.
+2. **Runaway Log Protection.** If an agent accidentally writes a loop that prints continuously, an RTK byte filter could detect repeating lines and truncate them before the payload exceeds the selected provider's context window.
+3. **Performance Target.** A Rust byte-slice implementation should be benchmarked against large payloads and compared with Node.js/Python proxies before any specific latency claim is made.
 
 ---
 
@@ -1914,7 +1790,7 @@ A granular re-evaluation of `9router` reveals three additional critical operatio
 
 **Mechanism.** If a developer uses `claude-code`, the tool assumes it has Anthropic's massive 200,000-token context window. If the proxy reroutes that 150,000-token conversation to a cheaper, free-tier model (such as Llama-3-70B via Groq, which may only accept 8,192 tokens), the upstream API immediately throws `400 Bad Request: Context Length Exceeded`, crashing the agent. To prevent this, proxies must implement "Context Sliding" — dynamically dropping older conversational turns to fit the exact context window of the target model *before* dispatching.
 
-**Port.** TokenOS implements a **Target-Aware Context Slider**. When the Multi-Armed Bandit selects a provider (for example Groq Llama 3), TokenOS checks that provider's known maximum context window. It then runs a fast, memory-mapped BPE token estimation on the payload. If the payload exceeds the limit, TokenOS mathematically slices out the oldest intermediate conversational turns, while preserving the System Prompt and the most recent N turns.
+**Roadmap Port.** A future TokenOS **Target-Aware Context Slider** would check the selected provider's known maximum context window, estimate payload tokens, and prune older intermediate conversational turns while preserving the system prompt and the most recent relevant turns.
 
 ```rust
 // src/context_slider.rs
@@ -1924,8 +1800,8 @@ use crate::tokenizer::MmapBpeTokenizer;
 pub struct ContextSlider;
 
 impl ContextSlider {
-    /// dynamically prunes conversational history to fit the exact hardware bounds 
-    /// of the target provider, ensuring zero out-of-memory/context API crashes.
+    /// dynamically prunes conversational history to fit the configured provider
+    /// context window and reduce context-overflow failures.
     pub fn slide_window_to_fit(
         mut payload: AnthropicPayload,
         target_model_limit: usize,
@@ -1974,7 +1850,7 @@ impl ContextSlider {
 
 **Mechanism.** Autonomous agents frequently suffer from "looping amnesia," where they issue the exact same `read_file` or `git status` command multiple times in a single session. Every time they do this, the proxy fetches the file and sends thousands of identical tokens back to the LLM, burning budget.
 
-**Port.** TokenOS implements an **In-Process Idempotent Tool Cache** (`src/tool_cache.rs`). Before executing a local MCP tool or passing a terminal command, TokenOS hashes the command string. If the command was run recently, and the underlying file system state (mtime/hash) hasn't changed, TokenOS intercepts the result. Instead of sending the full 10,000-token file back to the LLM, it sends a 0-token acknowledgment.
+**Roadmap Port.** A future TokenOS **In-Process Idempotent Tool Cache** (`src/tool_cache.rs`) could hash command strings and result state. If a command was run recently and the underlying file system state had not changed, TokenOS could return a compact cache-hit acknowledgment instead of forwarding the full tool output again.
 
 ```rust
 // src/tool_cache.rs
@@ -2020,7 +1896,7 @@ impl IdempotentToolCache {
 
 **Mechanism.** Modern APIs (such as Anthropic and DeepSeek) offer "Prefix Caching," which discounts input tokens by up to 90 % if the prompt begins with the exact same bytes as a previous request. However, CLI tools often append ephemeral data (such as timestamps, dynamic project states, or changing git branches) near the *top* of the payload. This instantly breaks the cache, forcing the developer to pay full price for the entire 100k-token payload every single turn.
 
-**Port.** TokenOS actively reorganizes JSON payloads before transmission. The **Prefix Cache Aligner** (`src/cache_aligner.rs`) acts as a defragmentation engine. It scans the payload, extracts massive, immutable blocks (such as the System Prompt, deep codebase maps, and API documentation), and physically pins them to the absolute top of the `messages` array, pushing all ephemeral/changing data to the very bottom.
+**Roadmap Port.** A future **Prefix Cache Aligner** (`src/cache_aligner.rs`) could reorganize JSON payloads before transmission. It would scan the payload, identify large stable blocks (such as the system prompt, codebase maps, and API documentation), and place them before ephemeral/changing data where providers support prefix caching.
 
 ```rust
 // src/cache_aligner.rs
@@ -2029,8 +1905,8 @@ use crate::transcoder_schemas::{AnthropicMessage, AnthropicPayload};
 pub struct PrefixCacheAligner;
 
 impl PrefixCacheAligner {
-    /// Defragments inbound conversational arrays to mathematically guarantee 
-    /// maximum Prefix Cache hit rates on upstream APIs (Anthropic/DeepSeek).
+    /// Reorders inbound conversational arrays to improve prefix-cache hit rates
+    /// on upstream APIs that support compatible cache semantics.
     pub fn optimize_for_prefix_cache(mut payload: AnthropicPayload) -> AnthropicPayload {
         let mut static_blocks = Vec::new();
         let mut ephemeral_blocks = Vec::new();
@@ -2061,11 +1937,11 @@ impl PrefixCacheAligner {
 
 ### 25.4 Verification Summary
 
-1. **Cross-Model Compatibility (`ContextSlider`).** TokenOS can now seamlessly route a 200k-token Anthropic conversation to an 8k-token Llama 3 model by mathematically sliding the context window, completely eliminating `Context Length Exceeded` crashes.
-2. **Idempotent Token Saving (`IdempotentToolCache`).** By intercepting redundant `read_file` or `git status` commands locally, TokenOS prevents agents from spamming APIs with identical data, dropping output token usage by massive margins.
-3. **Financial Optimization (`PrefixCacheAligner`).** By actively defragmenting and pinning static codebase data to the top of the request arrays, TokenOS guarantees 90 % cache-hit discounts on providers like Anthropic and DeepSeek, radically slashing the cost of running autonomous agents.
+1. **Cross-Model Compatibility (`ContextSlider`).** A validated slider could adapt oversized conversations to smaller context windows and reduce context-overflow errors.
+2. **Idempotent Token Saving (`IdempotentToolCache`).** A local cache could suppress repeated tool outputs when file state is unchanged.
+3. **Financial Optimization (`PrefixCacheAligner`).** A cache aligner could improve provider cache hit rates where the provider exposes compatible prefix-cache behavior.
 
-TokenOS no longer just compresses text; it actively manipulates API cache states and memory boundaries natively in Rust.
+These are roadmap optimizations rather than current-source guarantees.
 
 ---
 
@@ -2085,7 +1961,7 @@ The original Python implementation has key weaknesses:
 
 ### 26.2 Lock-Free Transparent Protocol Transcoder
 
-The core concept — **Transparent Protocol Spoofing and Transcoding** — is ported natively into the TokenOS Rust microkernel using `serde`'s strict, zero-allocation type safety and untagged enums. TokenOS opens an asynchronous listener on `localhost`. Developers simply set an environment variable (such as `ANTHROPIC_BASE_URL=http://127.0.0.1:8080/v1`) to hijack the CLI tool. TokenOS intercepts the payload, transcodes it instantly into its internal state, optimizes the route via the Multi-Armed Bandit, executes the task on *any* backend provider, and returns a perfectly spoofed Anthropic response.
+The core concept — **Transparent Protocol Transcoding** — could be ported into the TokenOS Rust microkernel using `serde` schemas and untagged enums. In that roadmap design, TokenOS would expose a local compatible endpoint, allow a supported CLI to point at it, translate payloads into TokenOS internal state, route through configured providers, and return a protocol-compatible response.
 
 #### 26.2.1 Polymorphic Serde Schemas
 
@@ -2292,10 +2168,10 @@ pub async fn faux_anthropic_handler(
 
 ### 26.4 Architectural Impact
 
-1. **Polymorphic Safety.** The `#[serde(untagged)]` enum completely eliminates the manual `isinstance` and `dict` checking required by the Python implementation of `free-claude-code`, making the interception fail-proof and memory-safe.
-2. **Inline Compression.** The `ContentBlock::ToolResult` branch invokes `crate::payload::ToolOutputCompactor` (the ported 9router RTK filter) inline. This means TokenOS intercepts the raw `git diff` coming from Claude Code and mathematically compresses it *during the transcoding phase*, saving input tokens before the engine even schedules the task.
-3. **Absolute Compatibility.** TokenOS becomes an orchestration backend for *any* tool that speaks the Anthropic API protocol, completely circumventing vendor lock-in.
-4. **Memory Safety and Zero-Allocation.** Unlike the Python implementation, the Rust `serde` engine handles the complex JSON structures with mathematically guaranteed memory safety and minimal overhead.
+1. **Polymorphic Safety.** The `#[serde(untagged)]` enum reduces the manual `isinstance` and `dict` checking required by the Python implementation of `free-claude-code`, making interception more strongly typed and memory-safe.
+2. **Inline Compression.** The `ContentBlock::ToolResult` branch invokes `crate::payload::ToolOutputCompactor` (the ported 9router RTK filter) inline. This means TokenOS can compact raw tool output during the transcoding phase, reducing input tokens before the engine schedules the task.
+3. **Protocol Compatibility.** TokenOS can act as an orchestration backend for tools that speak supported Anthropic-compatible API shapes, reducing vendor lock-in where schemas are covered.
+4. **Memory Safety and Allocation Discipline.** Unlike the Python implementation, the Rust `serde` engine handles complex JSON structures with Rust's compile-time memory-safety guarantees and lower runtime overhead.
 
 ---
 
@@ -2518,11 +2394,11 @@ impl DecoratorSanitizer {
 
 ### 27.4 Verification Summary
 
-1. **The Babel Fish Streamer (`SseTranscoderStream`).** TokenOS seamlessly intercepts fast, real-time SSE streams from *any* provider (Groq, Llama, OpenAI) and transcodes them on the fly into Anthropic's highly specific state-machine SSE format without buffering, ensuring the CLI tool's UI remains fast and responsive.
-2. **Tool-Call Interoperability (`SchemaTranscoder`).** TokenOS dynamically repairs the structural differences between Anthropic and OpenAI tool schemas, allowing developers to use complex local file-editing agents with *any* backend model.
-3. **Cross-Provider Resilience (`DecoratorSanitizer`).** By actively stripping proprietary `cache_control` flags, TokenOS ensures that payloads generated by official corporate CLI tools never trigger `400 Bad Request` validation errors on open-source or free-tier cloud endpoints.
+1. **The Babel Fish Streamer (`SseTranscoderStream`).** A future streamer could adapt real-time SSE streams from supported providers into Anthropic-compatible event formats without buffering the entire response.
+2. **Tool-Call Interoperability (`SchemaTranscoder`).** A schema transcoder could reduce structural differences between Anthropic and OpenAI-style tool schemas for supported backend models.
+3. **Cross-Provider Resilience (`DecoratorSanitizer`).** A decorator sanitizer could strip proprietary `cache_control` flags where a fallback provider rejects them.
 
-TokenOS is no longer just an orchestrator; it is an undetectable, universal translation layer.
+In roadmap terms, the transcoding layer would make TokenOS a protocol-translation boundary rather than only a task orchestrator.
 
 ---
 
@@ -2530,7 +2406,7 @@ TokenOS is no longer just an orchestrator; it is an undetectable, universal tran
 
 ### 28.1 Vision-Verification Layout Sandbox Guard
 
-TokenOS is a text-centric control plane built to maximize token efficiency; integrating heavy visual inference loops would degrade its performance guarantees. However, we can use a lightweight visual capture engine *strictly as an isolated validation metric* within the `VERIFY` step. When code changes affect front-end files (such as UI modifications), the engine triggers an isolated headless browser pass, takes a screen capture snapshot, and runs a fast local pixel-diff analysis to confirm that layout compiles correctly without visual breakage.
+TokenOS is a text-centric control plane built to maximize token efficiency; integrating heavy visual inference loops would change that performance profile. A future visual verification feature could use a lightweight capture engine strictly as an isolated validation metric within the `VERIFY` step. When code changes affect front-end files, the engine could trigger an isolated headless browser pass, take a screenshot, and run a local pixel-diff or structural check.
 
 ```rust
 // src/vision_verify.rs
@@ -2751,25 +2627,25 @@ impl SecureKeyVault {
 
 ### 29.4 TTL Analytics Pruner
 
-A separate but related concern is database bloat. FreeLLMAPI tracks vast amounts of usage data but avoids bloat by pruning request analytics after 90 days or 100,000 rows. TokenOS's SQLite database will eventually bloat if telemetry is unbounded. We port the TTL pruner by attaching an asynchronous SQLite cleanup hook that triggers periodically. Combined with the AES-256-GCM Encrypted Local Vault above, this dramatically improves both physical security and operational maintainability.
+A separate but related concern is database bloat. FreeLLMAPI tracks vast amounts of usage data but avoids bloat by pruning request analytics after 90 days or 100,000 rows. TokenOS's SQLite database can grow if telemetry is unbounded. A future TTL pruner could attach a periodic SQLite cleanup hook. Combined with a future encrypted local vault, this would improve physical security and operational maintainability.
 
 ### 29.5 Systems Impact
 
-1. **Dynamic Cost Cratering.** The `IntelligenceRouter` ensures that trivial tasks (such as fixing a typo or asking a basic syntax question) never burn expensive `Claude-3.5-Sonnet` tokens. They are instantly shunted to free/cheap tiers, optimizing the budget automatically.
-2. **Zero-Trust Architecture.** The `SecureKeyVault` mathematically protects corporate secrets. Even if an attacker steals the developer's laptop or exfiltrates the TokenOS SQLite database, the API keys are locked behind AES-256-GCM encryption.
-3. **Decentralized Enterprise Readiness.** TokenOS no longer needs a central server. Each developer runs TokenOS locally, managing their own isolated encrypted vault and multi-armed bandit, completely eliminating the "single point of failure" inherent in central gateways like FreeLLMAPI.
+1. **Dynamic Cost Control.** The current router can keep ASK/escalation paths local and use configured provider pricing to avoid unsuitable candidates; additional intelligence-tier routing remains roadmap work.
+2. **Encrypted Local Vault Roadmap.** A future `SecureKeyVault` could encrypt stored API keys with AES-256-GCM or a platform keychain. Current TokenOS does not include built-in encryption at rest.
+3. **Decentralized Enterprise Readiness Roadmap.** Local-first operation reduces reliance on a central gateway for individual users, but fleet-wide enterprise operation still needs distributed quota coordination, monitoring, and governance controls.
 
 ---
 
 ## 30. `tashfeenahmed/freellmapi` — Forensic Re-Audit (Three Missed Vectors)
 
-Centralized proxies like FreeLLMAPI survive millions of requests not just by routing them, but by mathematically managing upstream quota pools, mitigating "thundering herd" retry spikes, and repairing fragmented streaming data on the fly.
+Centralized proxies like FreeLLMAPI survive high request volumes not just by routing them, but by actively managing upstream quota pools, mitigating "thundering herd" retry spikes, and repairing fragmented streaming data on the fly.
 
 ### 30.1 Upstream Key-Pool Load Balancing
 
-**Mechanism.** Developers and enterprises rarely rely on a single API key. To bypass strict rate limits (such as 15 Requests Per Minute on free tiers), users configure arrays of 10+ API keys for a single provider. FreeLLMAPI handles this by pooling keys and rotating them when one hits a limit. In standard Node.js proxies, tracking which key is active, which is rate-limited, and which is banned requires hitting a Redis cache or iterating through an array, causing synchronous locking and slowing down the router under high concurrency.
+**Mechanism.** Developers and enterprises rarely rely on a single API key. To stay within strict provider limits, some deployments configure multiple keys for a provider and rotate them when one reaches its quota. FreeLLMAPI handles this by pooling keys and rotating them when one hits a limit. In standard Node.js proxies, tracking which key is active, which is rate-limited, and which is disabled often requires hitting a Redis cache or iterating through an array, causing synchronous locking and slowing down the router under high concurrency.
 
-**Port.** TokenOS implements a **Distributed Quota Router** (`src/key_pool.rs`) as a Lock-Free Round-Robin load balancer using `AtomicUsize`. This allows thousands of concurrent Tokio threads to request an API key for Anthropic or OpenAI in **< 1 nanosecond** without ever blocking each other. If a key returns a `429 Rate Limit`, its internal atomic penalty counter is incremented, temporarily kicking it out of the rotation mathematically.
+**Roadmap Port.** A future TokenOS **Distributed Quota Router** (`src/key_pool.rs`) could use atomic round-robin selection for low-contention key choice inside a process. If a key returns a `429 Rate Limit`, a penalty timestamp could temporarily remove it from rotation. Multi-process and fleet-wide quota coordination would still require distributed state.
 
 ```rust
 // src/key_pool.rs
@@ -2809,7 +2685,7 @@ impl ProviderKeyPool {
         Err(anyhow::anyhow!("All API keys in pool are currently rate-limited (429)."))
     }
 
-    /// Triggers a penalty state, mathematically removing the key from rotation 
+    /// Triggers a penalty state, temporarily removing the key from rotation
     /// for a specified backoff duration.
     pub fn mark_rate_limited(&self, key_str: &str, backoff_seconds: u64) {
         let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -2822,9 +2698,9 @@ impl ProviderKeyPool {
 
 ### 30.2 Semantic Circuit Breaker and Jitter Retry
 
-**Mechanism.** When an upstream provider (such as Gemini or OpenAI) goes down, it throws `500` or `503` errors. If a proxy simply retries instantly, 10,000 concurrent agents will retry at the exact same millisecond, creating a "thundering herd" that guarantees the request will fail again. FreeLLMAPI uses middleware to apply backoffs. Blind exponential backoff still causes collisions.
+**Mechanism.** When an upstream provider (such as Gemini or OpenAI) goes down, it throws `500` or `503` errors. If a proxy simply retries instantly, many concurrent agents can retry at nearly the same time, creating a "thundering herd" that makes recovery harder. FreeLLMAPI uses middleware to apply backoffs. Blind exponential backoff can still cause collisions.
 
-**Port.** TokenOS implements **Decorrelated Jitter**, randomizing the retry windows locally at the edge. The `CircuitBreaker` (`src/circuit_breaker.rs`) evaluates the HTTP status code semantically. A `400 Bad Request` (schema error) triggers zero retries — it fails instantly. A `429` (Rate Limit) triggers a rotation. A `503` (Service Unavailable) triggers the Exponential Backoff with Decorrelated Jitter, sleeping the specific Tokio task efficiently without blocking the OS thread.
+**Roadmap Port.** A future TokenOS retry layer could implement **Decorrelated Jitter**, randomizing retry windows locally at the edge. A `CircuitBreaker` (`src/circuit_breaker.rs`) would evaluate HTTP status codes semantically: structural errors fail fast, rate limits trigger rotation, and transient server failures use backoff without blocking the runtime.
 
 ```rust
 // src/circuit_breaker.rs
@@ -2835,7 +2711,7 @@ use reqwest::StatusCode;
 pub struct SemanticRetryEngine;
 
 impl SemanticRetryEngine {
-    /// Executes a network closure with mathematically randomized backoff intervals 
+    /// Executes a network closure with randomized backoff intervals
     /// to prevent "thundering herd" packet spikes against recovering upstream APIs.
     pub async fn execute_with_jitter<F, Fut>(max_retries: u32, base_ms: u64, mut closure: F) -> anyhow::Result<reqwest::Response> 
     where
@@ -2880,7 +2756,7 @@ impl SemanticRetryEngine {
 
 **Mechanism.** When modern LLMs emit tool calls (such as asking to run `execute_bash`), they stream the JSON in Server-Sent Event (SSE) chunks. FreeLLMAPI intercepts these chunks, stitches them together, and repairs them before sending them to the client. If a tool name is streamed as `{"name": "exe` in chunk 1, and `cute_bash"}` in chunk 2, a naive proxy will crash trying to parse chunk 1 as JSON. Buffer concatenation in Node.js creates massive memory fragmentation under high load.
 
-**Port.** TokenOS implements an **SSE Fragment Reconstructor** (`src/stream_buffer.rs`). It reads raw bytes into a fixed-size `BytesMut` ring buffer. It dynamically searches for complete JSON boundaries (`{` and `}`) linearly. Only when a boundary is complete does it parse the block, allowing TokenOS to validate streamed tool-calls on the fly at zero allocation cost.
+**Roadmap Port.** A future TokenOS **SSE Fragment Reconstructor** (`src/stream_buffer.rs`) could read raw bytes into a fixed-size `BytesMut` ring buffer, search linearly for complete JSON boundaries, and parse only complete blocks. That would reduce parse failures on fragmented streamed tool calls.
 
 ```rust
 // src/stream_buffer.rs
@@ -2899,7 +2775,7 @@ impl SseFragmentReconstructor {
     }
 
     /// Ingests network fragments, yielding valid JSON blocks ONLY when the 
-    /// structural braces are mathematically balanced, avoiding intermediate parse crashes.
+    /// structural braces are balanced, avoiding intermediate parse crashes.
     pub fn ingest_chunk(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
         self.buffer.extend_from_slice(chunk);
         let mut completed_blocks = Vec::new();
@@ -2937,18 +2813,18 @@ impl SseFragmentReconstructor {
 
 ### 30.4 High-Throughput Provider Absorption
 
-FreeLLMAPI's true power comes from its vast array of supported endpoints. TokenOS absorbs the following **High-Throughput / Infrastructure providers** to dominate the ecosystem, bypassing rate limits through sheer diversity:
+FreeLLMAPI's true power comes from its broad array of supported endpoints. TokenOS could add the following **High-Throughput / Infrastructure providers** to broaden coverage while respecting provider limits:
 
 * **Fireworks AI.** Industry leader in latency (time-to-first-token). Critical for fast speculative routing paths.
 * **DeepInfra.** Provides near-cost access to Llama 3 and Mixtral models, essential for the `ComputeTier::Tier3Free` routing path.
-* **Moonshot AI (Kimi).** Powerhouse API for handling massive context windows (up to 2 million tokens) at a fraction of Anthropic's cost. TokenOS uses this specifically when the `ContextSlider` detects payloads over 200k tokens.
-* **Zhipu AI (GLM-4).** Top-tier reasoning endpoints that offer massive free-tier subsidies to developers, acting as a perfect drop-in replacement for GPT-4o during API outages.
+* **Moonshot AI (Kimi).** Powerhouse API for handling massive context windows (up to 2 million tokens) at a fraction of Anthropic's cost. A future TokenOS adapter could use this when a context slider detects very large payloads.
+* **Zhipu AI (GLM-4).** Reasoning endpoints that may offer useful free-tier capacity, subject to current pricing, terms, and compatibility validation.
 
 ### 30.5 Verification Summary
 
-1. **Distributed Quota Router.** `ProviderKeyPool` allows TokenOS to juggle 50+ API keys entirely lock-free, mathematically guaranteeing optimal rate-limit evasion.
-2. **Network Resilience.** `SemanticRetryEngine` stops "thundering herd" packet storms, gracefully keeping the microkernel alive when global AI providers experience outages.
-3. **Real-Time Data Surgery.** `SseFragmentReconstructor` protects the core from malformed stream chunks, enabling TokenOS to validate and compress tool logs on the fly without waiting for the stream to finish.
+1. **Distributed Quota Router.** `ProviderKeyPool` is a roadmap concept for low-contention key selection and quota-aware rotation.
+2. **Network Resilience.** `SemanticRetryEngine` is a roadmap concept for reducing retry storms during upstream outages.
+3. **Real-Time Stream Repair.** `SseFragmentReconstructor` is a roadmap concept for validating fragmented tool-call streams before parsing complete JSON blocks.
 
 ---
 
@@ -2964,7 +2840,7 @@ FreeLLMAPI doesn't just route — it manages the **State of the Request** throug
 2. *Health-Pulse Monitoring.* It maintains a real-time health-check state for every provider endpoint.
 3. *Cross-Model Schema Normalization.* It maps diverse provider tool-call formats (Gemini's function calling vs. Llama's tool calls) into a single, unified interface.
 
-TokenOS implements a `ResilienceOrchestrator` (`src/resilience.rs`) that treats the provider network as a dynamic "Flight Plan."
+A future `ResilienceOrchestrator` (`src/resilience.rs`) could treat the provider network as a dynamic "Flight Plan."
 
 ```rust
 // src/resilience.rs
@@ -3000,13 +2876,13 @@ impl ResilienceOrchestrator {
 
 ### 31.2 Cross-Provider Schema Normalization
 
-FreeLLMAPI provides a unified `/v1/chat/completions` endpoint. TokenOS does the same. If a CLI tool asks for `gemini-2.0-flash` but that model is currently rate-limited, TokenOS automatically rewrites the tool-call request into the schema expected by `Llama-3-70B-Instruct` on the fly. The `SchemaNormalizationLayer` sits between the `ProtocolTranscoder` and the `Adapter`. It uses a **JSON-Schema Mapper** to transform Anthropic/OpenAI function definitions into the specific syntax (such as `parameter` vs `input_schema`) expected by the selected provider.
+FreeLLMAPI provides a unified `/v1/chat/completions` endpoint. A future TokenOS proxy layer could provide a similar compatibility surface. If a CLI tool asks for one model but that model is unavailable, a `SchemaNormalizationLayer` could translate tool-call schemas into the syntax expected by a fallback provider, subject to provider compatibility tests.
 
 ### 31.3 Free-Tier Provider Arsenal
 
-FreeLLMAPI aggregates the following to reach the ~1.7B tokens/month capacity. TokenOS integrates these endpoints directly:
+FreeLLMAPI aggregates the following to reach large free-tier capacity. TokenOS could integrate these endpoints directly after live compatibility, pricing, and terms validation:
 
-* **Cloudflare Workers AI.** Uses global edge nodes. Perfect for TokenOS's "Zero Network Hop" philosophy.
+* **Cloudflare Workers AI.** Uses global edge nodes and may be useful for low-latency DIRECT routing paths.
 * **Pollinations AI.** Specifically optimized for free, rapid creative and text inference.
 * **LLM7.** A specialized gateway proxying many open-source models at scale.
 * **GitHub Models.** Enterprise-grade inference endpoints for Llama, Mistral, and Phi-3, usually authenticated via GitHub tokens.
@@ -3016,20 +2892,14 @@ FreeLLMAPI aggregates the following to reach the ~1.7B tokens/month capacity. To
 
 | Project | The "DNA" Absorbed | TokenOS Integration Status |
 | --- | --- | --- |
-| **Antigravity-Manager** | Session-token harvesting | Integrated (`src/session_harvester.rs`) |
-| **9router** | RTK log compression | Integrated (`src/rtk_filter.rs`) |
-| **free-claude-code** | Transparent API spoofing | Integrated (`src/transcoder.rs`) |
-| **UI-TARS-desktop** | MCP-Host system actions | Integrated (`src/mcp_host.rs`) |
-| **FreeLLMAPI** | Fallback-chain resilience | Integrated (`src/resilience.rs`) |
-| **Awesome-Models** | Auto-discovery manifest | Integrated (`src/discovery_sync.rs`) |
+| **Antigravity-Manager** | Credential bootstrap and local IPC hardening | Roadmap candidate |
+| **9router** | RTK log compression | Roadmap candidate |
+| **free-claude-code** | Transparent API transcoding | Roadmap candidate |
+| **UI-TARS-desktop** | Visual verification and MCP-hosted actions | Roadmap candidate |
+| **FreeLLMAPI** | Fallback-chain resilience | Partially present in provider failover; broader resilience layer is roadmap |
+| **Awesome-Models** | Auto-discovery manifest | Roadmap candidate |
 
-TokenOS has evolved from a simple local orchestrator into an **Autonomous Edge-Orchestration Swarm**. It can now:
-
-1. **Harvest sessions** from the browser if API keys fail.
-2. **Mathematically compress** logs using RTK filters to save 40 % bandwidth.
-3. **Spoof protocols** to hijack any CLI tool in existence.
-4. **Execute system commands** locally via MCP.
-5. **Fail-over seamlessly** through an infinite chain of free-tier providers.
+If those roadmap items are implemented and validated, TokenOS could evolve from a local orchestrator into a broader edge-orchestration system. The current source tree should not be read as providing browser session harvesting, protocol hijacking, MCP host execution, or infinite free-tier failover.
 
 A reference video, *FreeLLMAPI Overview and Setup* (https://www.youtube.com/watch?v=42NjkFKXaXw), provides a deep dive into the FreeLLMAPI architecture, confirming the validity of the fallback chain and multi-model routing patterns identified in this audit. A complementary video, *Free Claude Code terminal setup* (https://www.youtube.com/watch?v=Mh7gJ1sAOw0), demonstrates the transparent proxy techniques used to map Claude Code traffic to free endpoints, providing context for the protocol transcoder port.
 
@@ -3045,7 +2915,7 @@ TokenOS currently relies on hardcoded provider definitions in `src/provider.rs`.
 
 ### 32.2 Autonomous Manifest Sync Engine
 
-We port the concept of "Awesome Free Models" into a native **Runtime Manifest Discovery Engine** (`src/discovery_sync.rs`). TokenOS runs a background Tokio thread that periodically fetches raw markdown/YAML manifest data from upstream GitHub repositories (or local JSON blobs), validates the endpoint connectivity, and injects new providers into the Multi-Armed Bandit router's active memory pool dynamically.
+A future TokenOS implementation could port the concept of "Awesome Free Models" into a native **Runtime Manifest Discovery Engine** (`src/discovery_sync.rs`). That service would periodically fetch raw markdown/YAML manifest data from upstream repositories or local JSON blobs, validate endpoint connectivity, and inject new providers into the router only after allow-list and compatibility checks.
 
 ```rust
 // src/discovery_sync.rs
@@ -3180,9 +3050,9 @@ The Portable Coding-Agent Skill Suite provides 84 distinct archived skills. Toke
 
 # Part VII — Hyperscale Enterprise Frontier (TokenOS v7)
 
-The previous engineering passes successfully elevated TokenOS into a lock-free, edge-native orchestration mesh, completely dominating traditional centralized proxies through in-process Multi-Armed Bandit routing, Zero-Copy JSON recovery, and SNI network obfuscation. To push this architecture into the **Hyperscale Enterprise Frontier** — where it can securely govern thousands of concurrent agents across a distributed corporate workforce without a central server — we must bypass user-space operating system limitations entirely.
+The current engineering pass establishes TokenOS as a local-first Rust execution kernel with in-process multi-armed bandit routing, JSON recovery, masking, verification hooks, and durable telemetry. The following **Hyperscale Enterprise Frontier** is a roadmap for what would be required to govern thousands of concurrent agents across a distributed corporate workforce.
 
-This part details the integration of five frontier systems-engineering paradigms into the compiled Rust microkernel.
+This part details five proposed systems-engineering directions for the compiled Rust microkernel.
 
 ## 33. Kernel-Level Networking: eBPF / XDP Fast-Path Interception
 
@@ -3192,7 +3062,7 @@ Currently, inbound HTTP payloads processed by the Axum control daemon (`src/webu
 
 ### 33.2 The Rigorous Enhancement: eBPF XDP Payload Sniffing
 
-We integrate an **eBPF (Extended Berkeley Packet Filter) XDP (eXpress Data Path)** program managed natively via the Rust `aya` framework. TokenOS attaches a compiled eBPF hook directly to the host network interface card (NIC) driver. Before the OS even allocates an `sk_buff` (socket buffer), the eBPF program parses the packet headers. If it detects a malicious payload, rate-limit violation, or oversized payload body, it drops the packet directly inside the kernel at **< 1 microsecond**.
+A future integration could add an **eBPF (Extended Berkeley Packet Filter) XDP (eXpress Data Path)** program managed via the Rust `aya` framework. TokenOS would attach a compiled eBPF hook to the host network interface card (NIC) driver. Before the OS allocates an `sk_buff` (socket buffer), the eBPF program could parse packet headers and drop selected malicious, oversized, or rate-limited traffic inside the kernel fast path. Exact latency would require production benchmarking on supported kernels and NICs.
 
 ```rust
 // src/network_ebpf.rs (User-Space Loader via Aya)
@@ -3223,7 +3093,7 @@ impl KernelNetworkGuard {
 
 ### 33.3 Systems Impact
 
-The eBPF/XDP integration completely neutralizes volumetric DDoS or resource-exhaustion attacks against the TokenOS control daemon. Malicious traffic consumes zero CPU cycles on the Tokio asynchronous event loop. By moving packet inspection into the kernel's fast-path layer — executed before the operating system even constructs a socket buffer — TokenOS achieves sub-microsecond ingress latency decisions that would be physically impossible in any user-space proxy implementation. This represents a structural advantage that cannot be matched by Node.js, Python, or even pure-Rust user-space implementations, because the eBPF program executes inside the kernel's verified instruction sandbox at the network driver level itself.
+The proposed eBPF/XDP integration would reduce exposure to volumetric DDoS or resource-exhaustion attacks against the TokenOS control daemon by filtering selected traffic before it reaches the Tokio application layer. By moving packet inspection into the kernel's fast-path layer, this roadmap item targets much lower ingress decision latency than user-space proxy middleware. The benefit depends on production eBPF program design, kernel support, deployment topology, and operational validation.
 
 ---
 
@@ -3231,11 +3101,11 @@ The eBPF/XDP integration completely neutralizes volumetric DDoS or resource-exha
 
 ### 34.1 The Boundary Limitation
 
-To add custom routing logic, unique API provider adapters, or proprietary corporate code-linting rules to TokenOS, developers currently must fork the Rust repository, write native code, and recompile the binary. This stifles enterprise adoption where teams need agile, custom tool-call logic without risking the memory safety or token-optimal guarantees of the core kernel.
+To add custom routing logic, unique API provider adapters, or proprietary corporate code-linting rules to TokenOS, developers currently must fork the Rust repository, write native code, and recompile the binary. This slows enterprise adoption where teams need agile, custom tool-call logic without weakening the memory-safety and token-budget properties of the core kernel.
 
 ### 34.2 The Rigorous Enhancement: Wasmtime Micro-Runtimes
 
-We embed the Bytecode Alliance's **`wasmtime` Engine** into `src/engine.rs`. Developers can write custom tools or fallback routers in TypeScript, Python, or Go, compile them to WebAssembly (WASM), and load them dynamically. The microkernel executes these WASM plugins inside a strict, linear-memory sandbox. We enforce a **Fuel Counter (Instruction Limit)**, ensuring that a poorly written user plugin cannot cause an infinite loop or stall the primary Tokio threads.
+A future implementation could embed the Bytecode Alliance's **`wasmtime` Engine** into the runtime. Developers would write custom tools or fallback routers in a language that compiles to WebAssembly (WASM), then load them dynamically. The microkernel would execute those WASM plugins inside a linear-memory sandbox with a **Fuel Counter (Instruction Limit)** to reduce the risk of runaway plugins stalling primary Tokio threads.
 
 ```rust
 // src/sandbox_wasm.rs
@@ -3282,7 +3152,7 @@ impl WasmPluginRuntime {
 
 ### 34.3 Systems Impact
 
-WASM micro-runtimes provide TokenOS with unbounded extensibility while preserving its hard memory-safety invariants. Unlike traditional plugin systems (Python's `eval`, Node.js's `vm` module, or even Lua scripting), the WASM linear-memory sandbox mathematically guarantees that a malicious or buggy plugin cannot read outside its allocated memory pages, cannot make uncontrolled syscalls, and cannot stall the host runtime indefinitely thanks to the fuel counter. This unlocks a marketplace model: third parties can write custom routing logic, prompt filters, or compliance gates as WASM modules, sign them, and distribute them — and end users can load them without recompiling the TokenOS binary or trusting the plugin author with full process privileges.
+WASM micro-runtimes could provide TokenOS with controlled extensibility while preserving a tighter boundary than native plugins. Compared with Python `eval`, Node.js `vm`, or Lua scripting, a WASM runtime with fuel limits and explicit host imports can reduce memory and syscall exposure. This could support a marketplace model in which third parties distribute signed routing logic, prompt filters, or compliance gates without requiring users to recompile TokenOS or grant plugins full process privileges.
 
 ---
 
@@ -3290,20 +3160,20 @@ WASM micro-runtimes provide TokenOS with unbounded extensibility while preservin
 
 ### 35.1 The Boundary Limitation
 
-TokenOS's `MaskCodec` (`src/maskcodec.rs`) redacts secrets perfectly before they hit the network. However, the plaintext secrets and the reverse-vault mapping `HashMap` reside in the host's standard RAM. If an advanced attacker compromises the developer's operating system (for example via a compromised IDE extension dumping host memory), they can scrape the RAM and extract the API keys.
+TokenOS's `MaskCodec` (`src/maskcodec.rs`) redacts many common secrets before outbound prompts are sent. However, plaintext secrets and reverse-vault mappings can reside in the host's standard RAM. If an advanced attacker compromises the developer's operating system (for example via a compromised IDE extension dumping host memory), host-memory exposure remains a risk.
 
 ### 35.2 The Rigorous Enhancement: Trusted Execution Environments (TEE)
 
-We isolate the `MaskCodec` instantiation and unmasking logic inside a **Hardware-Backed Secure Enclave (Intel SGX / ARM TrustZone)** using the Rust `teaclave` or `rust-sgx-sdk` frameworks. The integration follows a four-step lifecycle:
+A future design could isolate `MaskCodec` instantiation and unmasking logic inside a **Hardware-Backed Secure Enclave (Intel SGX / ARM TrustZone)** using the Rust `teaclave` or `rust-sgx-sdk` frameworks. The integration would follow a four-step lifecycle:
 
 1. When TokenOS boots, it provisions a secure enclave.
 2. The OS loads API keys (such as Gemini, Anthropic) directly into the enclave's encrypted memory.
 3. The main TokenOS kernel *never sees the real API keys*. It asks the enclave to sign and encrypt the outbound HTTP request headers.
-4. If the host OS memory is dumped via `/dev/mem`, the attacker only sees AES-encrypted ciphertext, guaranteeing absolute zero-trust supply chain security.
+4. If host OS memory is dumped, the attacker should see only enclave-protected ciphertext for enclave-resident secrets, subject to hardware, SDK, side-channel, and attestation limitations.
 
 ### 35.3 Systems Impact
 
-The TEE integration represents the highest possible bar for secret protection on commodity hardware. Even a fully privileged root user on the host machine — armed with kernel debugging tools, hardware memory dump capabilities, and complete control over the operating system — cannot extract the API keys from the enclave. The keys exist only inside CPU-encrypted memory pages that are physically isolated from the rest of the system. Combined with the `MaskCodec` redaction layer (which prevents secrets from ever appearing in prompt payloads) and the AES-256-GCM Encrypted Local Vault (which protects keys at rest in SQLite), TokenOS achieves a three-layer defense-in-depth model: secrets are encrypted at rest, isolated in hardware-protected memory at runtime, and redacted from all outbound network traffic.
+TEE integration would raise the bar for secret protection on supported hardware, but it would require careful attestation, side-channel review, fallback behavior, and platform support. Combined with the current `MaskCodec` redaction layer and a future encrypted local vault, this could provide a three-layer defense-in-depth model: secrets encrypted at rest, isolated in hardware-protected memory at runtime where available, and redacted from outbound prompt payloads.
 
 ---
 
@@ -3315,7 +3185,7 @@ If a corporate team of 50 developers runs TokenOS locally on their laptops, each
 
 ### 36.2 The Rigorous Enhancement: Raft over QUIC (HTTP/3) Gossip Protocol
 
-We transform TokenOS from isolated nodes into a **Distributed Orchestration Swarm**. Using a lightweight implementation of the Raft consensus algorithm over encrypted QUIC UDP streams, TokenOS nodes on the same corporate subnet automatically discover each other (via mDNS) and form a mesh. They synchronously gossip two things in real time:
+A future design could transform TokenOS from isolated nodes into a **Distributed Orchestration Swarm**. Using a lightweight consensus or gossip protocol over encrypted QUIC UDP streams, TokenOS nodes on the same corporate subnet could discover each other (for example via mDNS) and share two classes of state:
 
 1. **Bandit Utility Scores.** "Provider X is timing out; decay score by 90 % across the fleet."
 2. **Distributed Token Buckets.** "The global organization has consumed 900k tokens this minute; throttle local batch generation."
@@ -3368,7 +3238,7 @@ impl SwarmConsensusMesh {
 
 ### 36.3 Systems Impact
 
-The Raft-over-QUIC swarm consensus transforms TokenOS from a collection of isolated agents into a *coordinated organism*. When one developer's TokenOS instance discovers that Anthropic's API is timing out in their region, that discovery propagates across the entire corporate fleet within microseconds. Every other developer's microkernel immediately adjusts its Multi-Armed Bandit scoring to avoid the degraded endpoint, preventing the entire engineering organization from collectively wasting tokens on dead routes. The token-bucket synchronization layer additionally enforces organization-wide spending caps without requiring a centralized server: each node atomically decrements a globally-replicated counter, ensuring no single developer can burn through the entire enterprise budget alone. This swarm intelligence emerges entirely peer-to-peer with zero central infrastructure — no Kafka clusters, no Redis instances, no admin dashboards — just lock-free UDP packets gossiping over the local subnet.
+A fleet-coordination layer could allow one developer's TokenOS instance to share provider degradation signals with peers so their local multi-armed bandit scores can adjust sooner. A distributed token-bucket layer could enforce organization-wide spending caps, but it would require careful consistency, partition handling, authentication, replay protection, observability, and administrative controls. Those properties are not present in the current source tree.
 
 ---
 
@@ -3380,7 +3250,7 @@ When TokenOS writes generated code into the workspace, the IDE cannot cryptograp
 
 ### 37.2 The Rigorous Enhancement: Native in-toto Attestations
 
-To comply with the highest levels of the **SLSA (Supply-chain Levels for Software Artifacts)** framework, TokenOS generates an `in-toto` provenance attestation for every file it modifies. When the `jsonrescue` and `verify` layers pass, the microkernel computes the SHA-256 hash of the generated code and signs it with a local `ed25519` cryptographic key. It emits a `.provenance.json` sidecar file containing the exact routing decision, the model used, the validation steps passed, and the cryptographic signature. CI/CD pipelines can later verify this signature to guarantee no human or malware tampered with the AI-generated code prior to commit.
+A future provenance layer could emit an `in-toto` attestation for files modified by TokenOS. When the `jsonrescue` and `verify` layers pass, the microkernel would compute the SHA-256 hash of the generated code and sign it with a local `ed25519` cryptographic key. It could emit a `.provenance.json` sidecar file containing the routing decision, model, validation steps, and signature. CI/CD pipelines could later verify the signature to detect tampering or unverified code paths before merge.
 
 ```rust
 // src/provenance.rs
@@ -3487,10 +3357,10 @@ Remediation Matrix
 | Done | Add semantic config validation | F-07 | M | Fast failure for key, provider, route, policy, and range constraints |
 | Done | Fix constant-time comparison implementation or docs | F-06 | S | No length early return |
 | Done | Add execution_attempts telemetry | F-09 | M | Retry attempts and error traces saved in SQLite database |
-| Done | Review native dependency strategy | F-10 | M-L | Native features made optional; advisories accepted for wry/tao |
-| Done | Add trace retention and permission hardening | F-11 | M-L | Unix owner-only modes and self-pruning on startup |
+| Risk accepted | Review native dependency strategy | F-10 | M-L | Optional native warnings formally documented in `docs/RISK_ACCEPTANCE.md`; default build unaffected |
+| Done | Add trace retention and permission hardening | F-11 | M-L | Unix owner-only modes and self-pruning on startup; encryption-at-rest remains deployment-specific |
 | Done | Add run concurrency/spend guardrails | F-13 | M-L | Semaphore limit of 4 + database-backed daily/monthly spend limits |
-| Done | Clean docs and untracked artifact governance | F-14 | S-M | Main report and docs polished, updated, and tracked in git |
+| Done | Clean docs and untracked artifact governance | F-14 | S-M | Main report and docs aligned to current verification state |
  
 ### 38.5 Core Remediation and Evolution Strategic Recommendations (Short, Medium, Long-Term)
  
@@ -3499,24 +3369,24 @@ Strategic Recommendations
 ### Short Term: 0-2 Weeks
 
 1. Verify hosted GitHub branch protection requires `.github/workflows/ci.yml` checks.
-2. Decide the disposition of `TokenOS Main Report.txt` because it remains untracked and provenance is unknown.
-3. Add route-name and policy-range config validation tests to complete F-07.
-4. Add an explicit concurrent `/api/run` integration test proving saturation returns `429`.
-5. Rename or qualify user-facing "verified" language where static checks are not semantic proof.
+2. Add docs smoke checks for command snippets and test-count evidence.
+3. Add remote deployment examples that pair TokenOS with TLS termination and external/distributed rate limiting.
+4. Decide whether optional native dependency warnings remain formally risk-accepted for release notes.
+5. Encourage users to configure route-specific verification commands for production code workflows.
 
 ### Medium Term: 2-6 Weeks
 
 1. Add execution-attempt telemetry with provider/model/route/status/error/latency/cost fields.
-2. Add trace retention controls, optional trace disablement, and documented file-permission guidance.
-3. Implement semantic verification for at least route-specific invariants that static shape checks cannot cover.
-4. Add CSP/security headers and a reverse-proxy/TLS deployment guide for remote dashboard use.
+2. Add encryption-at-rest integration such as SQLCipher or OS keychain-backed secret storage for sensitive deployments.
+3. Add richer built-in route-specific validators beyond shell-command hooks.
+4. Add provider attempt APIs/dashboard views over the `execution_attempts` table.
 5. Formally risk-accept or remove native GTK3-family dependency warnings.
 
 ### Long Term: 6-12 Weeks
 
 1. Build a real verification framework with route-specific validators and optional local test commands.
 2. Introduce durable provider health and drift storage if routing decisions must survive process restarts.
-3. Add budget governance: aggregate cost caps, per-token scopes, per-user rate limits, and token quotas.
+3. Add distributed budget governance: per-token quotas, per-user rate limits, and organization-level quota ledgers.
 4. Harden remote deployment story beyond single-process local serving.
 5. Re-evaluate native app dependency chain and platform support strategy.
 
@@ -3668,7 +3538,7 @@ Remediation evidence: `.github/workflows/ci.yml` now contains blocking fmt, clip
 Repository automation permission limitation led to staged workflow workaround.
 
 **Technical Impact**  
-No guaranteed automated build/test/lint gate on pushes or PRs.
+Without hosted branch protection or rulesets, GitHub may not require the existing automated build/test/lint gate before merges.
 
 **Operational Impact**  
 Broken changes can merge unnoticed.
@@ -3695,7 +3565,7 @@ Baseline: High. Current residual severity: Medium until branch protection is ver
 High.
 
 **Remediation**  
-Implemented: active workflow added at `.github/workflows/ci.yml`; staged workflow files removed. Still recommended: configure branch protection in GitHub to require these checks.
+Implemented: active workflow added at `.github/workflows/ci.yml`; workflow now covers `development` as well as `main` and feature/fix/codex branches; staged workflow files removed. Still required externally: configure branch protection or rulesets in GitHub to require these checks.
 
 **Effort**  
 S.
@@ -3704,7 +3574,7 @@ S.
 P1 baseline; repository-file portion closed.
 
 **Validation Method**  
-Open a PR and verify required GitHub checks run and block failures. Local source audit cannot verify hosted branch protection.
+Open a PR and verify required GitHub checks run and block failures. Local source audit cannot verify hosted branch protection without GitHub authentication; `gh auth status` reports no authenticated GitHub host in this workspace.
 
 ### F-04: Current Quality Gates Fail Under Rust 1.96.0 (Remediated)
 
@@ -3714,7 +3584,7 @@ Baseline: local test/build passed, but `cargo fmt --check` and clippy failed. Cu
 **Evidence**  
 Installed toolchain: `rustc 1.96.0`, `cargo 1.96.0`.  
 Baseline evidence: `cargo fmt --all -- --check` exited 1 and `cargo clippy --all-targets -- -D warnings` exited 101.  
-Remediation evidence: `cargo fmt --all -- --check` exits 0; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo test --locked` exits 0 with 186 passed; release and native release builds exit 0.
+Remediation evidence: `cargo fmt --all -- --check` exits 0; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo test --locked` exits 0 with 197 passed; release and native release builds exit 0.
 
 **Root Cause**  
 Formatting drift accumulated because CI did not enforce it; current active CI makes these gates blocking.
@@ -4079,13 +3949,13 @@ Remediation evidence: `SecurityPolicy` now includes `disable_traces`, `retention
 Initial prototype relied on OS/user profile defaults. Implementation now locks file permissions and prunes old traces.
 
 **Technical Impact**  
-Sensitve trace files and database files are protected from other users on Unix systems and are automatically cleaned up over time based on the `retention_days` setting.
+Sensitive trace files and database files are protected from other users on Unix systems and are automatically cleaned up over time based on the `retention_days` setting.
 
 **Operational Impact**  
 Operators configure a retention schedule to control disk usage and satisfy compliance requirements.
 
 **Security Impact**  
-Data at rest has owner-only access permissions, preventing unauthorized read access by other local users on Unix environments.
+Data at rest has owner-only access permissions on Unix environments, reducing exposure to other local users. Encryption-at-rest remains a deployment-specific control.
 
 **Reliability Impact**  
 Disk consumption is bounded by automatic startup pruning of database records and telemetry logs.
@@ -4143,7 +4013,7 @@ Execution success claims are backed by running independent code verification tes
 Drastically reduces false positives in cache admission.
 
 **Scalability Impact**  
-Verified solutions served from cache are guaranteed to have passed the external test suite.
+Verified solutions served from cache have passed TokenOS verification; when an external verification command is configured, that command must have passed before cache admission.
 
 **Business Impact**  
 The "verified" claim matches the actual implementation.
@@ -4227,7 +4097,7 @@ Baseline: docs were extensive but contained multiple drift points, and a large u
 
 **Evidence**  
 Baseline evidence: README said 177 tests while local test count was 180; README implied zero-warning gates while fmt/clippy failed; `git status --short` reported `?? "TokenOS Main Report.txt"`.  
-Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 196 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, and cache replay guards. `TokenOS Main Report.txt` is now fully tracked, integrated, and polished.
+Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 197 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, first-class attempt telemetry, verification commands, retention/permission controls, spend limits, and cache replay guards. `TokenOS Main Report.txt` is now tracked and aligned with the audit boundary.
 
 **Root Cause**  
 Documentation drift came from manual updates without active CI. CI is now active for code quality, and documentation is kept in sync with the codebase state.
@@ -4260,7 +4130,7 @@ Baseline: Medium. Current residual severity: Low.
 High.
 
 **Remediation**  
-Implemented: updated all tracked documentation files, polished `TokenOS Main Report.txt`, and brought it under tracking.
+Implemented: updated tracked documentation files and aligned `TokenOS Main Report.txt` with the current audit boundary.
 
 **Effort**  
 S-M.
@@ -4284,11 +4154,11 @@ Risk Register
 | R-05 | Authenticated dashboard unusable | High baseline / Medium current | High baseline / Low-Medium current | P1 | Frontend/API | Closed for browser UX; remote TLS/RBAC residual |
 | R-06 | Static verification overstates success | High | High | P1 | Core | Closed: Configured command verification runs semantically before cache admission |
 | R-07 | Missing live key validation | Medium baseline / Low-Medium current | Medium-High baseline / Medium current | P1 | Config/provider | Closed: Live env var validation at start, missing keys block adapter instantiation |
-| R-08 | Native dependency advisory warnings | Medium | Medium | P2 | Platform | Closed: Features made optional; warnings accepted/reviewed |
-| R-09 | Trace/state at-rest controls incomplete | Medium | Medium | P2 | Security/ops | Closed: Owner-only permissions and automatic trace self-pruning implemented |
+| R-08 | Native dependency advisory warnings | Medium | Medium | P2 | Platform | Formally risk accepted in `docs/RISK_ACCEPTANCE.md`; default build unaffected |
+| R-09 | Trace/state at-rest controls incomplete | Medium | Medium | P2 | Security/ops | Partially closed: owner-only permissions and automatic trace self-pruning implemented; encryption-at-rest risk accepted |
 | R-10 | Telemetry misses failed attempts as first-class rows | Medium | Medium | P2 | Observability | Closed: SQLite execution_attempts telemetry table fully wired up |
 | R-11 | No `/api/run` concurrency/spend limiter | Medium-High baseline / Medium current | Medium | P2 | Web/API | Closed: Semaphore concurrency limit of 4 + engine daily/monthly spend limits |
-| R-12 | Documentation drift | Medium baseline / Low-Medium current | High baseline / Medium current | P2 | Docs | Closed: Master report and docs polished, updated, and fully tracked |
+| R-12 | Documentation drift | Medium baseline / Low-Medium current | High baseline / Medium current | P2 | Docs | Closed for this finalization pass: master report and docs aligned to current verification state |
  
 ### 39.5 Core Codebase Audit Evidence Appendix
  
@@ -4296,10 +4166,10 @@ Evidence Appendix
 
 ### Repository Evidence
 
-- `git status --short --branch`: `## main...origin/genspark_ai_developer`
-- `git log -n 1`: `02c157b Merge pull request #4 from ...`
+- `git status --short --branch`: expected clean `## development` after the finalization commit
+- `git log -n 1`: finalization commit on `development`
 - Tracked files: Rust source, static assets, docs, active workflow, Cargo files.
-- Untracked: `TokenOS Main Report.txt`.
+- `TokenOS Main Report.txt` is tracked and reconciled.
 
 ### Toolchain and Build Evidence
 
@@ -4315,15 +4185,15 @@ Checks:
 ```text
 cargo test --locked
 EXIT=0
-196 passed; 0 failed
+197 passed; 0 failed
 
 cargo build --release --locked
 EXIT=0
-Finished release profile in 1m 01s
+Finished release profile successfully
 
 cargo build --release --locked --features native
 EXIT=0
-Finished release profile in 1m 10s
+Finished release profile successfully
 
 cargo fmt --all -- --check
 EXIT=0
@@ -4428,13 +4298,13 @@ Assumptions and Unknowns
 - Whether releases are published manually outside the active workflow.
 - Whether provider model IDs and prices are current as of 2026-06-12.
 - Whether users deploy TokenOS remotely today.
-- Whether `TokenOS Main Report.txt` is user-authored, generated, obsolete, or intended for commit.
+- Whether a shorter executive report should supersede this long-form master report for external diligence audiences.
 - Whether production data has ever been stored in local DB/trace paths.
 - Whether native app behavior is acceptable on macOS/Linux; only Windows build was verified.
 
-## 40. Ultimate Domination Matrix
+## 40. Hyperscale Roadmap Matrix
 
-By integrating the five hyperscale capabilities from Part VII on top of the foundational microkernel, TokenOS is no longer just a fast local proxy or agent loop — it becomes an impenetrable, decentralized Operating System for AI execution.
+If the five hyperscale capabilities from Part VII are implemented and validated on top of the foundational microkernel, TokenOS could evolve from a local execution kernel into a distributed AI execution fabric. This section is a roadmap comparison, not evidence that those extensions are present in the current source tree.
 
 | Architectural Vector | Traditional AI Agent Runtimes | Hyperscale TokenOS v7 Edge Mesh |
 | --- | --- | --- |
@@ -4467,15 +4337,15 @@ A complementary verdict diagram crystallizes the asymmetry between TokenOS and c
 
 ## 41. Final Strategic Verdict
 
-### 41.1 Core Architectural Superiority
+### 41.1 Core Architectural Positioning
 
-The competitive audit confirms that **TokenOS stands in an isolated, highly disciplined engineering class.** While contemporary platforms rely on high-level language interpreters to handle superficial string truncations and conversational loops, TokenOS approaches token optimization as a deterministic resource scheduling problem managed natively at the edge. While rival platforms function as basic, pattern-matching network proxies or high-level scripting wrappers that introduce high runtime overhead and security risks, TokenOS handles token optimization as an objective resource scheduling problem managed natively at the edge.
+The competitive audit supports positioning TokenOS as a disciplined local-first Rust execution kernel. While several peer systems rely on high-level runtimes to handle string truncation, proxying, or conversational loops, TokenOS approaches token optimization as a deterministic resource-scheduling problem managed locally at the edge.
 
-By combining sub-millisecond local routing, zero-copy structural self-healing, edge data masking, and multi-armed bandit optimization within a single dependency-free Rust binary, TokenOS completely eliminates the need for mid-tier network infrastructure. It provides an exceptionally secure, robust, and highly cost-effective control plane designed to maximize systems throughput and deliver peak execution resilience across enterprise automation pipelines.
+By combining local routing, structural JSON repair, edge data masking, and multi-armed bandit optimization in a compact Rust binary, TokenOS can reduce reliance on mid-tier orchestration infrastructure for single-user and local-first workflows. Remote or multi-tenant deployments still require external TLS, distributed rate limits, monitoring, and governance controls.
 
 ### 41.2 Synthesis of the Six-Repository Absorption
 
-Through the deep, secondary, and hyperscale extraction passes detailed across Sections 22–32, TokenOS has fully internalized the strongest architectural patterns from every rival in the orchestration space:
+Through the deep, secondary, and hyperscale extraction passes detailed across Sections 22-32, the report identifies architectural patterns that TokenOS can emulate or selectively absorb. The list below includes implemented ideas, partially implemented patterns, and roadmap candidates; it should not be read as a claim that every item is present in the current source tree:
 
 * **From Antigravity-Manager:** Session-token harvesting, hardware fingerprint spoofing, local PKCE OAuth loops, Unix Domain Socket security, and LSP-supervised compiler-grade context.
 * **From 9Router:** RTK byte-level log compression, semantic diff pruning, dynamic context sliding, idempotent tool-call caching, and prefix-cache alignment.
@@ -4484,25 +4354,25 @@ Through the deep, secondary, and hyperscale extraction passes detailed across Se
 * **From FreeLLMAPI:** Multi-tenant token-bucket limiting, intelligence tiering, AES-256-GCM encrypted vaults, TTL analytics pruning, lock-free key-pool load balancing, semantic circuit breakers with decorrelated jitter, SSE fragment reconstruction, and resilience orchestration with fallback chains.
 * **From Awesome-Free-Models:** Autonomous manifest synchronization, security allow-list filtering, and integration with the Portable Coding-Agent Skill Suite.
 
-### 41.3 The Hyperscale Frontier Achievement
+### 41.3 The Hyperscale Frontier Roadmap
 
-Layered on top of this absorbed foundation, the five hyperscale extensions push TokenOS past the limits of user-space orchestration entirely. By shifting networking to the kernel space (eBPF), logic to isolated sandboxes (WASM), secrets to silicon (SGX), state to a distributed swarm (Raft), and provenance to cryptography (SLSA), TokenOS becomes the most structurally sound, theoretically secure, and mathematically optimized orchestration fabric possible on current hardware architectures.
+Layered on top of the current foundation, the five hyperscale extensions would push TokenOS beyond the current local-first implementation. eBPF, WASM, TEE/SGX, Raft, and SLSA-style provenance remain roadmap directions that require dedicated design, implementation, testing, and operational validation before they can be treated as production capabilities.
 
 ### 41.4 Final Executive Statement
 
-This rigorous, multi-pass engineering reference establishes TokenOS as the definitive AI orchestration microkernel for the modern enterprise. It combines:
+This rigorous, multi-pass engineering reference establishes TokenOS as a credible local-first AI execution kernel and lays out a broader enterprise roadmap. The implemented core and proposed extensions combine:
 
 1. **Physical Resilience** via the `ResilienceOrchestrator`, `CircuitBreaker`, mid-stream handoff, and Raft-over-QUIC swarm consensus.
 2. **Economic Efficiency** via RTK Byte Filtering, Semantic Diff Pruning, `ContextSlider`, `IdempotentToolCache`, and `PrefixCacheAligner`.
-3. **Protocol Dominance** via the `ProtocolTranscoder`, `SseTranscoderStream`, `SchemaTranscoder`, `DecoratorSanitizer`, and native MCP Host.
+3. **Protocol Breadth** via the proposed `ProtocolTranscoder`, `SseTranscoderStream`, `SchemaTranscoder`, `DecoratorSanitizer`, and native MCP Host.
 4. **Self-Evolution** via the Manifest Discovery Sync engine, security allow-list filter, and Portable Coding-Agent Skill Suite integration.
-5. **Uncompromising Security** via the `MaskCodec`, constant-time bearer-token validation, AES-256-GCM Local Vault, Unix Domain Socket control plane, Hardware Enclave (TEE) secret isolation, and SLSA `in-toto` provenance attestations.
-6. **Extensibility Without Risk** via WebAssembly micro-runtimes with strict fuel-counter sandboxing.
+5. **Layered Security Controls** via the implemented `MaskCodec` and constant-time bearer-token validation, plus roadmap items such as AES-256-GCM local vaulting, Unix Domain Socket control-plane variants, TEE secret isolation, and SLSA `in-toto` provenance attestations.
+6. **Sandboxed Extensibility Roadmap** via WebAssembly micro-runtimes with strict fuel-counter sandboxing.
 7. **Kernel-Level Performance** via eBPF/XDP packet interception executing in the network driver fast path.
 
-By replacing every dimension of competing systems — from string manipulation in V8 with zero-copy byte-slice pipelines, from centralized API gateways with edge-native lock-free routing, from plaintext credential logs with hardware-enclave-isolated secret vaults, from regex-based loop detection with Myers' bit-parallel edit distance, and from manual configuration with autonomous manifest discovery — TokenOS completely obsoletes external proxy solutions. It ensures uncompromising enterprise governance over AI-generated workflows while delivering sub-microsecond routing decisions, mathematically guaranteed token economics, and cryptographic supply-chain integrity within a single dependency-free compiled Rust binary.
+By replacing selected high-overhead orchestration patterns with local Rust routing, edge masking, persistent state, and structured verification hooks, TokenOS can reduce cost and improve determinism for local-first agent workflows. It does not obsolete every external proxy solution, and its economic/security outcomes depend on configuration, provider behavior, deployment controls, and the validation of roadmap features.
 
-TokenOS is no longer just an orchestrator; it is an undetectable, universal translation layer, a distributed swarm intelligence, a hardware-rooted secret vault, a kernel-fast network firewall, and a cryptographic auditor for AI-generated code — all unified inside one microkernel artifact.
+The current artifact is a local execution kernel with strong deterministic controls. The broader report describes potential future directions including protocol translation, distributed coordination, hardware-backed secret storage, kernel-assisted networking, and cryptographic provenance.
 
 ---
  
@@ -4510,16 +4380,16 @@ TokenOS is no longer just an orchestrator; it is an undetectable, universal tran
  
 Final Verdict
 
-TokenOS is technically coherent as a local Rust execution-kernel prototype and is materially stronger after this remediation pass. The two most serious route-contract defects are closed: ASK now terminates locally at zero provider cost, and workspace context no longer implies REUSE. CI is active in the repository, fmt/clippy/tests/builds are green, browser bearer-token UX exists, trace events are indexed, placeholder-bearing cache replay is blocked, and `/api/run` has process-local backpressure.
+TokenOS is technically coherent as a local Rust execution-kernel and is materially stronger after this remediation pass. The two most serious route-contract defects are closed: ASK now terminates locally at zero provider cost, and workspace context no longer implies REUSE. CI is active in the repository, fmt/clippy/tests/builds are green, browser bearer-token UX exists, trace events and execution attempts are indexed, placeholder-bearing cache replay is blocked, configured verification commands can gate success/cache admission, trace retention/disablement and Unix owner-only permissions are implemented, and `/api/run` has process-local backpressure, scoped API tokens, and daily/monthly spend controls.
 
-The remaining risks are now governance and productionization risks rather than basic correctness contradictions: semantic verification remains shallow, native dependencies carry RustSec informational warnings, local traces and SQLite state lack retention/encryption/permission controls, and remote serving still needs TLS, RBAC/scopes, aggregate budgets, and hosted branch-protection verification. TokenOS can credibly be positioned as a local-first, single-user execution kernel with strong deterministic controls. It should not yet be positioned as a production-grade, multi-tenant token-optimization platform without the remaining controls.
+The remaining risks are now governance and productionization risks rather than basic correctness contradictions: optional native dependencies carry RustSec informational warnings, encryption-at-rest is not built in, remote serving still needs TLS and distributed rate limiting outside TokenOS, and hosted branch-protection verification cannot be proven from a local checkout. TokenOS can credibly be positioned as a local-first, single-user execution kernel with strong deterministic controls. It should not yet be positioned as a native multi-tenant cloud platform without those remaining controls.
 
 ## 42. Reference Materials
 
 ### 42.1 Codebase Identifiers
 
 * **Primary Repository.** `amirrezafarnamtaheri/tokenos_2`
-* **Artifact Build Identifier.** `TokenOS-02c157b687760b32438513c0dcc0bd8d19f1955f`
+* **Artifact Build Identifier.** `development` finalization commit; see `git log -n 1` after commit closure.
 
 ### 42.2 Comparative Repositories Audited
 

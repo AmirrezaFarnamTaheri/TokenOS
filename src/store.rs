@@ -38,6 +38,36 @@ pub fn default_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("tokenos.db"))
 }
 
+#[cfg(unix)]
+fn harden_dir(path: &Path) {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn harden_dir(_path: &Path) {}
+
+#[cfg(unix)]
+fn harden_file(path: &Path) {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn harden_file(_path: &Path) {}
+
+fn harden_db_files(path: &Path) {
+    harden_file(path);
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    harden_file(&PathBuf::from(wal));
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    harden_file(&PathBuf::from(shm));
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
     task_id     TEXT PRIMARY KEY,
@@ -143,25 +173,48 @@ impl Store {
     /// Opens (and migrates) the database at `path`. None = default path,
     /// ":memory:" supported.
     pub fn open(path: Option<&Path>) -> Result<Store> {
+        Self::open_with_owner_permissions(path, true)
+    }
+
+    /// Opens the database and optionally hardens Unix filesystem permissions
+    /// for the DB directory, SQLite file, and WAL/SHM sidecars.
+    pub fn open_with_owner_permissions(
+        path: Option<&Path>,
+        owner_only_permissions: bool,
+    ) -> Result<Store> {
+        let mut db_path: Option<PathBuf> = None;
         let conn = match path {
             Some(p) if p.as_os_str() == ":memory:" => Connection::open_in_memory()?,
             Some(p) => {
                 if let Some(parent) = p.parent() {
                     std::fs::create_dir_all(parent)?;
+                    if owner_only_permissions {
+                        harden_dir(parent);
+                    }
                 }
+                db_path = Some(p.to_path_buf());
                 Connection::open(p)?
             }
             None => {
                 let p = default_path();
                 if let Some(parent) = p.parent() {
                     std::fs::create_dir_all(parent)?;
+                    if owner_only_permissions {
+                        harden_dir(parent);
+                    }
                 }
+                db_path = Some(p.clone());
                 Connection::open(p)?
             }
         };
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        if owner_only_permissions {
+            if let Some(path) = db_path.as_deref() {
+                harden_db_files(path);
+            }
+        }
         conn.execute_batch(SCHEMA).context("migrate schema")?;
         // Migration for pre-goal_hash databases (finding 12.3): the column
         // addition is idempotent — the error on already-migrated DBs is
@@ -203,6 +256,11 @@ impl Store {
         // task IDs still join to the tasks table, whose goal text yields the
         // exact digest. One-time cost, idempotent (the WHERE clause empties).
         Self::backfill_goal_hashes(&conn)?;
+        if owner_only_permissions {
+            if let Some(path) = db_path.as_deref() {
+                harden_db_files(path);
+            }
+        }
         Ok(Store {
             conn: Mutex::new(conn),
         })

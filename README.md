@@ -45,6 +45,7 @@ exercises the entire pipeline offline. See
 | [docs/CLI.md](docs/CLI.md) | Full command and flag reference with workflows |
 | [docs/API.md](docs/API.md) | HTTP API endpoints, shapes, auth, curl cookbook |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, masking, auth, parser safety, ops checklist |
+| [docs/RISK_ACCEPTANCE.md](docs/RISK_ACCEPTANCE.md) | Accepted/external production risks and operator actions |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Ground rules, testing conventions, PR checklist |
 
@@ -144,7 +145,7 @@ Escalations and ASK terminate locally at **zero LLM cost**.
 - **Rate-limit circuit breaker (S26)** — a 429 opens a per-provider breaker
   with exponential backoff (5s → 120s cap); failover skips the provider while
   the breaker is open. Retrying a provider that just said "stop" is
-  guaranteed waste.
+  almost always wasted work.
 - **Route-scoped output budgets (S27)** — each route caps the output tokens it
   may request: an ASK is one question (256), a PATCH is a minimal diff (2048),
   only full builds get the wide ceiling (4096). Paying for headroom a route's
@@ -167,7 +168,7 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos
-cargo test                   # 186 unit tests across all subsystems, fully offline
+cargo test                   # 197 unit tests across all subsystems, fully offline
 cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
