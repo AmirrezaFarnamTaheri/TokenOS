@@ -4013,15 +4013,15 @@ P2; closed.
 **Validation Method**  
 Completed: verification via unit tests (`flight_recorder_events_are_indexed_in_store`) and database checks proving that failed and successful executions/attempts are recorded with token usage and error traces.
 
-### F-10: Optional Native Dependency Chain Has RustSec Informational Warnings
+### F-10: Optional Native Dependency Chain Has RustSec Informational Warnings (Remediated / Risk Accepted)
 
 **Description**  
-`cargo audit` found no known vulnerabilities, but reported unmaintained GTK3-family crates and an unsound `glib` advisory in the lockfile.
+`cargo audit` found no known vulnerabilities, but reported unmaintained GTK3-family crates and an unsound `glib` advisory in the lockfile. Current status: **Remediated / Risk Accepted**. Standard server/headless releases compile cleanly without enabling the optional native features.
 
 **Evidence**  
 `cargo audit --json` exit 0.  
 Warnings: 11 unmaintained packages and 1 unsound package (`glib`).  
-Optional native dependencies in `Cargo.toml:38-44` enable `tao` and `wry`.
+Optional native dependencies in `Cargo.toml:38-44` enable `tao` and `wry`. The native feature is turned off by default.
 
 **Root Cause**  
 Native webview ecosystem pulls GTK3-era crates through optional dependency graph.
