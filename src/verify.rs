@@ -58,6 +58,10 @@ pub fn static_check(route: &str, output: &str) -> VerifyResult {
         ));
     }
 
+    if (route == "IMPLEMENT" || route == "PATCH") && has_placeholders(output) {
+        issues.push("output contains placeholder text".to_string());
+    }
+
     if output.trim_end().ends_with("...") {
         issues.push("output appears truncated (trailing ellipsis)".to_string());
     }
@@ -139,6 +143,20 @@ fn questions_count(s: &str) -> usize {
     RE_QUESTION_LINE.find_iter(s).count()
 }
 
+fn has_placeholders(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    lower.contains("insert code here")
+        || lower.contains("your code here")
+        || lower.contains("rest of the code")
+        || lower.contains("rest of code")
+        || lower.contains("remains unchanged")
+        || lower.contains("implementation goes here")
+        || lower.contains("implement remaining")
+        || lower.contains("// todo: implement")
+        || lower.contains("# todo: implement")
+        || lower.contains("/* todo: implement")
+}
+
 /// Net {}/()/[] depth, ignoring string literals and line comments (a cheap
 /// approximation of an AST balance check).
 fn brace_balance(s: &str) -> i64 {
@@ -160,15 +178,28 @@ fn brace_balance(s: &str) -> i64 {
             i += 1;
             continue;
         }
-        match c {
-            b'"' | b'\'' | b'`' => in_str = c,
-            b'/' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                    while i < bytes.len() && bytes[i] != b'\n' {
-                        i += 1;
-                    }
-                }
+        if esc {
+            esc = false;
+            i += 1;
+            continue;
+        }
+        if c == b'\\' {
+            esc = true;
+            i += 1;
+            continue;
+        }
+        if c == b'"' || c == b'\'' || c == b'`' {
+            in_str = c;
+            i += 1;
+            continue;
+        }
+        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
             }
+            continue;
+        }
+        match c {
             b'{' | b'(' | b'[' => depth += 1,
             b'}' | b')' | b']' => depth -= 1,
             _ => {}
@@ -178,13 +209,14 @@ fn brace_balance(s: &str) -> i64 {
     depth
 }
 
-static RE_CODE_HINTS: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?m)^\s*(func|def|class|fn|public|private|import|package|const|let|var)\b")
-        .unwrap()
-});
-
 fn looks_like_code(s: &str) -> bool {
-    RE_CODE_HINTS.is_match(s)
+    s.contains("fn ")
+        || s.contains("let ")
+        || s.contains("import ")
+        || s.contains("const ")
+        || s.contains("class ")
+        || s.contains("def ")
+        || s.contains("struct ")
 }
 
 #[cfg(test)]
@@ -230,6 +262,25 @@ mod tests {
     #[test]
     fn trailing_ellipsis_fails() {
         assert!(!static_check("IMPLEMENT", "result body ...").pass);
+    }
+
+    #[test]
+    fn placeholders_fail_implement_and_patch() {
+        assert!(
+            !static_check(
+                "IMPLEMENT",
+                "fn main() {\n  // TODO: implement remaining functions\n}"
+            )
+            .pass
+        );
+        assert!(
+            !static_check(
+                "PATCH",
+                "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+// your code here"
+            )
+            .pass
+        );
+        assert!(static_check("DIRECT", "TODO: implement this later").pass);
     }
 
     #[test]
