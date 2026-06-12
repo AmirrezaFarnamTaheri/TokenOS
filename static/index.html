@@ -28,6 +28,7 @@
     <div class="sidebar-foot">
       <div class="meta-rule">“Never spend more resources deciding than the decision can save.”</div>
       <button class="help-btn" id="btnHelp" title="Help & glossary (?)">? Help &amp; shortcuts</button>
+      <button class="help-btn" id="btnAuth" title="Set API bearer token">API token</button>
       <div class="conn"><span class="dot" id="connDot"></span><span id="connText">connecting…</span><span class="ver" id="verText"></span></div>
     </div>
   </aside>
@@ -176,6 +177,26 @@
   </main>
 </div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- AUTH MODAL -->
+<div class="modal-backdrop" id="authModal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+  <div class="modal auth-modal">
+    <div class="modal-head">
+      <h2 id="authTitle">API Token</h2>
+      <button class="welcome-close" id="authClose" aria-label="Close token dialog">×</button>
+    </div>
+    <div class="modal-body">
+      <label class="lbl" for="authInput">Bearer token</label>
+      <input type="password" id="authInput" autocomplete="off" placeholder="TOKENOS_AUTH_TOKEN value">
+      <label class="check-row"><input type="checkbox" id="authRemember"> Remember for this browser tab</label>
+      <div class="btn-row">
+        <button class="btn primary" id="authSave">Save token</button>
+        <button class="btn ghost subtle" id="authClear">Clear</button>
+      </div>
+      <p class="hint auth-reason" id="authReason"></p>
+    </div>
+  </div>
+</div>
 
 <!-- HELP MODAL -->
 <div class="modal-backdrop" id="helpModal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="helpTitle">

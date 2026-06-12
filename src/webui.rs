@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -27,6 +28,10 @@ const STYLE_CSS: &str = include_str!("../static/style.css");
 
 /// 5-minute ceiling for interactive /api/run executions.
 const RUN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Hard per-process backpressure for paid work. Dashboard reads and route
+/// preview stay available even when execution slots are saturated.
+const MAX_CONCURRENT_RUNS: usize = 4;
 
 /// Hard cap on inbound request bodies (finding 12.1: resource-exhaustion
 /// hardening — a task description never legitimately approaches this).
@@ -37,24 +42,26 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 struct AuthToken(Option<Arc<String>>);
 
+#[derive(Clone)]
+struct WebState {
+    engine: Arc<Engine>,
+    run_limiter: Arc<Semaphore>,
+}
+
 /// Constant-time byte comparison so token checks don't leak length-prefix
 /// timing information.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    let mut diff = a.len() ^ b.len();
+    let max = a.len().max(b.len());
+    for i in 0..max {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        diff |= (x ^ y) as usize;
     }
     diff == 0
 }
 
-async fn require_bearer(
-    State(auth): State<AuthToken>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn require_bearer(State(auth): State<AuthToken>, req: Request, next: Next) -> Response {
     let Some(expected) = auth.0.as_ref() else {
         return next.run(req).await; // loopback-only mode: no token configured
     };
@@ -84,6 +91,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
 /// requires `Authorization: Bearer <token>` (finding 12.1).
 pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Router {
     let auth = AuthToken(auth_token.map(Arc::new));
+    let state = WebState {
+        engine,
+        run_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_RUNS)),
+    };
     let api = Router::new()
         .route("/api/meta", get(handle_meta))
         .route("/api/summary", get(handle_summary))
@@ -99,7 +110,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/run", post(handle_run))
         .layer(middleware::from_fn_with_state(auth, require_bearer))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(engine);
+        .with_state(state);
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
@@ -164,31 +175,36 @@ fn ok_json<T: serde::Serialize>(v: T) -> Response {
 /// Instance metadata for the dashboard header: kernel version, dry-run flag,
 /// and provider fleet size. Lets the UI tell newcomers at a glance whether
 /// they are exercising the offline mock provider or spending real money.
-async fn handle_meta(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_meta(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     let enabled = eng.cfg.providers.values().filter(|p| !p.disabled).count();
     ok_json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "dry_run": eng.dry_run,
         "providers_total": eng.cfg.providers.len(),
         "providers_enabled": enabled,
+        "max_concurrent_runs": MAX_CONCURRENT_RUNS,
     }))
 }
 
-async fn handle_summary(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_summary(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     match eng.store.get_summary() {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
-async fn handle_route_stats(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_route_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     match eng.store.stats_by_route() {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
-async fn handle_provider_stats(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_provider_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     match eng.store.stats_by_provider() {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -197,7 +213,8 @@ async fn handle_provider_stats(State(eng): State<Arc<Engine>>) -> Response {
 
 /// Live UCB1 bandit standings (evolution S19): per-arm pulls, mean reward,
 /// mean latency and current UCB1 score. Lock-free read path.
-async fn handle_bandit_stats(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_bandit_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     let arms: Vec<serde_json::Value> = eng
         .bandit
         .ranked()
@@ -219,7 +236,8 @@ async fn handle_bandit_stats(State(eng): State<Arc<Engine>>) -> Response {
 /// Estimator drift watchdog (evolution S30): per-provider EWMA of
 /// actual/estimated input-token ratios plus the solution-cache counters
 /// (evolution S25).
-async fn handle_drift_stats(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_drift_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     let (cache_entries, cache_hits) = eng.store.solution_cache_stats().unwrap_or((0, 0));
     ok_json(json!({
         "providers": eng.drift.all(),
@@ -227,14 +245,16 @@ async fn handle_drift_stats(State(eng): State<Arc<Engine>>) -> Response {
     }))
 }
 
-async fn handle_executions(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_executions(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     match eng.store.list_executions(200) {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
-async fn handle_tasks(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_tasks(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     match eng.store.list_tasks(100) {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -242,11 +262,13 @@ async fn handle_tasks(State(eng): State<Arc<Engine>>) -> Response {
 }
 
 /// Config is exposed read-only; API keys live in env vars, never here.
-async fn handle_config(State(eng): State<Arc<Engine>>) -> Response {
+async fn handle_config(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
     ok_json(&eng.cfg)
 }
 
-async fn handle_traces(State(eng): State<Arc<Engine>>, Path(task_id): Path<String>) -> Response {
+async fn handle_traces(State(state): State<WebState>, Path(task_id): Path<String>) -> Response {
+    let eng = state.engine;
     match eng.recorder.events(&task_id) {
         Ok(evs) => ok_json(evs),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -262,17 +284,23 @@ struct TaskRequest {
 }
 
 async fn handle_route_preview(
-    State(eng): State<Arc<Engine>>,
+    State(state): State<WebState>,
     body: Result<Json<TaskRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let req = match body {
         Ok(Json(r)) if !r.task.is_empty() => r,
-        _ => return err(StatusCode::BAD_REQUEST, "body must be {\"task\": \"...\"}".into()),
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "body must be {\"task\": \"...\"}".into(),
+            )
+        }
     };
     // Routing is pure CPU work — run it on a blocking thread so the async
     // reactor stays free (no lock involved at all).
     let result = tokio::task::spawn_blocking(move || {
-        let (dec, ctx_block) = eng.route_only(&req.task);
+        let eng = state.engine;
+        let (dec, ctx_block) = eng.route_only_with_constraints(&req.task, &req.constraints);
         let chain = eng.cfg.provider_chain(dec.route.as_str());
         json!({
             "decision": dec,
@@ -291,16 +319,29 @@ async fn handle_route_preview(
 }
 
 async fn handle_run(
-    State(eng): State<Arc<Engine>>,
+    State(state): State<WebState>,
     body: Result<Json<TaskRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let req = match body {
         Ok(Json(r)) if !r.task.is_empty() => r,
-        _ => return err(StatusCode::BAD_REQUEST, "body must be {\"task\": \"...\"}".into()),
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "body must be {\"task\": \"...\"}".into(),
+            )
+        }
+    };
+    let Ok(permit) = state.run_limiter.clone().try_acquire_owned() else {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("too many concurrent executions; limit is {MAX_CONCURRENT_RUNS}"),
+        );
     };
     // No global lock: concurrent runs are safe (engine state is internally
     // synchronized) and dashboard reads stay responsive during execution.
-    let run = tokio::time::timeout(RUN_TIMEOUT, eng.run(&req.task, &req.constraints)).await;
+    let run =
+        tokio::time::timeout(RUN_TIMEOUT, state.engine.run(&req.task, &req.constraints)).await;
+    drop(permit);
     match run {
         Err(_) => err(StatusCode::GATEWAY_TIMEOUT, "execution timed out".into()),
         Ok(Ok(res)) => ok_json(json!({ "result": res })),
@@ -461,11 +502,17 @@ mod tests {
         eng.bandit.record("mock", true, 42.0);
         let app = router(eng);
         let resp = app
-            .oneshot(Request::get("/api/stats/bandit").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/stats/bandit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let arms = v["arms"].as_array().unwrap();
         assert!(!arms.is_empty());

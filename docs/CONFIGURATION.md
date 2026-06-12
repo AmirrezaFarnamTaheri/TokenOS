@@ -89,6 +89,17 @@ providers:
 | `models` | filter | empty | Two-tier include/exclude matrix (below). |
 | `disabled` | bool | `false` | Removes the provider from all chains without deleting the profile. |
 
+Validation is intentionally strict:
+
+- `adapter` must be one of `mock`, `openai`, `anthropic`, `gemini`, `proxy`, or
+  `proxy_ide`.
+- Enabled `openai`, `anthropic`, and `gemini` providers must name a non-empty
+  `api_key_env`, and adapter construction requires that environment variable
+  to resolve to a non-empty value.
+- `proxy` / `proxy_ide` providers must define an `endpoint`.
+- Live providers must have positive `max_context_tokens`.
+- Token costs must be non-negative.
+
 ### The two-tier model filter matrix
 
 Shell-style wildcards: `*` matches any run of characters, `?` exactly one.

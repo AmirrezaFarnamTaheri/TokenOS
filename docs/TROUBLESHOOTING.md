@@ -108,14 +108,22 @@ cache; the bandit also learns latency and reorders failover accordingly.
 The frontend polls `/api/summary`. Check:
 
 - Is the server actually up? (`tokenos serve` prints the bind address.)
-- Auth: if a token is configured, the browser can't supply it for raw API
-  calls — the dashboard is intended for trusted/local use, or behind a
-  reverse proxy that injects the header.
+- Auth: if a token is configured, click **API token** in the sidebar and enter
+  the same bearer token used to start the server. The dashboard then attaches
+  it to all `/api/*` requests.
 
 ### `--host 0.0.0.0` is refused
 
 Binding non-loopback requires both `--public` **and** an auth token
 (`--auth-token` or `$TOKENOS_AUTH_TOKEN`). This is a guardrail, not a bug.
+
+### Dashboard loads but every panel says 401
+
+The static shell can load without auth, but every `/api/*` data call still
+requires the bearer token when auth is configured. Click **API token** in the
+sidebar, enter the same token used to start the server, and retry the panel. If
+it still fails, clear the token and re-enter it; wrong tokens are rejected with
+the same `401` shape as missing tokens.
 
 ### Bandit panel says "unexplored" everywhere
 

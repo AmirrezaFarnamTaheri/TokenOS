@@ -66,8 +66,8 @@ src/
   maskcodec.rs         Edge secret-masking codec (mask outbound, unmask echoes)
   loopdetect.rs        Semantic loop detection: Myers bit-parallel Levenshtein, 3% ceiling
   contextidx.rs        Surgical context: structural symbol index (FTS5, LIKE fallback)
-  store.rs             SQLite state store: tasks, goal-keyed failure memory, loop history, telemetry
-  recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON)
+  store.rs             SQLite state store: tasks, failures, loops, telemetry, trace index, cache
+  recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON journals)
   webui.rs             Lock-free axum control panel (dashboard, run console, traces, bandit, config)
 static/                Embedded dashboard assets (index.html, app.js, style.css)
 ```
@@ -76,14 +76,14 @@ static/                Embedded dashboard assets (index.html, app.js, style.css)
 
 | Priority | Route | Trigger |
 |---|---|---|
-| 1 | `DIRECT` | Trivial task, est. tokens ≤ 600 — answer immediately |
-| 2 | `REUSE` | Existing indexed solution satisfies most requirements |
-| 2.5 | `PATCH` | Localized change, no repeated failure — minimal diff |
-| 3 | `IMPLEMENT` | Default productive path |
-| 4 | `PARTIAL` | External blocker — deliver everything completed |
-| 5 | `DELEGATE` | Repetitive + bounded + savings exceed delegation penalty |
-| 6 | `ASK` | Missing critical info or confidence < 0.35 — exactly one question |
-| 7 | `ESCALATE-CONFLICT/SAFETY/EXTERNAL` | Contradictions, safety violations, loops |
+| 0 | `ESCALATE-CONFLICT/SAFETY/EXTERNAL` | Contradictions, safety violations, loops |
+| 1 | `ASK` | Missing critical info or confidence < 0.35 — exactly one local question |
+| 2 | `DIRECT` | Trivial task, est. tokens ≤ 600 — answer immediately |
+| 3 | `REUSE` | Exact verified solution-cache hit for the same goal + constraints |
+| 4 | `PATCH` | Localized change, no repeated failure — minimal diff |
+| 5 | `PARTIAL` | External blocker — deliver everything completed |
+| 6 | `DELEGATE` | Repetitive + bounded + savings exceed delegation penalty |
+| 7 | `IMPLEMENT` | Default productive path |
 
 Escalations and ASK terminate locally at **zero LLM cost**.
 
@@ -103,9 +103,14 @@ Escalations and ASK terminate locally at **zero LLM cost**.
   SQLite**, so loops are detected across cold CLI process invocations.
 - **Surgical context** — workspace parsed into structural symbols (Go, Python,
   JS/TS, Rust, Java, C, Ruby) and queried for the minimum viable context
-  (≤ 2000 tokens) instead of shipping whole files.
+  (≤ 2000 tokens) instead of shipping whole files. Context informs prompts; it
+  does **not** imply `REUSE`.
+- **Verified solution cache** — only verified, replayable outputs are admitted.
+  Exact goal+constraint replays return zero-token cached results; outputs that
+  still contain opaque secret placeholders are deliberately not cached.
 - **Flight recorder** — every decision, prompt, and response is content-addressed
-  (SHA-256) outside the conversation, so debugging never consumes context tokens.
+  (SHA-256) outside the conversation and indexed in SQLite, so debugging never
+  consumes context tokens and trace events remain queryable.
 - **Tiered verification** — free static checks (diff shape for PATCH, single-question
   contract for ASK, brace balance, truncation detection) run before anything costs.
 - **UCB1 bandit failover (S19)** — a lock-free multi-armed bandit over the provider
@@ -161,8 +166,10 @@ Escalations and ASK terminate locally at **zero LLM cost**.
 Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
-cargo build --release        # binary at target/release/tokenos — zero warnings
-cargo test                   # 177 unit tests across all subsystems, fully offline
+cargo build --release        # binary at target/release/tokenos
+cargo test                   # 186 unit tests across all subsystems, fully offline
+cargo fmt --all -- --check   # blocking in CI
+cargo clippy --all-targets -- -D warnings
 ```
 
 The optional **native desktop app** (`tokenos app`) is feature-gated so
@@ -174,9 +181,10 @@ sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
 cargo build --release --features native
 ```
 
-macOS (WKWebView) and Windows (WebView2) need no extra packages. CI builds
-native binaries for all three platforms on every push
-(`.github/workflows-staged/ci.yml` — see its README for one-step activation) and attaches them to tagged releases.
+macOS (WKWebView) and Windows (WebView2) need no extra packages. Active CI lives
+in `.github/workflows/ci.yml`; it checks formatting, clippy, audit, release
+build, tests, and native binaries for Linux/macOS/Windows, and attaches binaries
+to tagged releases.
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
 kernel can be embedded inside other agent runtimes.

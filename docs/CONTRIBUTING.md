@@ -28,6 +28,8 @@ git clone https://github.com/AmirrezaFarnamTaheri/TokenOS.git
 cd TokenOS
 cargo build        # must finish with zero warnings
 cargo test         # must be green — the suite is fully offline
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
 ```
 
 The crate is a **library + thin binary**: put logic in the library modules
@@ -75,7 +77,10 @@ The crate is a **library + thin binary**: put logic in the library modules
 ## Pull request checklist
 
 - [ ] `cargo build` — zero warnings
-- [ ] `cargo test` — green, no network access required
+- [ ] `cargo test --locked` — green, no network access required
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo audit` — no known vulnerability findings
 - [ ] New behavior covered by tests (including at least one failure-path test)
 - [ ] Docs updated (`README.md` + relevant file in `docs/`)
 - [ ] Commit messages follow `type(scope): description`

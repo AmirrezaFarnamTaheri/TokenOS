@@ -205,7 +205,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         // Handled synchronously in main() before the runtime starts.
         Command::App { .. } => unreachable!("app dispatches before the async runtime"),
-        Command::Run { task, constraints, json, engine: ef } => {
+        Command::Run {
+            task,
+            constraints,
+            json,
+            engine: ef,
+        } => {
             let task = task.join(" ").trim().to_string();
             if task.is_empty() {
                 return Err(anyhow!("usage: tokenos run \"task description\" [flags]"));
@@ -221,13 +226,22 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&res)?);
                     } else {
-                        println!("task     {}\nroute    {}  ({})", res.task_id, res.route.as_str(), res.reason);
+                        println!(
+                            "task     {}\nroute    {}  ({})",
+                            res.task_id,
+                            res.route.as_str(),
+                            res.reason
+                        );
                         if !res.provider.is_empty() {
                             println!("provider {} / {}", res.provider, res.model);
                         }
                         println!(
                             "tokens   in={} out={}   latency={}ms   cost=${:.6}   retries={}",
-                            res.tokens_in, res.tokens_out, res.latency_ms, res.cost_usd, res.retries
+                            res.tokens_in,
+                            res.tokens_out,
+                            res.latency_ms,
+                            res.cost_usd,
+                            res.retries
                         );
                         println!("{}", "-".repeat(60));
                         println!("{}", res.output);
@@ -262,7 +276,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!("indexed {} symbols from {}", n, root);
             if let Some(q) = query {
                 for s in ix.search(&q, 5)? {
-                    println!("  {}:{}-{}  [{}] {}", s.file, s.start_line, s.end_line, s.kind, s.name);
+                    println!(
+                        "  {}:{}-{}  [{}] {}",
+                        s.file, s.start_line, s.end_line, s.kind, s.name
+                    );
                 }
             }
             Ok(())
@@ -270,8 +287,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Providers { config: cfg_path } => {
             let cfg = config::Config::load(cfg_path.as_deref().map(std::path::Path::new))?;
             println!(
-                "{:<12} {:<10} {:<9} {:<28} {}",
-                "PROVIDER", "ADAPTER", "ENABLED", "MODEL", "FILTER VERDICT"
+                "{:<12} {:<10} {:<9} {:<28} FILTER VERDICT",
+                "PROVIDER", "ADAPTER", "ENABLED", "MODEL"
             );
             for (name, p) in &cfg.providers {
                 let enabled = if p.disabled { "no" } else { "yes" };
@@ -282,7 +299,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 } else {
                     "BLOCKED by filter matrix"
                 };
-                println!("{:<12} {:<10} {:<9} {:<28} {}", name, p.adapter, enabled, p.model, verdict);
+                println!(
+                    "{:<12} {:<10} {:<9} {:<28} {}",
+                    name, p.adapter, enabled, p.model, verdict
+                );
                 if let Ok(a) = provider::Adapter::new(name, p) {
                     let models = a.models();
                     let allowed = p.models.filter(models.iter().map(|m| m.as_str()));
@@ -307,7 +327,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "total_tokens={}  total_cost=${:.6}  avg_latency={:.0}ms",
                 sum.total_tokens, sum.total_cost_usd, sum.avg_latency_ms
             );
-            println!("EFFECTIVE COST PER SUCCESSFUL TASK: ${:.6}\n", sum.cost_per_success);
+            println!(
+                "EFFECTIVE COST PER SUCCESSFUL TASK: ${:.6}\n",
+                sum.cost_per_success
+            );
             let routes = eng.store.stats_by_route()?;
             if !routes.is_empty() {
                 println!(
@@ -342,7 +365,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 for (p, score) in &ranked {
                     let (pulls, reward, lat) = eng.bandit.arm_stats(p);
                     if pulls == 0 {
-                        println!("{:<14} {:>8} {:>13} {:>14} {:>12}", p, 0, "-", "-", "unexplored");
+                        println!(
+                            "{:<14} {:>8} {:>13} {:>14} {:>12}",
+                            p, 0, "-", "-", "unexplored"
+                        );
                     } else {
                         any_explored = true;
                         println!(
@@ -395,11 +421,21 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 if goal.chars().count() > 70 {
                     goal = format!("{}...", goal.chars().take(67).collect::<String>());
                 }
-                println!("{:<18} {:<12} {}{}", t.task_id, t.status.as_str(), goal, blocked);
+                println!(
+                    "{:<18} {:<12} {}{}",
+                    t.task_id,
+                    t.status.as_str(),
+                    goal,
+                    blocked
+                );
             }
             Ok(())
         }
-        Command::Trace { task_id, blobs, engine: ef } => {
+        Command::Trace {
+            task_id,
+            blobs,
+            engine: ef,
+        } => {
             let eng = build_engine(&ef)?;
             let events = eng.recorder.events(&task_id)?;
             if events.is_empty() {
@@ -407,7 +443,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             for ev in events {
-                println!("{}  {:<9} {}", ev.ts.format("%H:%M:%S"), ev.kind, ev.summary);
+                println!(
+                    "{}  {:<9} {}",
+                    ev.ts.format("%H:%M:%S"),
+                    ev.kind,
+                    ev.summary
+                );
                 if blobs && !ev.blob_sha.is_empty() {
                     if let Ok(blob) = eng.recorder.blob(&ev.blob_sha) {
                         println!("  +- blob {}", &ev.blob_sha[..12]);
@@ -420,7 +461,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Config { action, config: cfg_path } => {
+        Command::Config {
+            action,
+            config: cfg_path,
+        } => {
             if action.as_deref() == Some("init") {
                 let path = cfg_path
                     .as_deref()
@@ -437,16 +481,24 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
-        Command::Serve { port, host, public, auth_token, engine: ef } => {
+        Command::Serve {
+            port,
+            host,
+            public,
+            auth_token,
+            engine: ef,
+        } => {
             // Finding 12.1 (CWE-306): the dashboard binds loopback by default.
             // A non-loopback bind requires BOTH --public and an auth token so
             // an unauthenticated control plane can never face a network.
             // An empty token ("") authenticates nothing — treat it as absent
             // from BOTH sources so `--public --auth-token ""` is rejected the
             // same way as a missing token (finding 12.1, CWE-306).
-            let token = auth_token
-                .filter(|t| !t.is_empty())
-                .or_else(|| std::env::var("TOKENOS_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
+            let token = auth_token.filter(|t| !t.is_empty()).or_else(|| {
+                std::env::var("TOKENOS_AUTH_TOKEN")
+                    .ok()
+                    .filter(|t| !t.is_empty())
+            });
             let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
             if !loopback {
                 if !public {
@@ -470,7 +522,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 host,
                 port,
                 ef.dry_run,
-                if token.is_some() { "on" } else { "off (loopback only)" }
+                if token.is_some() {
+                    "on"
+                } else {
+                    "off (loopback only)"
+                }
             );
             webui::serve(eng, &host, port, token).await
         }

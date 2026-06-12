@@ -229,7 +229,7 @@ select.filter-input { min-width: 140px; font-family: var(--sans); cursor: pointe
 
 /* Forms */
 .lbl { display: block; color: var(--muted); font-size: 12px; margin: 12px 0 6px; font-weight: 600; }
-textarea, input[type=text] {
+textarea, input[type=text], input[type=password] {
   width: 100%; background: var(--bg2); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 13px;
   resize: vertical; transition: border-color .15s, box-shadow .15s;
@@ -288,6 +288,9 @@ pre.output {
 .trace-kind.rescue { color: var(--warn); }
 .trace-kind.error { color: var(--bad); }
 .trace-kind.verify { color: var(--warn); }
+.trace-kind.ask { color: #fb923c; }
+.trace-kind.cache { color: var(--accent); }
+.trace-kind.budget { color: var(--warn); }
 .trace-summary { color: var(--text); overflow-wrap: break-word; }
 .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; text-decoration: underline; font-family: var(--mono); }
 .link-btn:hover { filter: brightness(1.2); }
@@ -321,6 +324,13 @@ code.inline { background: var(--bg2); padding: 1px 6px; border-radius: 4px; font
 .help-table { width: 100%; border-collapse: collapse; }
 .help-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border-soft); font-family: var(--sans); white-space: normal; vertical-align: top; font-size: 13px; }
 .help-table td:first-child { white-space: nowrap; width: 130px; color: var(--muted); }
+.auth-modal { max-width: 480px; }
+.check-row {
+  display: flex; gap: 8px; align-items: center; margin-top: 12px;
+  color: var(--muted); font-size: 12.5px;
+}
+.check-row input { accent-color: var(--accent); }
+.auth-reason { margin-top: 12px; }
 
 /* Toasts */
 .toasts { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 100; max-width: 360px; }

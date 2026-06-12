@@ -134,13 +134,12 @@ fn myers_levenshtein(pat: &[char], txt: &[char]) -> usize {
     // Per-character match bitmasks, one u64 per block.
     let mut peq: HashMap<char, Vec<u64>> = HashMap::new();
     for (i, &c) in pat.iter().enumerate() {
-        peq.entry(c)
-            .or_insert_with(|| vec![0u64; blocks])[i / 64] |= 1u64 << (i % 64);
+        peq.entry(c).or_insert_with(|| vec![0u64; blocks])[i / 64] |= 1u64 << (i % 64);
     }
     let zeros = vec![0u64; blocks];
 
     let mut vp = vec![u64::MAX; blocks]; // vertical +1 deltas
-    let mut vn = vec![0u64; blocks];     // vertical -1 deltas
+    let mut vn = vec![0u64; blocks]; // vertical -1 deltas
     let mut score = m;
     let last = blocks - 1;
     let test_bit = 1u64 << ((m - 1) % 64);
@@ -244,7 +243,9 @@ mod tests {
     fn window_bounds_history() {
         let mut d = Detector::new();
         for i in 0..10 {
-            d.observe(&format!("attempt number {i} with unique content padding {i}{i}{i}"));
+            d.observe(&format!(
+                "attempt number {i} with unique content padding {i}{i}{i}"
+            ));
         }
         assert!(d.history().len() <= 5);
     }
@@ -267,16 +268,28 @@ mod tests {
             ("x".repeat(64), "x".repeat(64)),
             ("x".repeat(64), "y".repeat(64)),
             ("ab".repeat(50), "ba".repeat(50)),
-            ("the quick brown fox jumps over the lazy dog".repeat(3),
-             "the quick brown cat jumps over the lazy dog".repeat(3)),
-            ("z".repeat(130), format!("{}q{}", "z".repeat(65), "z".repeat(64))),
-            ("hello".into(), "world-of-completely-different-content".into()),
+            (
+                "the quick brown fox jumps over the lazy dog".repeat(3),
+                "the quick brown cat jumps over the lazy dog".repeat(3),
+            ),
+            (
+                "z".repeat(130),
+                format!("{}q{}", "z".repeat(65), "z".repeat(64)),
+            ),
+            (
+                "hello".into(),
+                "world-of-completely-different-content".into(),
+            ),
         ];
         for (a, b) in cases {
             let ca: Vec<char> = a.chars().collect();
             let cb: Vec<char> = b.chars().collect();
             let reference = levenshtein_two_row(&ca, &cb);
-            let (pat, txt) = if ca.len() <= cb.len() { (&ca, &cb) } else { (&cb, &ca) };
+            let (pat, txt) = if ca.len() <= cb.len() {
+                (&ca, &cb)
+            } else {
+                (&cb, &ca)
+            };
             let fast = myers_levenshtein(pat, txt);
             assert_eq!(fast, reference, "mismatch for {:?} vs {:?}", a, b);
         }

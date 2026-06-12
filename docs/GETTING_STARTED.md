@@ -72,6 +72,11 @@ The control panel gives you:
 - **Tasks / Executions** — persisted state and the full telemetry ledger
 - **Configuration** — read-only effective config
 
+If you start the dashboard with `--auth-token` or expose it with `--public`,
+click **API token** in the sidebar and enter the bearer token. The dashboard
+then attaches `Authorization: Bearer ...` to every API request. Tokens are
+kept in memory unless you explicitly remember them for the current browser tab.
+
 ## 5. Connect a live provider
 
 1. Export the key (env vars only — keys never touch disk):
@@ -114,7 +119,8 @@ files.
   payload builder; repeated failures on a goal automatically forbid the
   failed approach.
 - **Keep the dashboard local.** If you must expose it, set
-  `TOKENOS_AUTH_TOKEN` and read [SECURITY.md](SECURITY.md) first.
+  `TOKENOS_AUTH_TOKEN`, enter that token in the dashboard's API-token dialog,
+  and read [SECURITY.md](SECURITY.md) first.
 
 ## Next steps
 

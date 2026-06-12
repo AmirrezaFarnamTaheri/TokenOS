@@ -44,7 +44,10 @@ pub fn rescue(input: &str) -> Rescue {
         };
     }
 
-    let mut p = Parser { b: body.as_bytes(), i: 0 };
+    let mut p = Parser {
+        b: body.as_bytes(),
+        i: 0,
+    };
     match p.value() {
         Some(v) if v.is_object() || v.is_array() => {
             // Truncation guard: a genuinely cut-off generation is consumed
@@ -83,9 +86,7 @@ const MAX_DEPTH: usize = 256;
 
 impl<'a> Parser<'a> {
     fn ws(&mut self) {
-        while self.i < self.b.len()
-            && matches!(self.b[self.i], b' ' | b'\t' | b'\r' | b'\n')
-        {
+        while self.i < self.b.len() && matches!(self.b[self.i], b' ' | b'\t' | b'\r' | b'\n') {
             self.i += 1;
         }
     }
@@ -275,7 +276,10 @@ impl<'a> Parser<'a> {
                 // Integer token: prefer exact integer types over the lossy
                 // f64 fallback — u64 covers positive values past i64::MAX
                 // (e.g. 18446744073709551615) without precision loss.
-                return tok.parse::<i64>().ok().map(|i| Value::Number(i.into()))
+                return tok
+                    .parse::<i64>()
+                    .ok()
+                    .map(|i| Value::Number(i.into()))
                     .or_else(|| tok.parse::<u64>().ok().map(|u| Value::Number(u.into())))
                     .or_else(|| Number::from_f64(n).map(Value::Number));
             }

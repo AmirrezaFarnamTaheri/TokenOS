@@ -40,7 +40,11 @@ pub fn default_dir() -> PathBuf {
         }
     }
     match dirs::home_dir() {
-        Some(home) => home.join(".local").join("state").join("tokenos").join("traces"),
+        Some(home) => home
+            .join(".local")
+            .join("state")
+            .join("tokenos")
+            .join("traces"),
         None => PathBuf::from(".tokenos-traces"),
     }
 }
@@ -52,7 +56,21 @@ impl Recorder {
             Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
             _ => default_dir(),
         };
-        fs::create_dir_all(base.join("objects"))?;
+        fs::create_dir_all(&base)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&base, Permissions::from_mode(0o700));
+        }
+        let obj_dir = base.join("objects");
+        fs::create_dir_all(&obj_dir)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&obj_dir, Permissions::from_mode(0o700));
+        }
         Ok(Self { base })
     }
 
@@ -66,13 +84,31 @@ impl Recorder {
             return Ok(sha); // already stored
         }
         fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, Permissions::from_mode(0o700));
+        }
         fs::write(&path, data)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, Permissions::from_mode(0o600));
+        }
         Ok(sha)
     }
 
     /// Write a full payload blob plus an index line into the per-task
     /// journal (NDJSON, append-only). Returns the blob SHA (empty if no payload).
-    pub fn record(&self, task_id: &str, kind: &str, summary: &str, payload: &[u8]) -> Result<String> {
+    pub fn record(
+        &self,
+        task_id: &str,
+        kind: &str,
+        summary: &str,
+        payload: &[u8],
+    ) -> Result<String> {
         let sha = if payload.is_empty() {
             String::new()
         } else {
@@ -87,7 +123,16 @@ impl Recorder {
         };
         let line = serde_json::to_string(&ev)?;
         let journal = self.base.join(format!("{}.ndjson", sanitize(task_id)));
-        let mut f = fs::OpenOptions::new().create(true).append(true).open(&journal)?;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&journal)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&journal, Permissions::from_mode(0o600));
+        }
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
         Ok(sha)
@@ -118,7 +163,69 @@ impl Recorder {
         if sha.len() < 3 {
             return Err(anyhow!("invalid sha"));
         }
-        Ok(fs::read(self.base.join("objects").join(&sha[..2]).join(&sha[2..]))?)
+        Ok(fs::read(
+            self.base.join("objects").join(&sha[..2]).join(&sha[2..]),
+        )?)
+    }
+
+    /// Deletes trace ndjson journals and object files older than retention_days (F-11).
+    pub fn prune_old_traces(&self, retention_days: usize) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+        let mut pruned_count = 0;
+
+        if !self.base.exists() {
+            return Ok(0);
+        }
+
+        // Walk base directory for journal files (*.ndjson)
+        for entry in std::fs::read_dir(&self.base)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "ndjson") {
+                if let Ok(metadata) = path.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        let dt: DateTime<Utc> = modified.into();
+                        if dt < cutoff {
+                            let _ = std::fs::remove_file(&path);
+                            pruned_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up old prefix/sha object files
+        let obj_dir = self.base.join("objects");
+        if obj_dir.exists() {
+            for sub_entry in std::fs::read_dir(&obj_dir)? {
+                let sub_entry = sub_entry?;
+                let sub_path = sub_entry.path();
+                if sub_path.is_dir() {
+                    for file_entry in std::fs::read_dir(&sub_path)? {
+                        let file_entry = file_entry?;
+                        let file_path = file_entry.path();
+                        if file_path.is_file() {
+                            if let Ok(metadata) = file_path.metadata() {
+                                if let Ok(modified) = metadata.modified() {
+                                    let dt: DateTime<Utc> = modified.into();
+                                    if dt < cutoff {
+                                        let _ = std::fs::remove_file(&file_path);
+                                        pruned_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Clean up directory if empty
+                    let _ = std::fs::remove_dir(&sub_path);
+                }
+            }
+        }
+
+        Ok(pruned_count)
     }
 }
 
@@ -172,9 +279,12 @@ mod tests {
     #[test]
     fn record_and_replay() {
         let (r, _g) = temp_recorder();
-        let sha = r.record("task-1", "prompt", "the prompt", b"PAYLOAD BYTES").unwrap();
+        let sha = r
+            .record("task-1", "prompt", "the prompt", b"PAYLOAD BYTES")
+            .unwrap();
         assert_eq!(sha.len(), 64);
-        r.record("task-1", "response", "the answer", b"RESPONSE").unwrap();
+        r.record("task-1", "response", "the answer", b"RESPONSE")
+            .unwrap();
         let evs = r.events("task-1").unwrap();
         assert_eq!(evs.len(), 2);
         assert_eq!(evs[0].kind, "prompt");

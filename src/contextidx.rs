@@ -46,12 +46,30 @@ pub fn extract_symbols(file: &str, lang: &str, src: &str) -> Vec<Symbol> {
 
 static DECL_PATTERNS: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert("go", Regex::new(r"^\s*(func|type|const|var)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)").unwrap());
+    m.insert(
+        "go",
+        Regex::new(r"^\s*(func|type|const|var)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)").unwrap(),
+    );
     m.insert("javascript", Regex::new(r"^\s*(?:export\s+)?(?:default\s+)?(function|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)").unwrap());
-    m.insert("rust", Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(fn|struct|enum|trait|impl|mod|const)\s+([A-Za-z_]\w*)").unwrap());
+    m.insert(
+        "rust",
+        Regex::new(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?(fn|struct|enum|trait|impl|mod|const)\s+([A-Za-z_]\w*)",
+        )
+        .unwrap(),
+    );
     m.insert("java", Regex::new(r"^\s*(?:public|private|protected|static|final|abstract|\s)*\s*(class|interface|enum|record)\s+([A-Za-z_]\w*)").unwrap());
-    m.insert("c", Regex::new(r"^\s*(?:static\s+|inline\s+|extern\s+)*[A-Za-z_][\w\*\s]+?\b([A-Za-z_]\w*)\s*\([^;]*$").unwrap());
-    m.insert("ruby", Regex::new(r"^\s*(def|class|module)\s+([A-Za-z_][\w.?!]*)").unwrap());
+    m.insert(
+        "c",
+        Regex::new(
+            r"^\s*(?:static\s+|inline\s+|extern\s+)*[A-Za-z_][\w\*\s]+?\b([A-Za-z_]\w*)\s*\([^;]*$",
+        )
+        .unwrap(),
+    );
+    m.insert(
+        "ruby",
+        Regex::new(r"^\s*(def|class|module)\s+([A-Za-z_][\w.?!]*)").unwrap(),
+    );
     m
 });
 
@@ -113,18 +131,28 @@ fn extract_brace_blocks(file: &str, lang: &str, src: &str) -> Vec<Symbol> {
 fn decl_name(lang: &str, caps: &regex::Captures) -> (String, String) {
     match lang {
         "go" => (
-            caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
-            caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            caps.get(2)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
+            caps.get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
         ),
         "c" => (
-            caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            caps.get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
             "func".to_string(),
         ),
         _ => {
             if caps.len() >= 3 {
                 (
-                    caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
-                    caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                    caps.get(2)
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default(),
+                    caps.get(1)
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default(),
                 )
             } else {
                 (String::new(), String::new())
@@ -180,7 +208,12 @@ fn extract_indent_blocks(file: &str, lang: &str, src: &str) -> Vec<Symbol> {
         };
         let indent = caps.get(1).map(|m| m.as_str().len()).unwrap_or(0);
         let mut end = i;
-        for (j, line) in lines.iter().enumerate().take((i + 400).min(lines.len())).skip(i + 1) {
+        for (j, line) in lines
+            .iter()
+            .enumerate()
+            .take((i + 400).min(lines.len()))
+            .skip(i + 1)
+        {
             if line.trim().is_empty() {
                 continue;
             }
@@ -191,10 +224,17 @@ fn extract_indent_blocks(file: &str, lang: &str, src: &str) -> Vec<Symbol> {
             end = j;
         }
         let body = cap_body(lines[i..=end].join("\n"), lang);
-        let kind = if caps.get(2).map(|m| m.as_str()) == Some("class") { "class" } else { "func" };
+        let kind = if caps.get(2).map(|m| m.as_str()) == Some("class") {
+            "class"
+        } else {
+            "func"
+        };
         out.push(Symbol {
             file: file.to_string(),
-            name: caps.get(3).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            name: caps
+                .get(3)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
             kind: kind.to_string(),
             lang: lang.to_string(),
             start_line: (i + 1) as i64,
@@ -217,7 +257,12 @@ pub struct Indexer {
 }
 
 fn lang_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("go") => "go",
         Some("py") => "python",
         Some("js") | Some("jsx") | Some("ts") | Some("tsx") | Some("mjs") => "javascript",
@@ -230,7 +275,14 @@ fn lang_for(path: &Path) -> &'static str {
 }
 
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "vendor", "dist", "build", "target", "__pycache__", ".venv",
+    ".git",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "target",
+    "__pycache__",
+    ".venv",
 ];
 
 impl Indexer {
@@ -272,7 +324,10 @@ impl Indexer {
                 false
             }
         };
-        Ok(Self { conn: Mutex::new(conn), fts })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            fts,
+        })
     }
 
     /// Walk root and (re)index every recognized source file.
@@ -283,7 +338,10 @@ impl Indexer {
         let mut count = 0usize;
         let walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
             !(e.file_type().is_dir()
-                && e.file_name().to_str().map(|n| SKIP_DIRS.contains(&n)).unwrap_or(false))
+                && e.file_name()
+                    .to_str()
+                    .map(|n| SKIP_DIRS.contains(&n))
+                    .unwrap_or(false))
         });
         let mut stmt = conn.prepare(
             "INSERT INTO symbols (file, name, kind, lang, start_line, end_line, body)
@@ -306,10 +364,20 @@ impl Indexer {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
             for sym in extract_symbols(&rel, lang, &data) {
                 stmt.execute(rusqlite::params![
-                    sym.file, sym.name, sym.kind, sym.lang, sym.start_line, sym.end_line, sym.body
+                    sym.file,
+                    sym.name,
+                    sym.kind,
+                    sym.lang,
+                    sym.start_line,
+                    sym.end_line,
+                    sym.body
                 ])?;
                 count += 1;
             }
@@ -331,7 +399,10 @@ impl Indexer {
                 "SELECT file, name, kind, lang, start_line, end_line, body
                  FROM symbols WHERE symbols MATCH ?1 ORDER BY rank LIMIT ?2",
             )?;
-            let rows = stmt.query_map(rusqlite::params![fts_expr(&terms), limit as i64], row_to_symbol)?;
+            let rows = stmt.query_map(
+                rusqlite::params![fts_expr(&terms), limit as i64],
+                row_to_symbol,
+            )?;
             for r in rows {
                 out.push(r?);
             }
@@ -441,7 +512,11 @@ fn query_terms(text: &str) -> Vec<String> {
 
 /// Safe OR-joined FTS5 MATCH expression of quoted terms.
 fn fts_expr(terms: &[String]) -> String {
-    terms.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(" OR ")
+    terms
+        .iter()
+        .map(|t| format!("\"{}\"", t))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 #[cfg(test)]

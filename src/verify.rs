@@ -70,12 +70,59 @@ pub fn static_check(route: &str, output: &str) -> VerifyResult {
     }
 }
 
+/// Tiered verification entry point (F-12). Checks static rules first, then runs
+/// a configured local verification command on code outputs if provided.
+pub fn verify_output(route: &str, output: &str, test_command: &str) -> VerifyResult {
+    let mut res = static_check(route, output);
+    if !res.pass {
+        return res;
+    }
+
+    if !test_command.is_empty() {
+        let cmd_res = if cfg!(target_os = "windows") {
+            std::process::Command::new("powershell")
+                .args(["-Command", test_command])
+                .output()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", test_command])
+                .output()
+        };
+
+        match cmd_res {
+            Ok(output_cmd) => {
+                if output_cmd.status.success() {
+                    res.tier = "tests".into();
+                } else {
+                    res.pass = false;
+                    res.tier = "tests".into();
+                    let err_msg = String::from_utf8_lossy(&output_cmd.stderr)
+                        .trim()
+                        .to_string();
+                    let out_msg = String::from_utf8_lossy(&output_cmd.stdout)
+                        .trim()
+                        .to_string();
+                    res.issues.push(format!(
+                        "Verification command failed. stdout: {}, stderr: {}",
+                        out_msg, err_msg
+                    ));
+                }
+            }
+            Err(e) => {
+                res.pass = false;
+                res.tier = "tests".into();
+                res.issues
+                    .push(format!("Failed to execute verification command: {}", e));
+            }
+        }
+    }
+
+    res
+}
+
 fn looks_like_diff(s: &str) -> bool {
     let t = s.trim();
-    t.starts_with("--- ")
-        || t.starts_with("diff ")
-        || t.contains("\n--- ")
-        || t.starts_with("@@")
+    t.starts_with("--- ") || t.starts_with("diff ") || t.contains("\n--- ") || t.starts_with("@@")
 }
 
 static RE_QUESTION_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)\?\s*$").unwrap());

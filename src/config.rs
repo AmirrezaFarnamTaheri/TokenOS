@@ -135,7 +135,50 @@ pub struct PricingWeights {
 
 impl Default for PricingWeights {
     fn default() -> Self {
-        PricingWeights { alpha: 1.0, beta: 0.002 }
+        PricingWeights {
+            alpha: 1.0,
+            beta: 0.002,
+        }
+    }
+}
+
+/// Security and retention settings (F-11, F-13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityPolicy {
+    /// Whether trace recording is disabled
+    #[serde(default)]
+    pub disable_traces: bool,
+    /// Maximum days to retain trace and database records (0 = keep forever)
+    #[serde(default = "default_retention_days")]
+    pub retention_days: usize,
+    /// File permission override (e.g. 0o600 for owner-only on Unix, ignored on Windows)
+    #[serde(default = "default_true_bool")]
+    pub owner_only_permissions: bool,
+    /// Daily spend limit in USD (0.0 = no limit)
+    #[serde(default)]
+    pub daily_spend_limit_usd: f64,
+    /// Monthly spend limit in USD (0.0 = no limit)
+    #[serde(default)]
+    pub monthly_spend_limit_usd: f64,
+}
+
+fn default_retention_days() -> usize {
+    30
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+impl Default for SecurityPolicy {
+    fn default() -> Self {
+        SecurityPolicy {
+            disable_traces: false,
+            retention_days: 30,
+            owner_only_permissions: true,
+            daily_spend_limit_usd: 0.0,
+            monthly_spend_limit_usd: 0.0,
+        }
     }
 }
 
@@ -148,6 +191,8 @@ pub struct Config {
     #[serde(rename = "execution_routing")]
     pub routing: Vec<RoutingRule>,
     pub pricing: PricingWeights,
+    #[serde(default)]
+    pub security: SecurityPolicy,
 }
 
 impl Default for Config {
@@ -276,6 +321,7 @@ impl Default for Config {
                     timeout_ms: 10_000,
                 },
             ],
+            security: SecurityPolicy::default(),
         }
     }
 }
@@ -322,9 +368,41 @@ impl Config {
         if self.providers.is_empty() {
             bail!("config: at least one provider required");
         }
+        if self.policy.ask_threshold < 0.0 || self.policy.ask_threshold > 1.0 {
+            bail!("config: policy.ask_threshold must be between 0.0 and 1.0");
+        }
+        if self.policy.delegation_penalty < 0.0 {
+            bail!("config: policy.delegation_penalty must be non-negative");
+        }
+        if self.policy.delegation_min_scale < 0.0 {
+            bail!("config: policy.delegation_min_scale must be non-negative");
+        }
+        if self.policy.max_cost_per_task_usd < 0.0 {
+            bail!("config: policy.max_cost_per_task_usd must be non-negative");
+        }
+
         for (name, p) in &self.providers {
             if p.adapter.is_empty() {
                 bail!("config: provider {name:?} missing adapter");
+            }
+            match p.adapter.as_str() {
+                "mock" | "openai" | "anthropic" | "gemini" | "proxy" | "proxy_ide" => {}
+                other => bail!("config: provider {name:?} uses unknown adapter {other:?}"),
+            }
+            if matches!(p.adapter.as_str(), "openai" | "anthropic" | "gemini")
+                && !p.disabled
+                && p.api_key_env.trim().is_empty()
+            {
+                bail!("config: enabled provider {name:?} requires api_key_env");
+            }
+            if matches!(p.adapter.as_str(), "proxy" | "proxy_ide") && p.endpoint.trim().is_empty() {
+                bail!("config: provider {name:?} proxy adapter requires endpoint");
+            }
+            if p.max_context == 0 && p.adapter != "mock" {
+                bail!("config: provider {name:?} max_context_tokens must be positive");
+            }
+            if p.cost_per_mtok_in < 0.0 || p.cost_per_mtok_out < 0.0 {
+                bail!("config: provider {name:?} costs must be non-negative");
             }
         }
         for (i, r) in self.routing.iter().enumerate() {
@@ -340,6 +418,17 @@ impl Config {
                     r.fallback
                 );
             }
+            for rt in &r.route_types {
+                match rt.as_str() {
+                    "DIRECT" | "REUSE" | "PATCH" | "IMPLEMENT" | "PARTIAL" | "DELEGATE" | "ASK"
+                    | "VERIFY" | "ESCALATE-CONFLICT" | "ESCALATE-SAFETY" | "ESCALATE-EXTERNAL"
+                    | "*" => {}
+                    other => bail!(
+                        "config: routing rule {i} contains unknown route type {:?}",
+                        other
+                    ),
+                }
+            }
         }
         Ok(())
     }
@@ -351,17 +440,18 @@ impl Config {
         let mut seen: std::collections::HashSet<String> = Default::default();
         let mut chain: Vec<String> = Vec::new();
 
-        let add = |name: &str, seen: &mut std::collections::HashSet<String>, chain: &mut Vec<String>| {
-            if name.is_empty() || seen.contains(name) {
-                return;
-            }
-            if let Some(p) = self.providers.get(name) {
-                seen.insert(name.to_string());
-                if !p.disabled {
-                    chain.push(name.to_string());
+        let add =
+            |name: &str, seen: &mut std::collections::HashSet<String>, chain: &mut Vec<String>| {
+                if name.is_empty() || seen.contains(name) {
+                    return;
                 }
-            }
-        };
+                if let Some(p) = self.providers.get(name) {
+                    seen.insert(name.to_string());
+                    if !p.disabled {
+                        chain.push(name.to_string());
+                    }
+                }
+            };
 
         for rule in &self.routing {
             if !matches_route(&rule.route_types, route) {
@@ -463,6 +553,24 @@ mod tests {
     }
 
     #[test]
+    fn enabled_live_provider_requires_api_key_env_name() {
+        let mut cfg = Config::default();
+        let p = cfg.providers.get_mut("openai").unwrap();
+        p.disabled = false;
+        p.api_key_env.clear();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("requires api_key_env"), "{err}");
+    }
+
+    #[test]
+    fn unknown_adapter_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().adapter = "mystery".into();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("unknown adapter"), "{err}");
+    }
+
+    #[test]
     fn provider_chain_follows_fallbacks() {
         let mut cfg = Config::default();
         // Enable everything to exercise the chain.
@@ -491,5 +599,48 @@ mod tests {
         let back: Config = serde_yaml::from_str(&y).unwrap();
         back.validate().unwrap();
         assert_eq!(back.providers.len(), cfg.providers.len());
+    }
+
+    #[test]
+    fn invalid_policy_numeric_ranges_are_rejected() {
+        let mut cfg = Config::default();
+        cfg.policy.ask_threshold = 1.5;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("ask_threshold"));
+
+        let mut cfg = Config::default();
+        cfg.policy.delegation_penalty = -0.5;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("delegation_penalty"));
+
+        let mut cfg = Config::default();
+        cfg.policy.delegation_min_scale = -0.1;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("delegation_min_scale"));
+
+        let mut cfg = Config::default();
+        cfg.policy.max_cost_per_task_usd = -10.0;
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_cost_per_task_usd"));
+    }
+
+    #[test]
+    fn invalid_route_type_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.routing[0].route_types.push("INVALID-ROUTE".into());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("unknown route type"), "{err}");
     }
 }

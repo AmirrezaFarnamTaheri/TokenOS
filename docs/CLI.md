@@ -138,6 +138,12 @@ Static assets (`/`, `/app.js`, `/style.css`) are served without auth; all
 API endpoints require the bearer token when one is configured. See
 [API.md](API.md) for the endpoint reference.
 
+The browser dashboard has an **API token** button in the sidebar. Enter the same
+token passed via `--auth-token` or `$TOKENOS_AUTH_TOKEN`; the frontend keeps it
+in memory by default, or in `sessionStorage` for the current tab if you opt in.
+Interactive executions are capped at four concurrent `/api/run` calls per
+server process; saturated requests return `429` while telemetry remains live.
+
 ---
 
 ## Exit codes

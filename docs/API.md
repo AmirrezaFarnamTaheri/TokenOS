@@ -32,10 +32,25 @@ Errors are uniform:
 |---|---|
 | `400` | Malformed request body |
 | `401` | Missing/invalid bearer token |
+| `429` | `/api/run` concurrency limit reached |
 | `500` | Internal error (storage, recorder) |
 | `504` | `/api/run` exceeded the server-side execution timeout |
 
 ---
+
+## GET `/api/meta`
+
+Runtime metadata used by the dashboard header and client-side capacity hints.
+
+```json
+{
+  "version": "2.0.0",
+  "dry_run": true,
+  "providers_total": 4,
+  "providers_enabled": 1,
+  "max_concurrent_runs": 4
+}
+```
 
 ## GET `/api/summary`
 
@@ -256,7 +271,8 @@ Response (engine-level failure — still HTTP 200):
 { "result": null, "error": "all providers failed: ..." }
 ```
 
-`504` if the run exceeds the server-side timeout.
+`429` if all in-process execution slots are occupied. The request is rejected
+before entering provider code. `504` if the run exceeds the server-side timeout.
 
 ---
 

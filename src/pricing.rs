@@ -192,8 +192,8 @@ pub fn quote_all(
         if c.max_context > 0 && est_in.saturating_add(est_out) > c.max_context {
             continue;
         }
-        let cost = (est_in as f64 * c.cost_per_mtok_in + est_out as f64 * c.cost_per_mtok_out)
-            / 1e6;
+        let cost =
+            (est_in as f64 * c.cost_per_mtok_in + est_out as f64 * c.cost_per_mtok_out) / 1e6;
 
         let (lat, fail, calls) = tracker
             .map(|t| t.snapshot(&c.provider))
@@ -253,7 +253,15 @@ mod tests {
     #[test]
     fn cheaper_wins() {
         let cands = vec![cand("expensive", 10.0, 1), cand("cheap", 0.1, 2)];
-        let q = quote_all(&cands, 0.9, 1000, 500, Weights::default(), None, &HashMap::new());
+        let q = quote_all(
+            &cands,
+            0.9,
+            1000,
+            500,
+            Weights::default(),
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(q[0].candidate.provider, "cheap");
     }
 
@@ -261,7 +269,15 @@ mod tests {
     fn context_overflow_filtered() {
         let mut c = cand("small", 0.1, 1);
         c.max_context = 100;
-        let q = quote_all(&[c], 0.9, 1000, 100, Weights::default(), None, &HashMap::new());
+        let q = quote_all(
+            &[c],
+            0.9,
+            1000,
+            100,
+            Weights::default(),
+            None,
+            &HashMap::new(),
+        );
         assert!(q.is_empty());
     }
 
@@ -283,7 +299,15 @@ mod tests {
         );
         assert!(q.is_empty(), "prompt+output overflow must filter");
         // Same provider admits when the combined size fits.
-        let q = quote_all(&[c], 0.9, 700, 200, Weights::default(), None, &HashMap::new());
+        let q = quote_all(
+            &[c],
+            0.9,
+            700,
+            200,
+            Weights::default(),
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(q.len(), 1);
     }
 
@@ -324,7 +348,15 @@ mod tests {
         }
         t.record("healthy", 100.0, true);
         let cands = vec![cand("flaky", 1.0, 1), cand("healthy", 1.0, 2)];
-        let q = quote_all(&cands, 0.9, 1000, 500, Weights::default(), Some(&t), &HashMap::new());
+        let q = quote_all(
+            &cands,
+            0.9,
+            1000,
+            500,
+            Weights::default(),
+            Some(&t),
+            &HashMap::new(),
+        );
         assert_eq!(q[0].candidate.provider, "healthy");
     }
 
@@ -339,14 +371,25 @@ mod tests {
         let cands = vec![cand("saturated", 1.0, 1), cand("idle", 1.0, 2)];
         let q = quote_all(&cands, 0.9, 1000, 500, Weights::default(), Some(&t), &quota);
         assert_eq!(q[0].candidate.provider, "idle");
-        let sat = q.iter().find(|x| x.candidate.provider == "saturated").unwrap();
+        let sat = q
+            .iter()
+            .find(|x| x.candidate.provider == "saturated")
+            .unwrap();
         assert!((sat.quota_pressure - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn deterministic_tiebreak() {
         let cands = vec![cand("bbb", 1.0, 2), cand("aaa", 1.0, 2)];
-        let q = quote_all(&cands, 0.9, 1000, 500, Weights::default(), None, &HashMap::new());
+        let q = quote_all(
+            &cands,
+            0.9,
+            1000,
+            500,
+            Weights::default(),
+            None,
+            &HashMap::new(),
+        );
         assert_eq!(q[0].candidate.provider, "aaa");
     }
 }
@@ -427,8 +470,7 @@ impl DriftWatchdog {
                 provider: p.clone(),
                 ratio_ewma: ewma,
                 samples,
-                drifting: samples >= DRIFT_MIN_SAMPLES
-                    && !(DRIFT_LOW..=DRIFT_HIGH).contains(&ewma),
+                drifting: samples >= DRIFT_MIN_SAMPLES && !(DRIFT_LOW..=DRIFT_HIGH).contains(&ewma),
             })
             .collect();
         v.sort_by(|a, b| a.provider.cmp(&b.provider));
@@ -550,7 +592,9 @@ impl Ucb1Router {
     /// Records an outcome. Reward = success(0/1) scaled down by latency so
     /// fast successes dominate slow ones; failures earn 0.
     pub fn record(&self, provider: &str, success: bool, latency_ms: f64) {
-        let Some(arm) = self.arm(provider) else { return };
+        let Some(arm) = self.arm(provider) else {
+            return;
+        };
         let reward = if success {
             // 1.0 at 0 ms decaying toward ~0.5 at 10 s.
             1.0 / (1.0 + latency_ms / 10_000.0)

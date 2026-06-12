@@ -117,6 +117,19 @@ fn goal_hash(task: &str) -> String {
     hex::encode(Sha256::digest(task.trim().as_bytes()))
 }
 
+fn clarifying_question(sig: &Signals) -> String {
+    if sig.missing_critical_info {
+        "Which exact target, option, or missing requirement should TokenOS use before executing this task?"
+            .to_string()
+    } else if sig.confidence < 0.2 {
+        "What concrete outcome, target, and acceptance criteria should TokenOS use before executing this task?"
+            .to_string()
+    } else {
+        "What missing detail should TokenOS resolve before executing this task safely and cheaply?"
+            .to_string()
+    }
+}
+
 /// Best-effort persistence: failures are surfaced on stderr instead of being
 /// silently swallowed (finding 12.3). Used ONLY for telemetry/trace writes —
 /// task-state transitions are must-succeed and use `?`.
@@ -133,7 +146,7 @@ impl Engine {
         let store = Store::open(opt.db_path.as_deref().map(Path::new))?;
         let recorder = Recorder::new(opt.trace_dir.as_deref().map(Path::new))?;
         let arms: Vec<String> = cfg.providers.keys().cloned().collect();
-        Ok(Engine {
+        let engine = Engine {
             cfg,
             store,
             recorder,
@@ -143,7 +156,17 @@ impl Engine {
             indexer: None,
             dry_run: opt.dry_run,
             adapters: RwLock::new(HashMap::new()),
-        })
+        };
+        // Startup pruning of telemetry and traces (F-11)
+        if engine.cfg.security.retention_days > 0 {
+            let _ = engine
+                .store
+                .prune_old_records(engine.cfg.security.retention_days);
+            let _ = engine
+                .recorder
+                .prune_old_traces(engine.cfg.security.retention_days);
+        }
+        Ok(engine)
     }
 
     /// Lazily constructs and caches a provider adapter.
@@ -175,14 +198,30 @@ impl Engine {
     /// max of the calibrated heuristic and the greedy BPE segmenter, so a
     /// route is never selected on an underestimate.
     pub fn route_only(&self, task: &str) -> (Decision, String) {
+        self.route_only_with_constraints(task, &[])
+    }
+
+    /// Deterministic routing with the same cache signal used by execution.
+    /// Workspace context is prompt context only; REUSE requires an exact,
+    /// verified, replayable solution-cache hit for the goal+constraints pair.
+    pub fn route_only_with_constraints(
+        &self,
+        task: &str,
+        constraints: &[String],
+    ) -> (Decision, String) {
         let ctx_block = self.minimum_viable_context(task);
         let est = tokenizer::count_conservative(task)
             + tokenizer::count_conservative(&ctx_block)
             + tokenizer::count_conservative(payload::KERNEL_CONTRACT);
-        let index_hit = !ctx_block.is_empty();
+        let has_existing_solution =
+            self.replayable_cache_hit(&solution_cache_key(task, constraints));
         let loop_detected = self.persisted_loop_detected(task).0;
-        let repeated = self.store.has_goal_failure(&goal_hash(task)).unwrap_or(false);
-        let sig = kernel::extract_signals(task, est, index_hit, repeated, loop_detected);
+        let repeated = self
+            .store
+            .has_goal_failure(&goal_hash(task))
+            .unwrap_or(false);
+        let sig =
+            kernel::extract_signals(task, est, has_existing_solution, repeated, loop_detected);
         (kernel::decide(sig, &self.cfg.policy), ctx_block)
     }
 
@@ -197,12 +236,48 @@ impl Engine {
         }
     }
 
+    fn replayable_cache_hit(&self, cache_key: &str) -> bool {
+        if !self.cfg.policy.reuse_cache {
+            return false;
+        }
+        self.store
+            .peek_cached_solution(cache_key)
+            .map(|hit| {
+                hit.map(|(_, out, _)| !crate::maskcodec::contains_placeholder(&out))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    fn record_event(
+        &self,
+        task_id: &str,
+        kind: &str,
+        summary: &str,
+        payload: &[u8],
+    ) -> Result<String> {
+        if self.cfg.security.disable_traces {
+            return Ok(String::new());
+        }
+        let sha = self.recorder.record(task_id, kind, summary, payload)?;
+        let blob_ref = if sha.is_empty() {
+            "journal".to_string()
+        } else {
+            format!("sha256:{sha}")
+        };
+        self.store.record_trace(task_id, kind, &blob_ref)?;
+        Ok(sha)
+    }
+
     /// Loads the persisted loop window (finding 12.2) and replays it through
     /// a detector: returns (loop already evident, seeded detector, scope).
     fn persisted_loop_detected(&self, task: &str) -> (bool, Detector, String) {
         let scope = loop_scope(task);
         let det = Detector::new();
-        let history = self.store.loop_history(&scope, det.window).unwrap_or_default();
+        let history = self
+            .store
+            .loop_history(&scope, det.window)
+            .unwrap_or_default();
         let mut replay = Detector::new();
         let mut looped = false;
         for attempt in &history {
@@ -216,6 +291,30 @@ impl Engine {
     /// Executes a task end-to-end through the kernel.
     pub async fn run(&self, task: &str, constraints: &[String]) -> Result<RunResult> {
         let task_id = new_id();
+
+        // Daily and Monthly spend limits enforcement (F-13)
+        if self.cfg.security.daily_spend_limit_usd > 0.0 {
+            if let Ok(spend) = self.store.aggregate_spend_usd(1) {
+                if spend >= self.cfg.security.daily_spend_limit_usd {
+                    return Err(anyhow::anyhow!(
+                        "Daily spend limit of ${:.2} exceeded (current spend: ${:.2})",
+                        self.cfg.security.daily_spend_limit_usd,
+                        spend
+                    ));
+                }
+            }
+        }
+        if self.cfg.security.monthly_spend_limit_usd > 0.0 {
+            if let Ok(spend) = self.store.aggregate_spend_usd(30) {
+                if spend >= self.cfg.security.monthly_spend_limit_usd {
+                    return Err(anyhow::anyhow!(
+                        "Monthly spend limit of ${:.2} exceeded (current spend: ${:.2})",
+                        self.cfg.security.monthly_spend_limit_usd,
+                        spend
+                    ));
+                }
+            }
+        }
 
         // Step 1-2: local state init + context budget enforcement (zero tokens).
         let mut st = State::new(task_id.clone(), task);
@@ -240,6 +339,8 @@ impl Engine {
         // prior cold processes seeds the detector so oscillation across
         // invocations is caught deterministically.
         let (loop_detected, mut detector, loop_key) = self.persisted_loop_detected(task);
+        let cache_key = solution_cache_key(task, constraints);
+        let has_existing_solution = self.replayable_cache_hit(&cache_key);
 
         // Step 4: deterministic routing (zero token cost). Budgeting uses
         // the conservative counter (evolution S23) so routes never trigger
@@ -247,13 +348,14 @@ impl Engine {
         let est = tokenizer::count_conservative(task)
             + tokenizer::count_conservative(&st.context)
             + tokenizer::count_conservative(payload::KERNEL_CONTRACT);
-        let sig = kernel::extract_signals(task, est, !st.context.is_empty(), repeated, loop_detected);
+        let sig =
+            kernel::extract_signals(task, est, has_existing_solution, repeated, loop_detected);
         let dec = kernel::decide(sig.clone(), &self.cfg.policy);
 
         let dec_blob = serde_json::to_vec(&dec).unwrap_or_default();
         warn_persist(
             "flight-recorder decision",
-            self.recorder.record(
+            self.record_event(
                 &task_id,
                 "decision",
                 &format!("{}: {}", dec.route.as_str(), dec.reason),
@@ -285,6 +387,32 @@ impl Engine {
         st.status = Status::Routed;
         self.store.save_task(&mut st)?;
 
+        // ASK resolves locally with zero network cost. A clarifying question is
+        // the completed action for this route, not something to outsource to a
+        // provider after the router has already decided information is missing.
+        if dec.route == Route::Ask {
+            let question = clarifying_question(&sig);
+            let v = verify::static_check(dec.route.as_str(), &question);
+            st.status = Status::Blocked;
+            st.blocked = true;
+            st.next_action = format!("answer the question: {question}");
+            self.store.save_task(&mut st)?;
+            warn_persist(
+                "flight-recorder ask",
+                self.record_event(
+                    &task_id,
+                    "ask",
+                    "local clarifying question emitted at zero token cost",
+                    question.as_bytes(),
+                ),
+            );
+            res.output = question;
+            res.verified = Some(v);
+            res.success = true;
+            self.record(&res, 0);
+            return Ok(res);
+        }
+
         // Escalations resolve locally with zero network cost.
         if dec.route.is_escalation() {
             st.status = Status::Escalated;
@@ -302,27 +430,41 @@ impl Engine {
         // cheapest possible execution. Only verified successes are admitted
         // (below), so a cache hit is by construction a verified answer.
         // ASK is excluded: a question is a request for input, not a solution.
-        let cache_key = solution_cache_key(task, constraints);
         if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
-            if let Ok(Some((cached_route, cached_out))) = self.store.cached_solution(&cache_key) {
-                warn_persist(
+            if let Ok(Some((cached_route, cached_out, cached_tier))) =
+                self.store.cached_solution(&cache_key)
+            {
+                if crate::maskcodec::contains_placeholder(&cached_out) {
+                    warn_persist(
+                        "solution cache evict",
+                        self.store.evict_solution(&cache_key),
+                    );
+                } else {
+                    warn_persist(
                     "flight-recorder cache",
-                    self.recorder.record(
+                    self.record_event(
                         &task_id,
                         "cache",
                         &format!("verified solution served from cache (route {cached_route}, zero tokens)"),
                         cached_out.as_bytes(),
                     ),
                 );
-                st.status = Status::Done;
-                st.next_action = String::new();
-                self.store.save_task(&mut st)?;
-                res.provider = "cache".into();
-                res.model = "solution-cache".into();
-                res.output = cached_out;
-                res.success = true;
-                self.record(&res, 0);
-                return Ok(res);
+                    st.status = Status::Done;
+                    st.next_action = String::new();
+                    self.store.save_task(&mut st)?;
+                    res.provider = "cache".into();
+                    res.model = "solution-cache".into();
+                    res.output = cached_out;
+                    res.verified = Some(VerifyResult {
+                        pass: true,
+                        tier: cached_tier,
+                        issues: vec![],
+                        cost_tokens: 0,
+                    });
+                    res.success = true;
+                    self.record(&res, 0);
+                    return Ok(res);
+                }
             }
         }
 
@@ -337,7 +479,10 @@ impl Engine {
         // deterministic failover.
         let chain = self.cfg.provider_chain(dec.route.as_str());
         if chain.is_empty() {
-            return Err(anyhow!("no enabled providers for route {}", dec.route.as_str()));
+            return Err(anyhow!(
+                "no enabled providers for route {}",
+                dec.route.as_str()
+            ));
         }
         // The quote includes the route's output budget so the context-fit
         // check covers prompt + allowed output, not just the prompt.
@@ -365,7 +510,7 @@ impl Engine {
             );
             warn_persist(
                 "flight-recorder budget",
-                self.recorder.record(&task_id, "budget", &msg, &[]),
+                self.record_event(&task_id, "budget", &msg, &[]),
             );
             st.status = Status::Blocked;
             st.blocked = true;
@@ -421,7 +566,7 @@ impl Engine {
 
             warn_persist(
                 "flight-recorder prompt",
-                self.recorder.record(
+                self.record_event(
                     &task_id,
                     "prompt",
                     &format!("→ {}/{}", prov_name, model),
@@ -465,8 +610,17 @@ impl Engine {
                     res.retries += 1;
                     warn_persist(
                         "flight-recorder error",
-                        self.recorder
-                            .record(&task_id, "error", &format!("{}: {}", prov_name, e), &[]),
+                        self.record_event(&task_id, "error", &format!("{}: {}", prov_name, e), &[]),
+                    );
+                    let _ = self.store.record_attempt(
+                        &task_id,
+                        &prov_name,
+                        &model,
+                        0,
+                        0,
+                        lat,
+                        false,
+                        &e.to_string(),
                     );
                     warn_persist(
                         "failure memory",
@@ -500,7 +654,7 @@ impl Engine {
                 {
                     warn_persist(
                         "flight-recorder json-rescue",
-                        self.recorder.record(
+                        self.record_event(
                             &task_id,
                             "rescue",
                             "truncated JSON repaired in-process (zero extra tokens)",
@@ -514,21 +668,39 @@ impl Engine {
             // placeholders, so this blob is masked by construction.
             warn_persist(
                 "flight-recorder response",
-                self.recorder
-                    .record(&task_id, "response", &format!("← {}", prov_name), resp.text.as_bytes()),
+                self.record_event(
+                    &task_id,
+                    "response",
+                    &format!("← {}", prov_name),
+                    resp.text.as_bytes(),
+                ),
             );
 
             // Step 7: tiered verification — static first, zero token cost.
             // Runs on the MASKED form: placeholders are inert text and never
             // change structural validity, while the unmasked form must not
             // exist before the persistence block below completes.
-            let v = verify::static_check(dec.route.as_str(), &out_masked);
+            let v = verify::verify_output(
+                dec.route.as_str(),
+                &out_masked,
+                &self.cfg.policy.verification_command,
+            );
             res.verified = Some(v.clone());
             if !v.pass {
                 // Unverifiable output earns the arm zero reward (S19).
                 self.bandit.record(&prov_name, false, lat as f64);
                 // Fast local loopback: remember failure, try next provider.
-                let reason = format!("static verification failed: {:?}", v.issues);
+                let reason = format!("verification failed ({:?}): {:?}", v.tier, v.issues);
+                let _ = self.store.record_attempt(
+                    &task_id,
+                    &prov_name,
+                    &resp.model,
+                    resp.tokens_in as usize,
+                    resp.tokens_out as usize,
+                    lat,
+                    false,
+                    &reason,
+                );
                 st.remember_failure(&format!("output from {}", prov_name), &reason);
                 warn_persist(
                     "failure memory",
@@ -541,7 +713,7 @@ impl Engine {
                 );
                 warn_persist(
                     "flight-recorder verify",
-                    self.recorder.record(&task_id, "verify", &reason, out_masked.as_bytes()),
+                    self.record_event(&task_id, "verify", &reason, out_masked.as_bytes()),
                 );
 
                 // Finding 12.2: persist the failed attempt into the durable
@@ -551,13 +723,24 @@ impl Engine {
                 // Masked form only: the loop window is durable SQLite state.
                 warn_persist(
                     "loop window",
-                    self.store.record_loop_attempt(&loop_key, &out_masked, detector.window),
+                    self.store
+                        .record_loop_attempt(&loop_key, &out_masked, detector.window),
                 );
                 if detector.observe(&out_masked) {
                     res.retries += 1;
-                    last_err = Some(anyhow!(
-                        "semantic execution loop detected (edit-distance ceiling) — escalating"
-                    ));
+                    let loop_msg =
+                        "semantic execution loop detected (edit-distance ceiling) — escalating";
+                    let _ = self.store.record_attempt(
+                        &task_id,
+                        &prov_name,
+                        &resp.model,
+                        resp.tokens_in as usize,
+                        resp.tokens_out as usize,
+                        lat,
+                        false,
+                        loop_msg,
+                    );
+                    last_err = Some(anyhow!(loop_msg));
                     break;
                 }
 
@@ -570,8 +753,11 @@ impl Engine {
             // (estimate, actual) pair whenever the provider reports real
             // usage. Drift outside the trusted band is surfaced in telemetry.
             if resp.tokens_in > 0 {
-                self.drift
-                    .observe(&prov_name, tokenizer::estimate(&prompt) as i64, resp.tokens_in);
+                self.drift.observe(
+                    &prov_name,
+                    tokenizer::estimate(&prompt) as i64,
+                    resp.tokens_in,
+                );
             }
 
             let tokens_in = if resp.tokens_in == 0 {
@@ -589,7 +775,12 @@ impl Engine {
             // form is moved into the result and never written to disk.
             let out_unmasked = mask_codec.unmask(&out_masked);
 
-            let p_cfg = self.cfg.providers.get(&prov_name).cloned().unwrap_or_default();
+            let p_cfg = self
+                .cfg
+                .providers
+                .get(&prov_name)
+                .cloned()
+                .unwrap_or_default();
             res.provider = prov_name.clone();
             res.model = resp.model.clone();
             res.output = out_unmasked;
@@ -601,23 +792,47 @@ impl Engine {
                 / 1e6;
             res.success = true;
 
+            // Record successful attempt (F-09)
+            let _ = self.store.record_attempt(
+                &task_id,
+                &prov_name,
+                &resp.model,
+                tokens_in as usize,
+                tokens_out as usize,
+                lat,
+                true,
+                "",
+            );
+
             // Verified success: credit the bandit arm (S19).
             self.bandit.record(&prov_name, true, lat as f64);
 
             // Success clears the durable loop window AND the goal-keyed
             // failure memory for this task text.
-            warn_persist("loop window clear", self.store.clear_loop_history(&loop_key));
-            warn_persist("failure memory clear", self.store.clear_goal_failures(&goal_key));
+            warn_persist(
+                "loop window clear",
+                self.store.clear_loop_history(&loop_key),
+            );
+            warn_persist(
+                "failure memory clear",
+                self.store.clear_goal_failures(&goal_key),
+            );
 
-            // Evolution S25: admit the VERIFIED output to the solution cache
-            // so an identical future request costs zero tokens. ASK outputs
-            // are questions, not solutions — never cached. MASKED form only:
-            // the cache is durable SQLite state. (A future replay returns
-            // placeholders rather than secrets — fail-safe by construction.)
-            if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
+            // Evolution S25: admit only replayable VERIFIED output to the
+            // solution cache so an identical future request costs zero tokens.
+            // Masked forms are safe at rest; however, a response that still
+            // contains an opaque secret placeholder cannot be reconstructed in
+            // a later request because the reverse vault is intentionally
+            // ephemeral. Those outputs remain in the recorder but are not
+            // cached for user-facing replay.
+            if self.cfg.policy.reuse_cache
+                && dec.route != Route::Ask
+                && !crate::maskcodec::contains_placeholder(&out_masked)
+            {
                 warn_persist(
                     "solution cache",
-                    self.store.cache_solution(&cache_key, dec.route.as_str(), &out_masked),
+                    self.store
+                        .cache_solution(&cache_key, dec.route.as_str(), &out_masked, &v.tier),
                 );
             }
 
@@ -640,7 +855,10 @@ impl Engine {
         self.store.save_task(&mut st)?;
         // Evolution S25: a failed goal must never serve a stale cached answer
         // afterwards — the world has demonstrably changed.
-        warn_persist("solution cache evict", self.store.evict_solution(&cache_key));
+        warn_persist(
+            "solution cache evict",
+            self.store.evict_solution(&cache_key),
+        );
         self.record(&res, res.latency_ms);
         let last = last_err.unwrap_or_else(|| anyhow!("all providers exhausted"));
         Err(anyhow!(
@@ -679,7 +897,15 @@ impl Engine {
         if w.alpha == 0.0 && w.beta == 0.0 {
             w = Weights::default();
         }
-        pricing::quote_all(&cands, confidence, est_in, est_out, w, Some(&self.tracker), &quota)
+        pricing::quote_all(
+            &cands,
+            confidence,
+            est_in,
+            est_out,
+            w,
+            Some(&self.tracker),
+            &quota,
+        )
     }
 
     /// Two-tier filter matrix applied to the adapter's manifest.
@@ -703,22 +929,30 @@ impl Engine {
 
     /// Telemetry write: best-effort but never silent (finding 12.3).
     fn record(&self, r: &RunResult, latency_ms: i64) {
-        warn_persist("execution telemetry", self.store.record_execution(&Execution {
-            id: 0,
-            task_id: r.task_id.clone(),
-            route: r.route.as_str().to_string(),
-            provider: r.provider.clone(),
-            model: r.model.clone(),
-            tokens_in: r.tokens_in.max(0) as usize,
-            tokens_out: r.tokens_out.max(0) as usize,
-            latency_ms,
-            retries: r.retries,
-            verification_cost: 0,
-            delegation_count: 0,
-            est_cost_usd: r.cost_usd,
-            success: r.success,
-            created_at: String::new(),
-        }));
+        warn_persist(
+            "execution telemetry",
+            self.store.record_execution(&Execution {
+                id: 0,
+                task_id: r.task_id.clone(),
+                route: r.route.as_str().to_string(),
+                provider: r.provider.clone(),
+                model: r.model.clone(),
+                tokens_in: r.tokens_in.max(0) as usize,
+                tokens_out: r.tokens_out.max(0) as usize,
+                latency_ms,
+                retries: r.retries,
+                verification_cost: 0,
+                delegation_count: 0,
+                est_cost_usd: r.cost_usd,
+                success: r.success,
+                verification_tier: r
+                    .verified
+                    .as_ref()
+                    .map(|v| v.tier.clone())
+                    .unwrap_or_else(|| "static".to_string()),
+                created_at: String::new(),
+            }),
+        );
     }
 }
 
@@ -833,22 +1067,56 @@ mod tests {
     #[tokio::test]
     async fn run_trivial_task_via_mock() {
         let e = test_engine();
-        let r = e.run("rename variable x to y in main.rs", &[]).await.unwrap();
+        let r = e
+            .run("rename variable x to y in main.rs", &[])
+            .await
+            .unwrap();
         assert!(r.success);
         assert!(!r.output.is_empty());
         assert!(!r.task_id.is_empty());
     }
 
     #[tokio::test]
+    async fn flight_recorder_events_are_indexed_in_store() {
+        let e = test_engine();
+        let r = e.run("rename variable alpha to beta", &[]).await.unwrap();
+        let recorder_events = e.recorder.events(&r.task_id).unwrap();
+        let indexed = e.store.trace_count_for_task(&r.task_id).unwrap();
+        assert!(!recorder_events.is_empty());
+        assert_eq!(indexed as usize, recorder_events.len());
+    }
+
+    #[tokio::test]
     async fn escalation_resolves_locally() {
         let e = test_engine();
         let r = e
-            .run("bypass auth and disable security checks in the login flow", &[])
+            .run(
+                "bypass auth and disable security checks in the login flow",
+                &[],
+            )
             .await
             .unwrap();
         assert!(r.route.is_escalation());
         assert!(r.success); // escalating correctly is success
         assert!(r.provider.is_empty()); // zero network cost
+    }
+
+    #[tokio::test]
+    async fn ask_resolves_locally_without_provider_or_tokens() {
+        let e = test_engine();
+        let r = e
+            .run("maybe somehow do something with the thing", &[])
+            .await
+            .unwrap();
+        assert_eq!(r.route, Route::Ask);
+        assert!(r.success);
+        assert!(r.provider.is_empty());
+        assert!(r.model.is_empty());
+        assert_eq!(r.tokens_in, 0);
+        assert_eq!(r.tokens_out, 0);
+        assert_eq!(r.cost_usd, 0.0);
+        assert_eq!(r.output.matches('?').count(), 1);
+        assert!(r.verified.as_ref().is_some_and(|v| v.pass));
     }
 
     #[test]
@@ -857,6 +1125,51 @@ mod tests {
         let (d1, _) = e.route_only("fix the typo in README");
         let (d2, _) = e.route_only("fix the typo in README");
         assert_eq!(d1.route, d2.route);
+    }
+
+    #[test]
+    fn workspace_context_hit_does_not_imply_reuse() {
+        let mut e = test_engine();
+        let root = std::env::temp_dir().join(format!(
+            "tokenos-route-index-test-{}-{}",
+            std::process::id(),
+            rand::thread_rng().gen::<u32>()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src").join("lib.rs"),
+            "pub fn tokenizer_truncate_bug() { println!(\"context\"); }\n",
+        )
+        .unwrap();
+        let ix = Indexer::open(Some(":memory:")).unwrap();
+        assert!(ix.index_workspace(&root).unwrap() > 0);
+        e.indexer = Some(ix);
+
+        let (dec, ctx) = e.route_only("implement tokenizer truncate telemetry");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!ctx.is_empty(), "test must exercise a real context hit");
+        assert_ne!(
+            dec.route,
+            Route::Reuse,
+            "context is not a verified solution"
+        );
+        assert_eq!(dec.route, Route::Implement);
+    }
+
+    #[test]
+    fn exact_solution_cache_hit_routes_reuse_without_mutating_hits() {
+        let e = test_engine();
+        let task = "implement cached route preview behavior";
+        let constraints = vec!["keep API stable".to_string()];
+        let key = solution_cache_key(task, &constraints);
+        e.store
+            .cache_solution(&key, "IMPLEMENT", "cached answer", "static")
+            .unwrap();
+
+        let (dec, _) = e.route_only_with_constraints(task, &constraints);
+        assert_eq!(dec.route, Route::Reuse);
+        let (_entries, hits) = e.store.solution_cache_stats().unwrap();
+        assert_eq!(hits, 0, "route preview must not count as a cache replay");
     }
 
     #[test]
@@ -895,7 +1208,10 @@ mod tests {
         ];
         let chain = vec!["delta".to_string()]; // pricer-filtered straggler
         let bandit = Ucb1Router::new(&[
-            "alpha".into(), "beta".into(), "gamma".into(), "delta".into(),
+            "alpha".into(),
+            "beta".into(),
+            "gamma".into(),
+            "delta".into(),
         ]);
         assert_eq!(
             ordered_providers_banditized(&quotes, &chain, &bandit),
@@ -921,7 +1237,10 @@ mod tests {
     #[test]
     fn json_intent_detection() {
         assert!(task_expects_json("emit the manifest as JSON", &[]));
-        assert!(task_expects_json("build list", &["output JSON only".into()]));
+        assert!(task_expects_json(
+            "build list",
+            &["output JSON only".into()]
+        ));
         assert!(!task_expects_json("rename a variable", &[]));
     }
 
@@ -944,15 +1263,18 @@ mod tests {
             .await
             .unwrap();
         assert!(r.success);
-        let v: serde_json::Value = serde_json::from_str(&r.output)
-            .expect("rescued output must be strictly valid JSON");
+        let v: serde_json::Value =
+            serde_json::from_str(&r.output).expect("rescued output must be strictly valid JSON");
         assert_eq!(v["files"][1], "b.rs");
     }
 
     #[tokio::test]
     async fn bandit_records_dry_run_successes() {
         let e = test_engine();
-        let r = e.run("rename variable x to y in main.rs", &[]).await.unwrap();
+        let r = e
+            .run("rename variable x to y in main.rs", &[])
+            .await
+            .unwrap();
         assert!(r.success);
         let (pulls, reward, _) = e.bandit.arm_stats(&r.provider);
         assert!(pulls >= 1, "successful run must credit the bandit arm");
@@ -970,10 +1292,16 @@ mod tests {
         assert_ne!(r1.provider, "cache");
         let r2 = e.run(task, &[]).await.unwrap();
         assert!(r2.success);
-        assert_eq!(r2.provider, "cache", "second identical run must hit the cache");
+        assert_eq!(
+            r2.provider, "cache",
+            "second identical run must hit the cache"
+        );
         assert_eq!(r2.tokens_in, 0);
         assert_eq!(r2.cost_usd, 0.0);
-        assert_eq!(r2.output, r1.output, "cache must return the verified output verbatim");
+        assert_eq!(
+            r2.output, r1.output,
+            "cache must return the verified output verbatim"
+        );
         let (entries, hits) = e.store.solution_cache_stats().unwrap();
         assert!(entries >= 1 && hits >= 1);
     }
@@ -1004,7 +1332,10 @@ mod tests {
         let r1 = e.run(task, &[]).await.unwrap();
         assert!(r1.success);
         let r2 = e.run(task, &[]).await.unwrap();
-        assert_ne!(r2.provider, "cache", "reuse_cache=false must always re-execute");
+        assert_ne!(
+            r2.provider, "cache",
+            "reuse_cache=false must always re-execute"
+        );
     }
 
     /// Evolution S26: a 429 opens the breaker; failover skips the provider
@@ -1112,7 +1443,12 @@ mod tests {
         let e = test_engine();
         let task = "implement the flaky widget integration";
         e.store
-            .record_failure("prior-task-id", &goal_hash(task), "execute via openai", "rate limited")
+            .record_failure(
+                "prior-task-id",
+                &goal_hash(task),
+                "execute via openai",
+                "rate limited",
+            )
             .unwrap();
         let r = e.run(task, &[]).await.unwrap();
         assert!(
@@ -1187,14 +1523,14 @@ mod tests {
             );
         }
 
-        // 2. The durable solution cache holds the masked form.
+        // 2. Placeholder-bearing output is not cached for replay. The masked
+        // form is safe in recorder blobs, but the reverse vault is deliberately
+        // ephemeral, so replaying placeholders later would be incorrect.
         let key = solution_cache_key(&task, &[]);
-        if let Some((_route, cached)) = e.store.cached_solution(&key).unwrap() {
-            assert!(
-                !cached.contains(secret),
-                "secret leaked into solution cache: {cached}"
-            );
-        }
+        assert!(
+            e.store.peek_cached_solution(&key).unwrap().is_none(),
+            "placeholder-bearing output must not enter the solution cache"
+        );
 
         // 3. The persisted task state (next_action et al.) is secret-free.
         let st = e.store.get_task(&r.task_id).unwrap();
@@ -1226,12 +1562,82 @@ mod tests {
         let task = "do the impossible thing";
         let scope = loop_scope(task);
         // Simulate a prior process that recorded two near-identical failures.
-        e.store.record_loop_attempt(&scope, "attempt body alpha", 5).unwrap();
-        e.store.record_loop_attempt(&scope, "attempt body alpha", 5).unwrap();
+        e.store
+            .record_loop_attempt(&scope, "attempt body alpha", 5)
+            .unwrap();
+        e.store
+            .record_loop_attempt(&scope, "attempt body alpha", 5)
+            .unwrap();
         let (looped, _, _) = e.persisted_loop_detected(task);
-        assert!(looped, "identical persisted attempts must register as a loop");
+        assert!(
+            looped,
+            "identical persisted attempts must register as a loop"
+        );
         // And routing must escalate on the loop signal.
         let (dec, _) = e.route_only(task);
         assert_eq!(dec.route, Route::EscalateExternal);
+    }
+
+    #[tokio::test]
+    async fn verification_command_runs_on_success() {
+        let e = test_engine();
+        let mut policy = e.cfg.policy.clone();
+        policy.verification_command = if cfg!(target_os = "windows") {
+            "echo 'success'".to_string()
+        } else {
+            "echo success".to_string()
+        };
+        let res =
+            crate::verify::verify_output("IMPLEMENT", "fn main() {}", &policy.verification_command);
+        assert!(res.pass);
+        assert_eq!(res.tier, "tests");
+    }
+
+    #[tokio::test]
+    async fn verification_command_fails_on_error() {
+        let e = test_engine();
+        let mut policy = e.cfg.policy.clone();
+        policy.verification_command = if cfg!(target_os = "windows") {
+            "powershell -Command exit 1".to_string()
+        } else {
+            "exit 1".to_string()
+        };
+        let res =
+            crate::verify::verify_output("IMPLEMENT", "fn main() {}", &policy.verification_command);
+        assert!(!res.pass);
+        assert_eq!(res.tier, "tests");
+        assert!(res.issues[0].contains("failed") || res.issues[0].contains("exit"));
+    }
+
+    #[tokio::test]
+    async fn daily_spend_limit_blocks_execution() {
+        let mut e = test_engine();
+        e.cfg.security.daily_spend_limit_usd = 0.01;
+        e.store
+            .record_execution(&Execution {
+                id: 0,
+                task_id: "t-limit".to_string(),
+                route: "IMPLEMENT".to_string(),
+                provider: "mock".to_string(),
+                model: "mock-1".to_string(),
+                tokens_in: 1000,
+                tokens_out: 1000,
+                latency_ms: 10,
+                retries: 0,
+                verification_cost: 0,
+                delegation_count: 0,
+                est_cost_usd: 0.02,
+                success: true,
+                verification_tier: "static".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap();
+
+        let run_res = e.run("implement features", &[]).await;
+        assert!(run_res.is_err());
+        assert!(run_res
+            .unwrap_err()
+            .to_string()
+            .contains("Daily spend limit"));
     }
 }

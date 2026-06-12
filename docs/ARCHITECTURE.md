@@ -93,9 +93,9 @@ The crate ships as a **library plus a thin binary**:
 | `maskcodec` | Edge secret masking | Reverse vault lives only in the request's stack frame |
 | `loopdetect` | Myers bit-parallel Levenshtein loop detection | Window persisted in SQLite — survives process restarts |
 | `contextidx` | Structural symbol index (FTS5 with LIKE fallback) | Minimum viable context ≤ 2000 tokens |
-| `store` | SQLite state: tasks, failure memory, loop history, telemetry | State objects, never transcripts |
+| `store` | SQLite state: tasks, failure memory, loop history, telemetry, trace index, solution cache | State objects and trace metadata, never raw transcripts |
 | `recorder` | Flight recorder: SHA-256 CAS blobs + NDJSON journal | Diagnostics never enter the context window |
-| `webui` | axum control panel | Lock-free handlers; constant-time bearer auth |
+| `webui` | axum control panel | Lock-free read handlers, bounded concurrent runs, constant-time bearer auth |
 
 ## 3. The routing ladder
 
@@ -108,17 +108,26 @@ The crate ships as a **library plus a thin binary**:
 | 0 | `ESCALATE-EXTERNAL` | Semantic loop detected (loopdetect) | 0 |
 | 1 | `ASK` | Missing critical info or confidence < `ask_threshold` (0.35) | 0 |
 | 2 | `DIRECT` | Trivial task, estimate ≤ `direct_max_tokens` (600) | minimal |
-| 3 | `REUSE` | Indexed prior solution satisfies the request | minimal |
+| 3 | `REUSE` | Exact verified solution-cache hit for the same goal + constraints | 0 on replay |
 | 4 | `PATCH` | Localized change with no repeated failure on this goal | small |
 | 5 | `DELEGATE` | Repetitive + bounded + savings > `delegation_penalty × delegation_min_scale` | packet only |
 | 6 | `PARTIAL` | External blocker — deliver completed portion | bounded |
 | 7 | `IMPLEMENT` | Default productive path | normal |
 
-`ASK` and all escalations terminate locally at **zero LLM cost**.
+`ASK` and all escalations terminate locally at **zero LLM cost**. `REUSE` is
+not a workspace-index hit. The workspace index only supplies minimum viable
+context for a prompt; a task routes to `REUSE` only when the durable verified
+solution cache has an exact, replayable goal+constraint match.
 
 Failure memory feeds back into the ladder: a goal that has previously failed
 with a similar approach is biased away from `PATCH`, and the failed approach
 is *forbidden* in the payload's constraint block.
+
+ASK is deliberately local. Once the router decides information is missing, the
+engine emits one deterministic clarifying question, marks the task blocked,
+records zero tokens and no provider/model, and stops. Sending an ASK to a model
+would violate the routing contract because the system already knows it needs
+human input.
 
 ## 4. Shadow pricing and the bandit
 
@@ -173,20 +182,22 @@ transcript.
 
 After a provider responds, in order:
 
-1. **Unmask** — placeholder echoes are restored from the request-scoped vault.
-2. **JSON rescue** — if the task signals JSON intent (case-insensitive
+1. **JSON rescue** — if the task signals JSON intent (case-insensitive
    `json` in the task or constraints) and the output is truncated JSON, the
    single-pass lenient parser repairs it: partial strings keep their content,
    dangling keys are dropped, open containers are closed. A truncation guard
    refuses to touch prose that merely *starts* with a bracket. Rescues are
    flight-recorded as `rescue` events.
-3. **Static verification** — free checks: diff shape for PATCH, exactly-one-
+2. **Static verification** — free checks: diff shape for PATCH, exactly-one-
    question contract for ASK, brace balance, ellipsis/truncation detection.
-4. **Loop detection** — normalized Myers bit-parallel Levenshtein distance
+3. **Loop detection** — normalized Myers bit-parallel Levenshtein distance
    over a sliding window of the last 5 outputs (persisted in SQLite).
    Distance < 3% ⇒ semantic loop ⇒ `ESCALATE-EXTERNAL`.
-5. **Recording** — telemetry row in SQLite; full payloads as SHA-256
-   content-addressed blobs in the flight recorder.
+4. **Recording** — telemetry row in SQLite; trace metadata in SQLite; full
+   payloads as SHA-256 content-addressed blobs in the flight recorder.
+5. **Unmask for caller only** — placeholder echoes are restored from the
+   request-scoped vault after durable writes complete. The unmasked form is
+   returned to the caller and is not written to SQLite or recorder blobs.
 
 ## 7. Persistence model
 
@@ -194,7 +205,7 @@ Two stores, deliberately separate:
 
 | Store | Contents | Why separate |
 |---|---|---|
-| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, execution telemetry | Queryable, transactional, survives restarts |
+| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, execution telemetry, trace metadata, verified solution cache | Queryable, transactional, survives restarts |
 | **Flight recorder** (`recorder.rs`) | Decision/prompt/response/rescue/error events (NDJSON journal) + full payload blobs (SHA-256 CAS) | Diagnostics must never compete with state for context tokens |
 
 State is stored as **compressed state objects** (goal, status, blockers,
@@ -210,6 +221,9 @@ source of truth; SQLite is.
   on the hot path.
 - **Route previews** (`/api/route`) run on `spawn_blocking` so pure CPU work
   never stalls the async reactor.
+- **Execution backpressure** caps concurrent `/api/run` work at four in-process
+  slots. Saturated servers return `429` while keeping dashboard reads and route
+  previews available.
 - **Adapters map** is behind an `RwLock` only for registration; the read path
   is shared.
 

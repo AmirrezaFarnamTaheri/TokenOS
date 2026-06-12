@@ -156,7 +156,10 @@ impl MaskCodec {
                     self.vault.insert(ph.clone(), matched.clone());
                     ph
                 };
-                spans.push(MaskedSpan { kind, placeholder: ph.clone() });
+                spans.push(MaskedSpan {
+                    kind,
+                    placeholder: ph.clone(),
+                });
                 out.replace_range(s..e, &ph);
                 pos = s + ph.len();
             }
@@ -190,6 +193,14 @@ pub fn mask_prompt(prompt: &str) -> (String, MaskCodec) {
     let mut codec = MaskCodec::new();
     let (masked, _) = codec.mask(prompt);
     (masked, codec)
+}
+
+/// True when text still contains an opaque placeholder emitted by this codec.
+/// Durable caches use this as a replay guard: a placeholder is safe at rest but
+/// not useful as a future user-facing answer because the reverse vault dies at
+/// request end.
+pub fn contains_placeholder(text: &str) -> bool {
+    text.contains("\u{00AB}SECRET:k")
 }
 
 #[cfg(test)]
@@ -263,7 +274,10 @@ mod tests {
         let (masked, _) = c.mask(text);
         assert!(!masked.contains("alice@example.com"));
         assert!(!masked.contains("203.0.113.99"));
-        assert!(masked.contains("127.0.0.1"), "loopback must remain: {masked}");
+        assert!(
+            masked.contains("127.0.0.1"),
+            "loopback must remain: {masked}"
+        );
         assert_eq!(c.unmask(&masked), text);
     }
 
@@ -300,7 +314,10 @@ mod tests {
         let mut c = MaskCodec::new();
         let text = "literal one-dot-leader: a\u{2024}b near 127.0.0.1";
         let (masked, _) = c.mask(text);
-        assert!(masked.contains("a\u{2024}b"), "U+2024 must survive: {masked}");
+        assert!(
+            masked.contains("a\u{2024}b"),
+            "U+2024 must survive: {masked}"
+        );
         assert!(masked.contains("127.0.0.1"), "loopback stays: {masked}");
         assert_eq!(c.unmask(&masked), text);
     }
@@ -312,7 +329,10 @@ mod tests {
         let mut c = MaskCodec::new();
         let text = "db lives at 10.0.0.7 behind the LB";
         let (masked, _) = c.mask(text);
-        assert!(!masked.contains("10.0.0.7"), "private IP must mask: {masked}");
+        assert!(
+            !masked.contains("10.0.0.7"),
+            "private IP must mask: {masked}"
+        );
         assert_eq!(c.unmask(&masked), text);
     }
 
@@ -336,7 +356,10 @@ mod tests {
         assert!(!masked.contains("hunter2hunter2"));
         // The assignment context survives so the model understands WHAT is
         // being configured — only the value is redacted.
-        assert!(masked.contains("password"), "context must survive: {masked}");
+        assert!(
+            masked.contains("password"),
+            "context must survive: {masked}"
+        );
         assert_eq!(c.unmask(&masked), text);
     }
 
@@ -345,7 +368,10 @@ mod tests {
         let secret = "sk-ant-abcdefghijklmnopqrstuvwxyz1234";
         let (masked, codec) = mask_prompt(&format!("call api with {secret}"));
         assert!(!masked.contains(secret));
-        let model_echo = format!("Here is your config using {}", masked.split_whitespace().last().unwrap());
+        let model_echo = format!(
+            "Here is your config using {}",
+            masked.split_whitespace().last().unwrap()
+        );
         let restored = codec.unmask(&model_echo);
         assert!(restored.contains(secret));
     }
@@ -353,9 +379,8 @@ mod tests {
     #[test]
     fn multiple_distinct_secrets_distinct_placeholders() {
         let mut c = MaskCodec::new();
-        let (masked, _) = c.mask(
-            "k1 sk-aaaaaaaaaaaaaaaaaaaaaaaaaa1 and k2 sk-bbbbbbbbbbbbbbbbbbbbbbbbbb2",
-        );
+        let (masked, _) =
+            c.mask("k1 sk-aaaaaaaaaaaaaaaaaaaaaaaaaa1 and k2 sk-bbbbbbbbbbbbbbbbbbbbbbbbbb2");
         assert_eq!(c.vault_len(), 2);
         assert!(!masked.contains("sk-aaaa"));
         assert!(!masked.contains("sk-bbbb"));

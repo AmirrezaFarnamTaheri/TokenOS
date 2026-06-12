@@ -99,9 +99,23 @@ impl Adapter {
         } else {
             std::env::var(&p.api_key_env).unwrap_or_default()
         };
+        if matches!(p.adapter.as_str(), "openai" | "anthropic" | "gemini")
+            && api_key.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "provider {:?}: adapter {:?} requires non-empty environment variable {:?}",
+                name,
+                p.adapter,
+                p.api_key_env
+            ));
+        }
         let mk = |endpoint_default: &str| HttpAdapter {
             name: name.to_string(),
-            endpoint: if p.endpoint.is_empty() { endpoint_default.to_string() } else { p.endpoint.clone() },
+            endpoint: if p.endpoint.is_empty() {
+                endpoint_default.to_string()
+            } else {
+                p.endpoint.clone()
+            },
             api_key,
             model: p.model.clone(),
         };
@@ -109,11 +123,16 @@ impl Adapter {
             "mock" => Ok(Adapter::Mock(Mock::new(name))),
             "openai" => Ok(Adapter::OpenAi(mk("https://api.openai.com/v1"))),
             "anthropic" => Ok(Adapter::Anthropic(mk("https://api.anthropic.com/v1"))),
-            "gemini" => Ok(Adapter::Gemini(mk("https://generativelanguage.googleapis.com/v1beta"))),
+            "gemini" => Ok(Adapter::Gemini(mk(
+                "https://generativelanguage.googleapis.com/v1beta",
+            ))),
             // OpenAI-compatible local bridge (Cursor/Windsurf/ollama/llama.cpp...).
             "proxy" | "proxy_ide" => {
                 if p.endpoint.is_empty() {
-                    return Err(anyhow!("provider {:?}: proxy adapter requires endpoint", name));
+                    return Err(anyhow!(
+                        "provider {:?}: proxy adapter requires endpoint",
+                        name
+                    ));
                 }
                 Ok(Adapter::OpenAi(mk("")))
             }
@@ -275,7 +294,11 @@ struct ApiError {
 }
 
 async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
-    let model = if req.model.is_empty() { h.model.clone() } else { req.model.clone() };
+    let model = if req.model.is_empty() {
+        h.model.clone()
+    } else {
+        req.model.clone()
+    };
     let mut body = serde_json::json!({
         "model": model,
         "messages": [OaMessage { role: "user", content: &req.prompt }],
@@ -290,7 +313,10 @@ async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     if !h.api_key.is_empty() {
         rb = rb.bearer_auth(&h.api_key);
     }
-    let resp = rb.send().await.map_err(|e| ProviderError::Unavailable(Some(e.into())))?;
+    let resp = rb
+        .send()
+        .await
+        .map_err(|e| ProviderError::Unavailable(Some(e.into())))?;
     let status = resp.status().as_u16();
     if status != 200 {
         return Err(classify_http(status));
@@ -302,7 +328,10 @@ async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     if let Some(e) = out.error {
         return Err(ProviderError::Other(anyhow!("api error: {}", e.message)));
     }
-    let first = out.choices.first().ok_or_else(|| ProviderError::Other(anyhow!("empty response")))?;
+    let first = out
+        .choices
+        .first()
+        .ok_or_else(|| ProviderError::Other(anyhow!("empty response")))?;
     Ok(Response {
         text: first.message.content.clone(),
         tokens_in: out.usage.prompt_tokens,
@@ -343,7 +372,11 @@ struct AnUsage {
 }
 
 async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
-    let model = if req.model.is_empty() { h.model.clone() } else { req.model.clone() };
+    let model = if req.model.is_empty() {
+        h.model.clone()
+    } else {
+        req.model.clone()
+    };
     let max_out = if req.max_out > 0 { req.max_out } else { 4096 };
     let body = serde_json::json!({
         "model": model,
@@ -370,7 +403,12 @@ async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, P
     if let Some(e) = out.error {
         return Err(ProviderError::Other(anyhow!("api error: {}", e.message)));
     }
-    let text: String = out.content.iter().filter(|c| c.kind == "text").map(|c| c.text.as_str()).collect();
+    let text: String = out
+        .content
+        .iter()
+        .filter(|c| c.kind == "text")
+        .map(|c| c.text.as_str())
+        .collect();
     if text.is_empty() {
         return Err(ProviderError::Other(anyhow!("empty response")));
     }
@@ -422,7 +460,11 @@ struct GmUsage {
 }
 
 async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
-    let model = if req.model.is_empty() { h.model.clone() } else { req.model.clone() };
+    let model = if req.model.is_empty() {
+        h.model.clone()
+    } else {
+        req.model.clone()
+    };
     let mut body = serde_json::json!({
         "contents": [{"role": "user", "parts": [{"text": req.prompt}]}],
     });
@@ -451,11 +493,19 @@ async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     if let Some(e) = out.error {
         return Err(ProviderError::Other(anyhow!("api error: {}", e.message)));
     }
-    let first = out.candidates.first().ok_or_else(|| ProviderError::Other(anyhow!("empty response")))?;
+    let first = out
+        .candidates
+        .first()
+        .ok_or_else(|| ProviderError::Other(anyhow!("empty response")))?;
     if first.content.parts.is_empty() {
         return Err(ProviderError::Other(anyhow!("empty response")));
     }
-    let text: String = first.content.parts.iter().map(|p| p.text.as_str()).collect();
+    let text: String = first
+        .content
+        .parts
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect();
     Ok(Response {
         text,
         tokens_in: out.usage_metadata.prompt_token_count,
@@ -481,14 +531,20 @@ mod tests {
     #[tokio::test]
     async fn mock_synthesizes_route_specific_output() {
         let m = Mock::new("mock");
-        let r = m.execute(&req("ASK", "GOAL: build the thing\nother")).await.unwrap();
+        let r = m
+            .execute(&req("ASK", "GOAL: build the thing\nother"))
+            .await
+            .unwrap();
         assert!(r.text.contains("build the thing"));
         assert!(r.text.contains('?'));
 
         let r = m.execute(&req("PATCH", "GOAL: fix bug")).await.unwrap();
         assert!(r.text.starts_with("--- a/"));
 
-        let r = m.execute(&req("IMPLEMENT", "GOAL: write feature")).await.unwrap();
+        let r = m
+            .execute(&req("IMPLEMENT", "GOAL: write feature"))
+            .await
+            .unwrap();
         assert!(r.text.contains("write feature"));
     }
 
@@ -515,15 +571,34 @@ mod tests {
 
     #[test]
     fn adapter_factory() {
-        let p = config::Provider { adapter: "mock".into(), ..Default::default() };
+        let p = config::Provider {
+            adapter: "mock".into(),
+            ..Default::default()
+        };
         let a = Adapter::new("m", &p).unwrap();
         assert_eq!(a.name(), "m");
-        assert_eq!(a.models(), vec!["mock-1".to_string(), "mock-large".to_string()]);
+        assert_eq!(
+            a.models(),
+            vec!["mock-1".to_string(), "mock-large".to_string()]
+        );
 
-        let p = config::Provider { adapter: "proxy".into(), ..Default::default() };
+        let p = config::Provider {
+            adapter: "proxy".into(),
+            ..Default::default()
+        };
         assert!(Adapter::new("p", &p).is_err()); // proxy requires endpoint
 
-        let p = config::Provider { adapter: "bogus".into(), ..Default::default() };
+        let p = config::Provider {
+            adapter: "openai".into(),
+            api_key_env: String::new(),
+            ..Default::default()
+        };
+        assert!(Adapter::new("openai", &p).is_err()); // live adapters require credentials
+
+        let p = config::Provider {
+            adapter: "bogus".into(),
+            ..Default::default()
+        };
         assert!(Adapter::new("b", &p).is_err());
     }
 

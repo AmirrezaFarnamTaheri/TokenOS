@@ -4,10 +4,17 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
-const api = async (path, opts) => {
-  const res = await fetch(path, opts);
+const AUTH_KEY = "tokenos.auth.token";
+let authToken = "";
+try { authToken = sessionStorage.getItem(AUTH_KEY) || ""; } catch {}
+
+const api = async (path, opts = {}) => {
+  const headers = { ...(opts.headers || {}) };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  const res = await fetch(path, { ...opts, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+    if (res.status === 401) openAuth(body.error || "API token required.");
     throw new Error(body.error || `HTTP ${res.status}`);
   }
   return res.json();
@@ -31,6 +38,48 @@ const routeBadge = (route) => {
   const cls = route && route.startsWith("ESCALATE") ? "ESC" : route;
   return `<span class="badge route-${esc(cls)}">${esc(route || "—")}</span>`;
 };
+
+/* ---------- API token ---------- */
+function updateAuthUi() {
+  const btn = $("#btnAuth");
+  if (!btn) return;
+  btn.textContent = authToken ? "API token set" : "API token";
+  btn.classList.toggle("token-set", Boolean(authToken));
+}
+function openAuth(reason = "") {
+  const m = $("#authModal");
+  if (!m) return;
+  $("#authInput").value = authToken;
+  $("#authReason").textContent = reason;
+  m.style.display = "";
+  $("#authInput").focus();
+}
+function closeAuth() {
+  const m = $("#authModal");
+  if (m) m.style.display = "none";
+}
+$("#btnAuth")?.addEventListener("click", () => openAuth());
+$("#authClose")?.addEventListener("click", closeAuth);
+$("#authModal")?.addEventListener("click", (ev) => { if (ev.target === $("#authModal")) closeAuth(); });
+$("#authSave")?.addEventListener("click", () => {
+  authToken = ($("#authInput")?.value || "").trim();
+  try {
+    if ($("#authRemember")?.checked && authToken) sessionStorage.setItem(AUTH_KEY, authToken);
+    else sessionStorage.removeItem(AUTH_KEY);
+  } catch {}
+  updateAuthUi();
+  closeAuth();
+  toast(authToken ? "API token saved for this tab." : "API token cleared.", authToken ? "ok" : "");
+  refreshView(document.querySelector(".nav-item.active")?.dataset.view || "dashboard");
+});
+$("#authClear")?.addEventListener("click", () => {
+  authToken = "";
+  try { sessionStorage.removeItem(AUTH_KEY); } catch {}
+  $("#authInput").value = "";
+  $("#authRemember").checked = false;
+  updateAuthUi();
+  toast("API token cleared.");
+});
 
 /* Plain-language explanations shown to newcomers in the route preview. */
 const ROUTE_EXPLAIN = {
@@ -281,7 +330,7 @@ $("#btnRoute").addEventListener("click", async () => {
   try {
     const r = await api("/api/route", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task }),
+      body: JSON.stringify({ task, constraints: constraintsList() }),
     });
     const d = r.decision, s = d.signals || {};
     const sigChips = Object.entries(s)
@@ -490,6 +539,7 @@ function refreshView(view) {
   else if (view === "config") loadConfig();
 }
 
+updateAuthUi();
 loadMeta();
 loadDashboard();
 setInterval(() => {

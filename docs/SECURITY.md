@@ -60,6 +60,10 @@ placeholder, the response leg restores the original value. Properties:
   regardless of where a mismatch occurs, closing the timing side channel.
 - Static assets bypass auth (they contain no data); every data endpoint
   enforces it.
+- The embedded dashboard includes a bearer-token dialog. By default the token
+  is held in memory; users may opt into `sessionStorage` for the current browser
+  tab. The token is then injected by the single `fetch` wrapper for every
+  `/api/*` call.
 
 ### Request handling
 
@@ -67,6 +71,9 @@ placeholder, the response leg restores the original value. Properties:
   descriptive error, never a panic.
 - `/api/run` is wrapped in a server-side timeout (`504` on expiry) so a hung
   provider cannot pin a connection forever.
+- `/api/run` also has per-process backpressure: at most four executions run at
+  once. Additional run requests return `429` without entering provider code,
+  while telemetry and route-preview endpoints remain available.
 - Handlers are lock-free (`Arc<Engine>`, no global mutex) — a slow execution
   cannot be used to starve health/telemetry endpoints.
 
@@ -102,7 +109,7 @@ parameters — no string-built SQL anywhere in the codebase.
 
 | Artifact | Location | Contents |
 |---|---|---|
-| State DB | `~/.local/share/tokenos/tokenos.db` | Task states, telemetry, failure memory, loop windows |
+| State DB | `~/.local/share/tokenos/tokenos.db` | Task states, telemetry, failure memory, loop windows, trace metadata, verified solution cache |
 | Flight recorder | `~/.local/state/tokenos/traces` | NDJSON event journals + SHA-256 content-addressed payload blobs |
 | Config | `~/.config/tokenos/config.yaml` | Profiles and policy — **never keys** |
 
@@ -110,6 +117,11 @@ Note that flight-recorder blobs contain full prompts/responses (post-masking
 on the outbound side). Treat the traces directory with the same sensitivity
 as application logs: secrets are masked, but business content is present.
 Set `$TOKENOS_TRACES` to a suitably protected path in shared environments.
+
+The verified solution cache stores only replayable verified outputs. If a
+response still contains an opaque `SECRET` placeholder after masking, the output
+is safe to keep in traces but is not admitted to the cache because the reverse
+vault is request-scoped and cannot reconstruct the value later.
 
 ## 5. Supply chain
 

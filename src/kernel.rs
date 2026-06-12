@@ -73,11 +73,11 @@ impl Route {
     /// a minimal diff. Only full builds get the wide ceiling.
     pub fn max_output_tokens(self) -> i64 {
         match self {
-            Route::Ask => 256,                       // exactly one question
-            Route::Direct => 1024,                   // trivial answer
-            Route::Delegate => 1024,                 // packet ack, not prose
-            Route::Verify => 1024,                   // verdict, not essay
-            Route::Reuse | Route::Patch => 2048,     // bounded modification
+            Route::Ask => 256,                         // exactly one question
+            Route::Direct => 1024,                     // trivial answer
+            Route::Delegate => 1024,                   // packet ack, not prose
+            Route::Verify => 1024,                     // verdict, not essay
+            Route::Reuse | Route::Patch => 2048,       // bounded modification
             Route::Partial | Route::Implement => 4096, // full productive output
             Route::EscalateConflict | Route::EscalateSafety | Route::EscalateExternal => 0, // never reach a provider
         }
@@ -209,8 +209,10 @@ impl State {
 }
 
 /// Deterministic inputs the router uses to pick a route. Computed locally
-/// (zero token cost) from the task description, the workspace index and
-/// prior telemetry.
+/// (zero token cost) from the task description, verified solution cache state,
+/// and prior telemetry. Workspace context is intentionally not the same thing
+/// as an existing solution: context can inform a prompt, but only a verified
+/// cache hit can justify REUSE.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Signals {
     pub estimated_tokens: usize,
@@ -247,6 +249,9 @@ pub struct RouterPolicy {
     /// Enabled by default; set false to always re-execute.
     #[serde(default = "default_true")]
     pub reuse_cache: bool,
+    /// Verification command for code tasks (F-12)
+    #[serde(default)]
+    pub verification_command: String,
 }
 
 fn default_true() -> bool {
@@ -262,6 +267,7 @@ impl Default for RouterPolicy {
             delegation_min_scale: 1.5,  // savings must exceed 1.5x the penalty
             max_cost_per_task_usd: 0.0, // 0 = sentinel disabled
             reuse_cache: true,
+            verification_command: String::new(),
         }
     }
 }
@@ -285,7 +291,10 @@ pub fn decide(s: Signals, p: &RouterPolicy) -> Decision {
             "execution would violate constraints or policy",
         )
     } else if s.conflicting_requirements {
-        (Route::EscalateConflict, "requirements contradict each other")
+        (
+            Route::EscalateConflict,
+            "requirements contradict each other",
+        )
     } else if s.loop_detected {
         (
             Route::EscalateExternal,
@@ -356,19 +365,24 @@ static RE_LOCALIZED: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 static RE_TRIVIAL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(typo|rename|bump version|add comment|format|reformat|lint fix|sort imports)\b")
-        .unwrap()
+    Regex::new(
+        r"(?i)\b(typo|rename|bump version|add comment|format|reformat|lint fix|sort imports)\b",
+    )
+    .unwrap()
 });
 static RE_REPETITIVE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(for (each|every|all)|batch|bulk|repeat|across \d+|all \d+ files|every file)\b")
-        .unwrap()
+    Regex::new(
+        r"(?i)\b(for (each|every|all)|batch|bulk|repeat|across \d+|all \d+ files|every file)\b",
+    )
+    .unwrap()
 });
 static RE_EXTERNAL: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(waiting (on|for)|blocked by|api key missing|credentials missing|upstream outage|access denied|permission denied)\b")
         .unwrap()
 });
 static RE_CONFLICT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(but also must not|contradict|mutually exclusive|both .* and never)\b").unwrap()
+    Regex::new(r"(?i)\b(but also must not|contradict|mutually exclusive|both .* and never)\b")
+        .unwrap()
 });
 static RE_SAFETY: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(bypass auth|disable security|exfiltrate|leak credentials|ignore policy)\b")
@@ -379,11 +393,12 @@ static RE_ASK_NEEDED: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Derives Signals from a task description plus environment facts supplied by
-/// the engine (token estimate, index hit, failure memory, loop detection).
+/// the engine (token estimate, exact verified-cache hit, failure memory, loop
+/// detection).
 pub fn extract_signals(
     task: &str,
     estimated_tokens: usize,
-    index_hit: bool,
+    has_existing_solution: bool,
     repeated_failure: bool,
     loop_detected: bool,
 ) -> Signals {
@@ -395,7 +410,7 @@ pub fn extract_signals(
     let mut s = Signals {
         estimated_tokens,
         trivial: RE_TRIVIAL.is_match(t) && words <= 40,
-        has_existing_solution: index_hit,
+        has_existing_solution,
         localized_change: RE_LOCALIZED.is_match(t),
         repetitive: RE_REPETITIVE.is_match(t),
         bounded: words <= 200,
@@ -517,7 +532,10 @@ mod tests {
     fn patch_unless_repeated_failure() {
         let mut s = sig();
         s.localized_change = true;
-        assert_eq!(decide(s.clone(), &RouterPolicy::default()).route, Route::Patch);
+        assert_eq!(
+            decide(s.clone(), &RouterPolicy::default()).route,
+            Route::Patch
+        );
         s.repeated_failure = true;
         assert_eq!(decide(s, &RouterPolicy::default()).route, Route::Implement);
     }
@@ -528,14 +546,20 @@ mod tests {
         s.repetitive = true;
         s.bounded = true;
         s.estimated_tokens = 10_000;
-        assert_eq!(decide(s.clone(), &RouterPolicy::default()).route, Route::Delegate);
+        assert_eq!(
+            decide(s.clone(), &RouterPolicy::default()).route,
+            Route::Delegate
+        );
         s.estimated_tokens = 1000;
         assert_eq!(decide(s, &RouterPolicy::default()).route, Route::Implement);
     }
 
     #[test]
     fn default_is_implement() {
-        assert_eq!(decide(sig(), &RouterPolicy::default()).route, Route::Implement);
+        assert_eq!(
+            decide(sig(), &RouterPolicy::default()).route,
+            Route::Implement
+        );
     }
 
     #[test]

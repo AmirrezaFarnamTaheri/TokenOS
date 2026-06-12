@@ -29,7 +29,12 @@ pub fn default_path() -> PathBuf {
         }
     }
     dirs::home_dir()
-        .map(|h| h.join(".local").join("share").join("tokenos").join("tokenos.db"))
+        .map(|h| {
+            h.join(".local")
+                .join("share")
+                .join("tokenos")
+                .join("tokenos.db")
+        })
         .unwrap_or_else(|| PathBuf::from("tokenos.db"))
 }
 
@@ -70,6 +75,7 @@ CREATE TABLE IF NOT EXISTS executions (
     delegation_count  INTEGER NOT NULL DEFAULT 0,
     est_cost_usd  REAL NOT NULL DEFAULT 0,
     success       INTEGER NOT NULL DEFAULT 0,
+    verification_tier TEXT NOT NULL DEFAULT 'static',
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_exec_route ON executions(route);
@@ -103,10 +109,26 @@ CREATE TABLE IF NOT EXISTS solution_cache (
     cache_key  TEXT PRIMARY KEY,
     route      TEXT NOT NULL,
     output     TEXT NOT NULL,
+    verification_tier TEXT NOT NULL DEFAULT 'static',
     hits       INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     last_hit_at TEXT
 );
+
+-- Evolution F-09: execution attempts table for failover and retry visibility.
+CREATE TABLE IF NOT EXISTS execution_attempts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    tokens_in     INTEGER NOT NULL DEFAULT 0,
+    tokens_out    INTEGER NOT NULL DEFAULT 0,
+    latency_ms    INTEGER NOT NULL DEFAULT 0,
+    success       INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exec_att_task ON execution_attempts(task_id);
 "#;
 
 impl Store {
@@ -145,12 +167,26 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
             [],
         )?;
+        // Migration to add verification_tier to executions (F-12)
+        conn.execute(
+            "ALTER TABLE executions ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
+            [],
+        )
+        .ok();
+        // Migration to add verification_tier to solution_cache (F-12)
+        conn.execute(
+            "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
+            [],
+        )
+        .ok();
         // Backfill: rows recorded before the goal_hash column existed carry
         // the '' default and are invisible to every goal-keyed read. Their
         // task IDs still join to the tasks table, whose goal text yields the
         // exact digest. One-time cost, idempotent (the WHERE clause empties).
         Self::backfill_goal_hashes(&conn)?;
-        Ok(Store { conn: Mutex::new(conn) })
+        Ok(Store {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Computes goal_hash for legacy failure_memory rows from tasks.goal.
@@ -161,9 +197,8 @@ impl Store {
                 "SELECT DISTINCT f.task_id, t.goal FROM failure_memory f
                  JOIN tasks t ON t.task_id = f.task_id WHERE f.goal_hash = ''",
             )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         for (task_id, goal) in pairs {
@@ -424,26 +459,67 @@ impl Store {
     /// Admits a verified output to the solution cache. Idempotent: a repeat
     /// admission for the same key refreshes the stored output (last verified
     /// answer wins).
-    pub fn cache_solution(&self, cache_key: &str, route: &str, output: &str) -> Result<()> {
+    pub fn cache_solution(
+        &self,
+        cache_key: &str,
+        route: &str,
+        output: &str,
+        verification_tier: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO solution_cache (cache_key, route, output, hits, created_at)
-             VALUES (?1, ?2, ?3, 0, ?4)
-             ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3",
-            params![cache_key, route, output, Utc::now().to_rfc3339()],
+            "INSERT INTO solution_cache (cache_key, route, output, verification_tier, hits, created_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)
+             ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3, verification_tier = ?4",
+            params![cache_key, route, output, verification_tier, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
 
+    /// Looks up a cached verified solution without recording a hit. This is
+    /// used by the router so route preview can ask "would this be reusable?"
+    /// without mutating telemetry.
+    pub fn peek_cached_solution(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT route, output, verification_tier FROM solution_cache WHERE cache_key = ?1",
+            params![cache_key],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Whether a verified solution exists for a cache key. This is a
+    /// non-mutating predicate for deterministic routing.
+    pub fn has_cached_solution(&self, cache_key: &str) -> Result<bool> {
+        Ok(self.peek_cached_solution(cache_key)?.is_some())
+    }
+
     /// Looks up a cached verified solution. A hit increments the hit counter
     /// and stamps last_hit_at — telemetry for proving the cache pays rent.
-    pub fn cached_solution(&self, cache_key: &str) -> Result<Option<(String, String)>> {
+    pub fn cached_solution(&self, cache_key: &str) -> Result<Option<(String, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT route, output FROM solution_cache WHERE cache_key = ?1",
+                "SELECT route, output, verification_tier FROM solution_cache WHERE cache_key = ?1",
                 params![cache_key],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?;
         if row.is_some() {
@@ -459,7 +535,10 @@ impl Store {
     /// answer must never be served after the world has changed).
     pub fn evict_solution(&self, cache_key: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM solution_cache WHERE cache_key = ?1", params![cache_key])?;
+        conn.execute(
+            "DELETE FROM solution_cache WHERE cache_key = ?1",
+            params![cache_key],
+        )?;
         Ok(())
     }
 
@@ -482,8 +561,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"INSERT INTO executions (task_id, route, provider, model, tokens_in, tokens_out,
-                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"#,
+                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, verification_tier, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"#,
             params![
                 e.task_id,
                 e.route,
@@ -497,6 +576,7 @@ impl Store {
                 e.delegation_count as i64,
                 e.est_cost_usd,
                 e.success as i64,
+                e.verification_tier,
                 Utc::now().to_rfc3339(),
             ],
         )?;
@@ -508,7 +588,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"SELECT id, task_id, route, provider, model, tokens_in, tokens_out, latency_ms,
-                  retries, verification_cost, delegation_count, est_cost_usd, success, created_at
+                  retries, verification_cost, delegation_count, est_cost_usd, success, created_at, verification_tier
                FROM executions ORDER BY id DESC LIMIT ?1"#,
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
@@ -527,9 +607,94 @@ impl Store {
                 est_cost_usd: r.get(11)?,
                 success: r.get::<_, i64>(12)? == 1,
                 created_at: r.get(13)?,
+                verification_tier: r.get(14)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Records one specific provider attempt (F-09).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_attempt(
+        &self,
+        task_id: &str,
+        provider: &str,
+        model: &str,
+        tokens_in: usize,
+        tokens_out: usize,
+        latency_ms: i64,
+        success: bool,
+        error_message: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"INSERT INTO execution_attempts (task_id, provider, model, tokens_in, tokens_out,
+                latency_ms, success, error_message, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"#,
+            params![
+                task_id,
+                provider,
+                model,
+                tokens_in as i64,
+                tokens_out as i64,
+                latency_ms,
+                if success { 1 } else { 0 },
+                error_message,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Queries the aggregate spend over the last N days (F-13).
+    pub fn aggregate_spend_usd(&self, days: usize) -> Result<f64> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let total: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(est_cost_usd), 0.0) FROM executions WHERE created_at >= ?1",
+            params![cutoff],
+            |r| r.get(0),
+        )?;
+        Ok(total)
+    }
+
+    /// Deletes telemetry records older than retention_days (F-11).
+    pub fn prune_old_records(&self, retention_days: usize) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (Utc::now() - chrono::Duration::days(retention_days as i64)).to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+
+        let execs_deleted = conn.execute(
+            "DELETE FROM executions WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        let failures_deleted = conn.execute(
+            "DELETE FROM failure_memory WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        let traces_deleted =
+            conn.execute("DELETE FROM traces WHERE created_at < ?1", params![cutoff])?;
+        let loops_deleted = conn.execute(
+            "DELETE FROM loop_history WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        let cache_deleted = conn.execute(
+            "DELETE FROM solution_cache WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        let attempts_deleted = conn.execute(
+            "DELETE FROM execution_attempts WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+
+        Ok(execs_deleted
+            + failures_deleted
+            + traces_deleted
+            + loops_deleted
+            + cache_deleted
+            + attempts_deleted)
     }
 
     /// Computes Effective Cost Per Successful Task per route.
@@ -554,7 +719,11 @@ impl Store {
                 avg_latency_ms: r.get(4)?,
                 success_rate: r.get(5)?,
                 total_cost_usd: total_cost,
-                cost_per_success: if successes > 0.0 { total_cost / successes } else { 0.0 },
+                cost_per_success: if successes > 0.0 {
+                    total_cost / successes
+                } else {
+                    0.0
+                },
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -586,21 +755,30 @@ impl Store {
     pub fn get_summary(&self) -> Result<Summary> {
         let conn = self.conn.lock().unwrap();
         let tasks: i64 = conn.query_row("SELECT COUNT(1) FROM tasks", [], |r| r.get(0))?;
-        let (executions, successes, total_tokens, total_cost, avg_latency): (i64, i64, i64, f64, f64) =
-            conn.query_row(
-                r#"SELECT COUNT(1), COALESCE(SUM(success),0), COALESCE(SUM(tokens_in+tokens_out),0),
+        let (executions, successes, total_tokens, total_cost, avg_latency): (
+            i64,
+            i64,
+            i64,
+            f64,
+            f64,
+        ) = conn.query_row(
+            r#"SELECT COUNT(1), COALESCE(SUM(success),0), COALESCE(SUM(tokens_in+tokens_out),0),
                       COALESCE(SUM(est_cost_usd),0), COALESCE(AVG(latency_ms),0)
                    FROM executions"#,
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )?;
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
         Ok(Summary {
             tasks: tasks as usize,
             executions: executions as usize,
             successes: successes as usize,
             total_tokens,
             total_cost_usd: total_cost,
-            cost_per_success: if successes > 0 { total_cost / successes as f64 } else { 0.0 },
+            cost_per_success: if successes > 0 {
+                total_cost / successes as f64
+            } else {
+                0.0
+            },
             avg_latency_ms: avg_latency,
             overall_success_pct: if executions > 0 {
                 successes as f64 / executions as f64
@@ -618,6 +796,16 @@ impl Store {
             params![task_id, kind, blob_path, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    pub fn trace_count_for_task(&self, task_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(1) FROM traces WHERE task_id = ?1",
+            params![task_id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -637,6 +825,7 @@ pub struct Execution {
     pub delegation_count: usize,
     pub est_cost_usd: f64,
     pub success: bool,
+    pub verification_tier: String,
     pub created_at: String,
 }
 
@@ -692,16 +881,22 @@ mod tests {
     fn solution_cache_lifecycle() {
         let s = mem();
         assert!(s.cached_solution("k1").unwrap().is_none());
-        s.cache_solution("k1", "IMPLEMENT", "the answer").unwrap();
-        let (route, out) = s.cached_solution("k1").unwrap().unwrap();
+        s.cache_solution("k1", "IMPLEMENT", "the answer", "static")
+            .unwrap();
+        let (route, out, tier) = s.cached_solution("k1").unwrap().unwrap();
         assert_eq!(route, "IMPLEMENT");
         assert_eq!(out, "the answer");
+        assert_eq!(tier, "static");
         let (entries, hits) = s.solution_cache_stats().unwrap();
         assert_eq!((entries, hits), (1, 1));
         // Re-admission refreshes the stored output.
-        s.cache_solution("k1", "PATCH", "newer answer").unwrap();
-        let (route2, out2) = s.cached_solution("k1").unwrap().unwrap();
-        assert_eq!((route2.as_str(), out2.as_str()), ("PATCH", "newer answer"));
+        s.cache_solution("k1", "PATCH", "newer answer", "tests")
+            .unwrap();
+        let (route2, out2, tier2) = s.cached_solution("k1").unwrap().unwrap();
+        assert_eq!(
+            (route2.as_str(), out2.as_str(), tier2.as_str()),
+            ("PATCH", "newer answer", "tests")
+        );
         // Eviction makes it a miss again.
         s.evict_solution("k1").unwrap();
         assert!(s.cached_solution("k1").unwrap().is_none());
@@ -722,7 +917,8 @@ mod tests {
         let mut st = State::new("t1", "g");
         s.save_task(&mut st).unwrap();
         for i in 0..8 {
-            s.record_failure("t1", "gh1", &format!("a{i}"), "r").unwrap();
+            s.record_failure("t1", "gh1", &format!("a{i}"), "r")
+                .unwrap();
         }
         let f = s.failures("t1").unwrap();
         assert_eq!(f.len(), MAX_FAILURE_MEMORY);
@@ -754,7 +950,10 @@ mod tests {
         // Distinct goals never prune each other.
         s.record_failure("tX", "gh-other", "b0", "r").unwrap();
         assert_eq!(s.goal_failures("gh-other", 100).unwrap().len(), 1);
-        assert_eq!(s.goal_failures("gh-same", 100).unwrap().len(), MAX_FAILURE_MEMORY);
+        assert_eq!(
+            s.goal_failures("gh-same", 100).unwrap().len(),
+            MAX_FAILURE_MEMORY
+        );
     }
 
     #[test]
@@ -774,7 +973,8 @@ mod tests {
             let mut st = State::new("legacy-task", "the legacy goal");
             s.save_task(&mut st).unwrap();
             // Simulate a pre-migration row: empty goal_hash.
-            s.record_failure("legacy-task", "", "old action", "old reason").unwrap();
+            s.record_failure("legacy-task", "", "old action", "old reason")
+                .unwrap();
             assert!(!s.has_goal_failure(&gh("the legacy goal")).unwrap());
         }
         // Re-open: backfill runs.
@@ -806,7 +1006,8 @@ mod tests {
         // Finding 12.3: the same goal failed under a DIFFERENT task ID must
         // still register as a repeated failure on the next attempt.
         let s = mem();
-        s.record_failure("task-aaaa", "gh-goal-1", "execute via mock", "boom").unwrap();
+        s.record_failure("task-aaaa", "gh-goal-1", "execute via mock", "boom")
+            .unwrap();
         assert!(s.has_goal_failure("gh-goal-1").unwrap());
         assert!(!s.has_goal_failure("gh-other").unwrap());
         assert!(!s.has_goal_failure("").unwrap());
@@ -821,7 +1022,8 @@ mod tests {
     fn loop_history_persists_and_prunes() {
         let s = mem();
         for i in 0..8 {
-            s.record_loop_attempt("scope1", &format!("attempt {i}"), 5).unwrap();
+            s.record_loop_attempt("scope1", &format!("attempt {i}"), 5)
+                .unwrap();
         }
         let h = s.loop_history("scope1", 5).unwrap();
         assert_eq!(h.len(), 5);
