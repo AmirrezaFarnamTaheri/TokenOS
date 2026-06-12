@@ -129,7 +129,7 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Explicitly allow binding a non-loopback interface.
-        /// Refused unless an auth token is also configured (finding 12.1).
+        /// Refused unless an auth token is also configured.
         #[arg(long)]
         public: bool,
         /// Bearer token required on every /api/* request.
@@ -356,7 +356,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     );
                 }
             }
-            // Live UCB1 bandit standings (S19) — process-local evidence.
+            // Live UCB1 bandit standings: process-local evidence.
             // Always printed when arms exist: a fresh process legitimately
             // shows every arm as unexplored (the evidence lives and dies
             // with the serving process), and hiding the table entirely made
@@ -387,7 +387,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     println!("(bandit evidence is process-local — arms gain pulls inside a serving process)");
                 }
             }
-            // Verified solution cache (S25): durable, zero-token replays.
+            // Verified solution cache: durable, zero-token replays.
             if let Ok((entries, test_verified, hits)) = eng.store.solution_cache_stats() {
                 if entries > 0 {
                     let static_checked = entries - test_verified;
@@ -396,7 +396,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         if hits == 1 { "" } else { "s" });
                 }
             }
-            // Estimator drift watchdog (S30) — process-local calibration.
+            // Estimator drift watchdog: process-local calibration.
             let drift = eng.drift.all();
             if !drift.is_empty() {
                 println!(
@@ -497,12 +497,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
             tls_key,
             engine: ef,
         } => {
-            // Finding 12.1 (CWE-306): the dashboard binds loopback by default.
+            // The dashboard binds loopback by default.
             // A non-loopback bind requires BOTH --public and an auth token so
             // an unauthenticated control plane can never face a network.
             // An empty token ("") authenticates nothing — treat it as absent
             // from BOTH sources so `--public --auth-token ""` is rejected the
-            // same way as a missing token (finding 12.1, CWE-306).
+            // same way as a missing token.
             let token = auth_token.filter(|t| !t.is_empty()).or_else(|| {
                 std::env::var("TOKENOS_AUTH_TOKEN")
                     .ok()
@@ -518,7 +518,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
                 if token.is_none() {
                     return Err(anyhow!(
-                        "--public requires an auth token: pass --auth-token or set                          TOKENOS_AUTH_TOKEN (finding 12.1, CWE-306)"
+                        "--public requires an auth token: pass --auth-token or set                          TOKENOS_AUTH_TOKEN"
                     ));
                 }
                 eprintln!(

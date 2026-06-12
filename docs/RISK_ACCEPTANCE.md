@@ -13,6 +13,8 @@ infrastructure outside this checkout.
 | C-01 | Optional native GTK3-family dependency advisories | Removed `tao`/`wry` webview dependencies. The `native` feature now builds a zero-extra-dependency desktop launcher that opens the loopback dashboard in the system browser. `cargo audit` no longer reports the GTK3-family or `glib` advisories. |
 | C-02 | Native HTTPS serving | `tokenos serve` supports `--tls-cert` and `--tls-key` PEM files for direct HTTPS serving. Reverse proxies remain useful for redirects, HSTS policy, WAFs, and centralized logging. |
 | C-03 | Shared API-token request limits | `security.api_token_rate_limit_per_min` enables a SQLite-backed per-token per-minute request ledger. Tokens are stored by SHA-256 hash, so multiple TokenOS processes using the same DB coordinate API request limits. |
+| C-04 | Aggregate API surface telemetry | `/api/stats/api` reports method, normalized path, status, count, average latency, max latency, and last-seen time without storing bodies, auth headers, query strings, or per-request rows. |
+| C-05 | Retired audit/report artifacts | Root-level audit and master-report documents are retired. Production guidance is maintained in `README.md` and `docs/`, especially `PRODUCTION_READINESS.md`, `SECURITY.md`, `DEPLOYMENT.md`, and this register. |
 
 ## External Or Deployment-Specific Items
 
@@ -23,6 +25,8 @@ infrastructure outside this checkout.
 | E-03 | Encryption at rest | Deployment-specific | Use OS disk encryption today, or add SQLCipher/keychain integration if application-level DB encryption is required for the deployment. |
 | E-04 | TLS certificate operations | Deployment-specific | Supply valid PEM files to `--tls-cert`/`--tls-key`, or terminate TLS at a reverse proxy/load balancer. |
 | E-05 | Fleet-wide quota governance across independent hosts/databases | External distributed-systems control | Use one shared TokenOS DB for the built-in per-token request ledger, or deploy an external gateway/rate limiter for fleets with separate databases or regions. |
+| E-06 | Live model IDs, prices, and provider contracts | Provider-controlled | Reconfirm configured model names, price assumptions, rate limits, and API schemas in staging before real production spend. |
+| E-07 | Monitoring, backups, and incident response | Deployment-specific | Add service monitoring, alerting, backup/restore procedures, and incident playbooks for any long-running server deployment. |
 
 ## Release Position
 

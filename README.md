@@ -45,6 +45,7 @@ exercises the entire pipeline offline. See
 | [docs/CLI.md](docs/CLI.md) | Full command and flag reference with workflows |
 | [docs/API.md](docs/API.md) | HTTP API endpoints, shapes, auth, curl cookbook |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, masking, auth, parser safety, ops checklist |
+| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Release gates, component readiness, deployment boundary |
 | [docs/RISK_ACCEPTANCE.md](docs/RISK_ACCEPTANCE.md) | Accepted/external production risks and operator actions |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Ground rules, testing conventions, PR checklist |
@@ -114,53 +115,57 @@ Escalations and ASK terminate locally at **zero LLM cost**.
   consumes context tokens and trace events remain queryable.
 - **Tiered verification** — free static checks (diff shape for PATCH, single-question
   contract for ASK, brace balance, truncation detection) run before anything costs.
-- **UCB1 bandit failover (S19)** — a lock-free multi-armed bandit over the provider
+- **UCB1 bandit failover** — a lock-free multi-armed bandit over the provider
   fleet scales each shadow-priced utility by live observed evidence
   (`0.5 + mean_reward` for explored arms; neutral `1.0` for unexplored arms so
   shadow pricing alone decides and every arm is still explored). Verified
   successes earn latency-discounted reward; transport failures and
   verification failures earn zero. Standings surface in `tokenos telemetry`,
   `/api/stats/bandit`, and the dashboard.
-- **Truncated-JSON rescue (S20)** — when the goal demands JSON, a generation cut
+- **Truncated-JSON rescue** — when the goal demands JSON, a generation cut
   mid-stream (timeout, token limit) is repaired by a single-pass lenient parser
   instead of being discarded: strings cut at EOF keep their partial contents,
   dangling keys are dropped, open containers are closed. A truncation guard
   refuses to "repair" prose that merely starts with a bracket. Every rescue is
   logged to the flight recorder at zero token cost.
-- **Conservative token budgeting (S23)** — routing estimates take the max of the
+- **Conservative token budgeting** — routing estimates take the max of the
   calibrated chars/token heuristic and a greedy longest-match BPE segmenter, so
   a route is never selected on an underestimate.
 - **Delegation packets** — `DELEGATE` routes transmit a minimal JSON contract
   (task, scope, constraints, acceptance, next step) — conclusions only, no
   history, no reasoning.
-- **Edge secret masking (S24)** — outbound prompts are scanned for API keys,
+- **Edge secret masking** — outbound prompts are scanned for API keys,
   tokens, private-key blocks, passwords, connection strings, emails and IPs;
   secrets are replaced with stable placeholders before any network byte leaves
   the process, and echoes are restored on the response leg. The reverse vault
   lives only in the request's stack frame.
-- **Verified solution cache (S25)** — an exact goal+constraints re-request is
+- **Verified solution cache** — an exact goal+constraints re-request is
   served from a durable SQLite cache at **zero tokens**. Only verified
   successes are admitted; a later failure of the same goal evicts the entry.
   Toggle with `policy.reuse_cache`.
-- **Rate-limit circuit breaker (S26)** — a 429 opens a per-provider breaker
+- **Rate-limit circuit breaker** — a 429 opens a per-provider breaker
   with exponential backoff (5s → 120s cap); failover skips the provider while
   the breaker is open. Retrying a provider that just said "stop" is
   almost always wasted work.
-- **Route-scoped output budgets (S27)** — each route caps the output tokens it
+- **Route-scoped output budgets** — each route caps the output tokens it
   may request: an ASK is one question (256), a PATCH is a minimal diff (2048),
   only full builds get the wide ceiling (4096). Paying for headroom a route's
   contract cannot use is pure waste.
-- **Context distillation (S28)** — the context block is distilled before
+- **Context distillation** — the context block is distilled before
   transmission: trailing whitespace stripped, blank-line runs collapsed,
   duplicate index headers dropped (code lines are never deduplicated).
   Deterministic and idempotent, so prompt-cache alignment is preserved.
-- **Budget sentinel (S29)** — `policy.max_cost_per_task_usd` sets a hard
+- **Budget sentinel** — `policy.max_cost_per_task_usd` sets a hard
   per-task ceiling. Over-budget providers are pruned from the chain; if every
   candidate exceeds the ceiling the run terminates locally at zero token cost.
-- **Estimator drift watchdog (S30)** — an EWMA of actual÷estimated token
+- **Estimator drift watchdog** — an EWMA of actual÷estimated token
   ratios per provider flags calibration drift outside the trusted band
   [0.75, 1.30]. Surfaced in `tokenos telemetry`, `/api/stats/drift`, and the
   dashboard's Estimator Calibration panel.
+- **Durable API surface telemetry** — the control plane aggregates method,
+  normalized path, status, count, average latency, and max latency in SQLite.
+  Surfaced at `/api/stats/api` and in the dashboard without storing request
+  bodies, auth headers, or per-request rows.
 
 ## Build
 
@@ -168,7 +173,7 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos
-cargo test                   # 197 unit tests across all subsystems, fully offline
+cargo test                   # 202 unit tests across all subsystems, fully offline
 cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
@@ -286,3 +291,8 @@ ephemeral loopback port and opens it in the system browser:
 3. Diagnostics live in the flight recorder, not in the context window.
 4. Every free check runs before every paid check.
 5. Determinism everywhere: same inputs ⇒ same route, same provider order, same payload bytes.
+
+## License
+
+TokenOS is licensed under the GNU Affero General Public License v3.0 only
+(`AGPL-3.0-only`). See [LICENSE](LICENSE).

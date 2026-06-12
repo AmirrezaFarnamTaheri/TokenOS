@@ -10,6 +10,26 @@ maintains, and where the zero-token boundaries are.
 
 ---
 
+## 0. Design Positioning
+
+TokenOS is an in-process control kernel, not a conversational proxy and not a
+screen automation agent. The kernel keeps routing, context selection,
+verification, loop detection, provider ordering, and telemetry in native Rust
+code so those decisions cost local CPU time instead of provider tokens.
+
+| Axis | Network proxy pattern | TokenOS pattern |
+|---|---|---|
+| Routing state | Middleware request history or provider-side conversation | Local `State`, SQLite telemetry, and deterministic signals |
+| Context control | Raw chat or tool-output forwarding | Symbol-indexed minimum viable context plus distilled payloads |
+| Credential boundary | Proxy transport and logs must be trusted | API keys stay in env vars; prompts are masked before adapter calls |
+| Loop memory | Often process-local only | Loop windows persist in SQLite by stable task scope |
+| Provider choice | Central gateway policy | Local shadow pricing plus process-local UCB1 evidence |
+
+This positioning is intentionally local-first. TokenOS can sit behind a
+reverse proxy, native HTTPS listener, or fleet gateway, but it does not claim
+to replace enterprise identity, certificate operations, provider contract
+testing, or fleet-wide quota governance by itself.
+
 ## 1. High-level dataflow
 
 ```
@@ -205,7 +225,7 @@ Two stores, deliberately separate:
 
 | Store | Contents | Why separate |
 |---|---|---|
-| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, execution telemetry, trace metadata, verified solution cache | Queryable, transactional, survives restarts |
+| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, execution telemetry, HTTP/API request aggregates, trace metadata, verified solution cache | Queryable, transactional, survives restarts |
 | **Flight recorder** (`recorder.rs`) | Decision/prompt/response/rescue/error events (NDJSON journal) + full payload blobs (SHA-256 CAS) | Diagnostics must never compete with state for context tokens |
 
 State is stored as **compressed state objects** (goal, status, blockers,
@@ -224,10 +244,28 @@ source of truth; SQLite is.
 - **Execution backpressure** caps concurrent `/api/run` work at four in-process
   slots. Saturated servers return `429` while keeping dashboard reads and route
   previews available.
+- **Control-plane telemetry** is aggregated after every request as method,
+  normalized path, status, count, average latency, max latency, and last-seen
+  time. Bodies, auth headers, query strings, and per-request rows are not stored.
 - **Adapters map** is behind an `RwLock` only for registration; the read path
   is shared.
 
-## 9. Determinism guarantees
+## 9. Resource And Complexity Boundaries
+
+TokenOS keeps the hot path bounded and inspectable:
+
+| Layer | Runtime shape | Bound |
+|---|---|---|
+| Route signal extraction | Rust `regex` and local heuristics | Linear-time regex engine, zero provider calls |
+| Provider quoting | Candidate scoring and deterministic ordering | `O(P log P)` in the number of configured providers |
+| Context lookup | SQLite FTS5 when available, LIKE fallback otherwise | Result truncated to minimum viable context before prompt build |
+| Context distillation | Single pass over selected context | Drops duplicate index headers and formatting weight only |
+| JSON rescue | Single-pass lenient parser | Runs only for JSON-intent tasks and only accepts full-input repairs |
+| Loop detection | Myers bit-parallel edit distance | Inputs capped at 20,000 chars before comparison |
+| Web execution | Axum handler plus semaphore | Four concurrent `/api/run` executions per process |
+| API telemetry | SQLite aggregate upsert | Stores route aggregates, not request bodies or per-request rows |
+
+## 10. Determinism Guarantees
 
 Same inputs produce:
 
@@ -240,9 +278,10 @@ This is what makes the kernel testable offline: `--dry-run` swaps in the
 fault-injectable mock adapter and the entire pipeline runs deterministically
 with zero network access.
 
-## 10. Where to go next
+## 11. Related Production Docs
 
 - [CONFIGURATION.md](CONFIGURATION.md) — every config field explained
 - [CLI.md](CLI.md) — full command reference
 - [API.md](API.md) — HTTP API reference
 - [SECURITY.md](SECURITY.md) — threat model and hardening details
+- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) — release gates and external-control boundary

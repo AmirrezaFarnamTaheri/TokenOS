@@ -25,8 +25,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Documentation drift guard
         run: |
-          if rg -n "native webview shell|No TLS is served by TokenOS itself|remote serving still needs TLS|no per-token quota ledger exists|Web /api/run has no per-token|Optional native warnings formally documented|formal risk acceptance for the optional native|WebKitGTK for the system webview" README.md docs TOKENOS_DUE_DILIGENCE_AUDIT.md "TokenOS Main Report.txt"; then
-            echo "stale remediation claim found"
+          retired_docs="$(find . -maxdepth 1 -type f \( -name '*DILIGENCE*AUDIT*.md' -o -name '*Main*Report*.txt' \) -print)"
+          if test -n "$retired_docs"; then
+            echo "retired root-level audit/report artifact found"
+            echo "$retired_docs"
+            exit 1
+          fi
+          if rg -n "native webview shell|No TLS is served by TokenOS itself|remote serving still needs TLS|no per-token quota ledger exists|Web /api/run has no per-token|Optional native warnings formally documented|formal risk acceptance for the optional native|WebKitGTK for the system webview" README.md docs; then
+            echo "stale production-readiness claim found"
             exit 1
           fi
       - name: Clippy

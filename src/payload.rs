@@ -57,7 +57,7 @@ pub fn build(route: Route, st: &State) -> String {
     let _ = writeln!(b, "ROUTE: {route}");
     let _ = writeln!(b, "GOAL: {}", st.goal);
     if !st.context.is_empty() {
-        // Evolution S28: the context block is distilled before transmission —
+        // The context block is distilled before transmission:
         // trailing whitespace, blank-line runs and exact duplicate lines are
         // removed. Pure formatting weight never reaches the provider.
         let ctx = distill_context(&st.context);
@@ -112,7 +112,7 @@ fn build_delegation(st: &State) -> String {
     b
 }
 
-/// Evolution S28: context distillation. A purely lossless-in-meaning,
+/// Context distillation. A purely lossless-in-meaning,
 /// lossy-in-bytes pass over the context block:
 ///
 /// 1. trailing whitespace stripped from every line,
@@ -156,7 +156,7 @@ pub fn distill_context(ctx: &str) -> String {
 /// first (structural, lossless); only fall back to conversational-filler
 /// stripping when no fence is present. This ordering prevents destructive
 /// truncation of valid code that legitimately starts with a filler-looking
-/// word (audit finding 12.4).
+/// word.
 pub fn extract_solution(raw: &str) -> String {
     let s = raw.trim();
 
@@ -204,7 +204,7 @@ mod tests {
     use super::*;
     use crate::kernel::State;
 
-    /// Evolution S28: distillation strips trailing whitespace, collapses
+    /// Distillation strips trailing whitespace, collapses
     /// blank-line runs and drops duplicate index headers — but never code.
     #[test]
     fn distill_removes_formatting_weight_only() {
@@ -218,7 +218,7 @@ mod tests {
         assert!(!d.lines().any(|l| l.ends_with(' ')));
     }
 
-    /// Evolution S28: distillation is deterministic and idempotent.
+    /// Distillation is deterministic and idempotent.
     #[test]
     fn distill_is_idempotent() {
         let ctx = "// f.rs:1-2 [fn f]\nbody\n\n\nmore\n";
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(distill_context(&once), once);
     }
 
-    /// Evolution S28: distilled context flows into the built payload.
+    /// Distilled context flows into the built payload.
     #[test]
     fn build_uses_distilled_context() {
         let mut st = State::new("t", "goal");
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn extract_preserves_code_starting_with_filler_word() {
-        // Finding 12.4: fenced code beginning with "Sure" must survive intact.
+        // Fenced code beginning with "Sure" must survive intact.
         let raw = "```sql\nSure_table_name := 'x';\nSELECT 1;\n```";
         let out = extract_solution(raw);
         assert!(out.starts_with("Sure_table_name"));

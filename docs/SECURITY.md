@@ -13,6 +13,12 @@ treats three surfaces as hostile:
 2. **The inbound web API** — anyone who can reach the dashboard port.
 3. **Model output** — unbounded, adversarial-shaped text fed into parsers.
 
+TokenOS deliberately avoids several higher-risk orchestration patterns: it
+does not capture the user's screen, simulate OS input, modify IDE account
+databases, inject browser extensions, or run as a transparent raw-chat proxy.
+Provider calls leave the process only through the adapter layer after local
+routing, payload construction, and secret masking.
+
 ## 1. Secret protection
 
 ### Edge secret masking (`maskcodec`)
@@ -79,6 +85,10 @@ placeholder, the response leg restores the original value. Properties:
   while telemetry and route-preview endpoints remain available.
 - Handlers are lock-free (`Arc<Engine>`, no global mutex) — a slow execution
   cannot be used to starve health/telemetry endpoints.
+- HTTP/API request telemetry is aggregate-only. It stores method, normalized
+  path, status, count, latency summaries, and last-seen time; it does not store
+  request bodies, bearer tokens, authorization headers, query strings, or
+  per-request records.
 
 ## 3. Parser and algorithm safety
 

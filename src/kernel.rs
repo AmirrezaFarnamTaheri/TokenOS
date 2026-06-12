@@ -66,7 +66,7 @@ impl Route {
         self == Route::Ask || self.is_escalation()
     }
 
-    /// Route-scoped output budget (evolution S27): the maximum number of
+    /// Route-scoped output budget: the maximum number of
     /// output tokens a route is allowed to request from a provider. Paying
     /// for more output headroom than the route's contract can use is pure
     /// waste — an ASK is one question, a DIRECT answer is short, a PATCH is
@@ -238,21 +238,21 @@ pub struct RouterPolicy {
     pub direct_max_tokens: usize,
     pub delegation_penalty: f64,
     pub delegation_min_scale: f64,
-    /// Budget sentinel (evolution S29): hard per-task cost ceiling in USD.
+    /// Budget sentinel: hard per-task cost ceiling in USD.
     /// Providers whose shadow-priced estimate exceeds it are excluded from
     /// the failover chain; if EVERY candidate exceeds it the run terminates
     /// locally at zero token cost. 0 disables the sentinel.
     #[serde(default)]
     pub max_cost_per_task_usd: f64,
-    /// Verified solution cache (evolution S25): serve an exact goal +
+    /// Verified solution cache: serve an exact goal +
     /// constraints re-request from the durable cache at zero tokens.
     /// Enabled by default; set false to always re-execute.
     #[serde(default = "default_true")]
     pub reuse_cache: bool,
-    /// Verification command for code tasks (F-12)
+    /// Verification command for code tasks.
     #[serde(default)]
     pub verification_command: String,
-    /// Route-specific verification commands (F-12 / Long-term)
+    /// Route-specific verification commands.
     #[serde(default)]
     pub verification_commands: std::collections::HashMap<String, String>,
 }

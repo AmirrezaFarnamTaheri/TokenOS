@@ -166,7 +166,7 @@ impl Recorder {
         )?)
     }
 
-    /// Deletes trace ndjson journals and object files older than retention_days (F-11).
+    /// Deletes trace ndjson journals and object files older than retention_days.
     pub fn prune_old_traces(&self, retention_days: usize) -> Result<usize> {
         if retention_days == 0 {
             return Ok(0);

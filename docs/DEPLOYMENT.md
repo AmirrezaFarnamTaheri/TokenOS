@@ -2,7 +2,7 @@
 
 This guide describes how to deploy the **TokenOS** local execution kernel securely in a remote or server environment.
 
-By default, TokenOS binds to loopback (`127.0.0.1`) and enforces token-based authentication. For remote access, either run TokenOS with native HTTPS (`--tls-cert` and `--tls-key`) or place it behind a secure reverse proxy such as Nginx/Caddy/Apache with TLS enabled.
+By default, TokenOS binds to loopback (`127.0.0.1`). For remote access, configure a non-empty bearer token and either run TokenOS with native HTTPS (`--tls-cert` and `--tls-key`) or place it behind a secure reverse proxy such as Nginx/Caddy/Apache with TLS enabled.
 
 ---
 
@@ -48,9 +48,9 @@ server {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         
-        # Support websockets for reactive telemetry syncing
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        # /api/run can run for up to 300 seconds server-side.
+        proxy_read_timeout 310s;
+        proxy_send_timeout 310s;
         
         # Standard proxy headers
         proxy_set_header Host $host;
@@ -165,3 +165,5 @@ sudo systemctl status tokenos
 3. **Database and trace permissions**: Standard SQLite and traces are stored in the user profile directory. If running as a system service, ensure `/var/lib/tokenos` is locked down with owner-only access permissions (`chmod 700`).
 4. **Scoped API Tokens**: Instead of sharing the single master/admin CLI token, use the `security.api_tokens` section in `config.yaml` to define granular, scoped credentials (e.g. `read`-only access for dashboards, `run` access for automation/agents, and `admin` for operations).
 5. **Shared API Token Rate Limits**: Set `security.api_token_rate_limit_per_min` to enforce a per-token request ceiling. The ledger is stored in SQLite by token hash, so multiple TokenOS processes using the same DB coordinate the limit.
+6. **Live Provider Staging**: Verify provider model names, prices, schemas, and rate-limit behavior with real credentials in staging before allowing production spend.
+7. **Backups and Retention**: Back up the SQLite database if task state matters operationally. Configure `security.retention_days` to keep trace and telemetry volume aligned with your data-retention policy.

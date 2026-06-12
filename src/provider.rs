@@ -3,7 +3,7 @@
 //! deliberately dumb translators — all intelligence lives in the
 //! orchestration layer.
 //!
-//! Security note (audit finding 12.3): the Gemini adapter sends the API key
+//! Security note: the Gemini adapter sends the API key
 //! in the `X-Goog-Api-Key` request header — never in the URL query string —
 //! so the secret cannot leak into access logs, proxy logs, or referrers.
 
@@ -471,7 +471,7 @@ async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     if req.max_out > 0 {
         body["generationConfig"] = serde_json::json!({"maxOutputTokens": req.max_out});
     }
-    // SECURITY (finding 12.3): API key travels in the X-Goog-Api-Key header,
+    // Security: API key travels in the X-Goog-Api-Key header,
     // NOT the URL query string. URLs are routinely captured by access logs,
     // proxies and tracing systems; headers are not.
     let resp = SHARED_CLIENT

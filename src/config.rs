@@ -142,7 +142,7 @@ impl Default for PricingWeights {
     }
 }
 
-/// Security and retention settings (F-11, F-13).
+/// Security and retention settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityPolicy {
     /// Whether trace recording is disabled

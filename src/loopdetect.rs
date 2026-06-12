@@ -2,8 +2,8 @@
 //! oscillating between near-identical failed attempts are caught
 //! deterministically and escalated, bypassing model confidence entirely.
 //!
-//! The detector window is persisted in SQLite by the store layer (audit
-//! finding 12.2), so loops are detected across cold CLI process invocations.
+//! The detector window is persisted in SQLite by the store layer, so loops
+//! are detected across cold CLI process invocations.
 
 /// Normalized edit-distance below which two failed attempts are considered
 /// "the same attempt" (3%).
@@ -84,8 +84,8 @@ impl Detector {
 /// Levenshtein(a,b) / max(len(a),len(b)), with a size guard: oversized
 /// inputs compare only their leading MAX_COMPARE_CHARS chars.
 ///
-/// Evolution section 22: the inner distance uses Myers' 1999 bit-parallel
-/// algorithm — 64 DP cells advance per machine word per pattern character,
+/// The inner distance uses Myers' 1999 bit-parallel algorithm: 64 DP cells
+/// advance per machine word per pattern character,
 /// turning O(M*N) scalar work into O(ceil(M/64)*N) word operations. The
 /// pattern is the shorter string so the word count is minimal.
 pub fn normalized_distance(a: &str, b: &str) -> f64 {

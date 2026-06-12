@@ -103,9 +103,29 @@ Per-provider health:
 ]
 ```
 
+## GET `/api/stats/api`
+
+Durable HTTP control-plane aggregates. Request bodies, authorization headers,
+query strings, and per-request rows are not stored. High-cardinality paths are
+normalized, for example `/api/traces/:task_id`.
+
+```json
+[
+  {
+    "method": "GET",
+    "path": "/api/summary",
+    "status": 200,
+    "count": 42,
+    "avg_latency_ms": 0.8,
+    "max_latency_ms": 5.1,
+    "last_seen_at": "2026-06-13T12:00:00Z"
+  }
+]
+```
+
 ## GET `/api/stats/bandit`
 
-Live UCB1 bandit standings for the current process (evolution S19). Arms are
+Live UCB1 bandit standings for the current process. Arms are
 ranked by score; an unexplored arm's score is the string `"unexplored"`
 (UCB1 assigns it +∞, which JSON cannot represent).
 
@@ -294,6 +314,7 @@ TOK=s3cret
 B="http://127.0.0.1:8080"
 
 curl -s $B/api/summary -H "Authorization: Bearer $TOK" | jq
+curl -s $B/api/stats/api -H "Authorization: Bearer $TOK" | jq
 curl -s $B/api/stats/bandit -H "Authorization: Bearer $TOK" | jq
 curl -s $B/api/stats/drift -H "Authorization: Bearer $TOK" | jq
 curl -s $B/api/route -H "Authorization: Bearer $TOK" \

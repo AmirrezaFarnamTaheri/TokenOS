@@ -193,10 +193,11 @@ $("#welcomeTry")?.addEventListener("click", () => {
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
   try {
-    const [sum, routes, providers, bandit, drift] = await Promise.all([
+    const [sum, routes, providers, bandit, drift, apiStats] = await Promise.all([
       api("/api/summary"), api("/api/stats/routes"), api("/api/stats/providers"),
       api("/api/stats/bandit").catch(() => null),
       api("/api/stats/drift").catch(() => null),
+      api("/api/stats/api").catch(() => null),
     ]);
     setConn(true);
     const lu = $("#lastUpdated");
@@ -274,6 +275,21 @@ async function loadDashboard() {
           cl.textContent = "";
         }
       }
+    }
+
+    const at = $("#apiStatsTable tbody");
+    if (at) {
+      const rows = apiStats || [];
+      at.innerHTML = rows.length
+        ? rows.slice(0, 8).map((r) => `<tr>
+            <td>${esc(r.method)}</td>
+            <td>${esc(r.path)}</td>
+            <td>${fmtNum(r.status)}</td>
+            <td>${fmtNum(r.count)}</td>
+            <td>${fmtMS(r.avg_latency_ms)}</td>
+            <td>${fmtMS(r.max_latency_ms)}</td>
+          </tr>`).join("")
+        : emptyRow(6, "No API requests recorded yet.");
     }
 
     const max = Math.max(1, ...(routes || []).map((r) => r.runs));

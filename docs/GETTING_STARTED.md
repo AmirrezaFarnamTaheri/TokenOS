@@ -127,4 +127,6 @@ files.
 - [CLI.md](CLI.md) — every command and flag
 - [CONFIGURATION.md](CONFIGURATION.md) — every config field
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how the kernel works inside
+- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) — release gates and deployment boundary
+- [SECURITY.md](SECURITY.md) — safe local and remote operation
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — when something looks wrong

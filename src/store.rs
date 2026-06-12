@@ -3,7 +3,7 @@
 //! window, all in a single embedded SQLite database. State, not
 //! conversations, is stored.
 //!
-//! Audit finding 12.2 remediation: the loop-detector window is persisted in
+//! The loop-detector window is persisted in
 //! the `loop_history` table so semantic loops are detected across cold CLI
 //! process invocations.
 
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS traces (
 );
 CREATE INDEX IF NOT EXISTS idx_traces_task ON traces(task_id);
 
--- Audit finding 12.2: durable loop-detector window. The detector reloads
+-- Durable loop-detector window. The detector reloads
 -- this history on engine start so loops survive cold process restarts.
 CREATE TABLE IF NOT EXISTS loop_history (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS loop_history (
 );
 CREATE INDEX IF NOT EXISTS idx_loop_scope ON loop_history(scope, id);
 
--- Evolution S25: verified solution cache. An exact goal+constraints
+-- Verified solution cache. An exact goal+constraints
 -- re-request is the cheapest possible execution: zero tokens, zero network.
 -- Only VERIFIED successes are admitted; verification failures never poison
 -- the cache.
@@ -176,6 +176,18 @@ CREATE TABLE IF NOT EXISTS api_token_usage (
     count        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (token_hash, scope, window_start)
 );
+
+CREATE TABLE IF NOT EXISTS api_request_stats (
+    method           TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    status           INTEGER NOT NULL,
+    count            INTEGER NOT NULL DEFAULT 0,
+    total_latency_us INTEGER NOT NULL DEFAULT 0,
+    max_latency_us   INTEGER NOT NULL DEFAULT 0,
+    last_seen_at     TEXT NOT NULL,
+    PRIMARY KEY (method, path, status)
+);
+CREATE INDEX IF NOT EXISTS idx_api_request_stats_last_seen ON api_request_stats(last_seen_at);
 "#;
 
 impl Store {
@@ -225,7 +237,7 @@ impl Store {
             }
         }
         conn.execute_batch(SCHEMA).context("migrate schema")?;
-        // Migration for pre-goal_hash databases (finding 12.3): the column
+        // Migration for pre-goal_hash databases: the column
         // addition is idempotent — the error on already-migrated DBs is
         // expected and ignored, then the index creation is retried.
         conn.execute(
@@ -237,19 +249,19 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
             [],
         )?;
-        // Migration to add verification_tier to executions (F-12)
+        // Migration to add verification_tier to executions.
         conn.execute(
             "ALTER TABLE executions ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
             [],
         )
         .ok();
-        // Migration to add verification_tier to solution_cache (F-12)
+        // Migration to add verification_tier to solution_cache.
         conn.execute(
             "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
             [],
         )
         .ok();
-        // Migration to add route and cost_usd to execution_attempts (Medium-term S38.5)
+        // Migration to add route and cost_usd to execution_attempts.
         conn.execute(
             "ALTER TABLE execution_attempts ADD COLUMN route TEXT NOT NULL DEFAULT ''",
             [],
@@ -260,6 +272,23 @@ impl Store {
             [],
         )
         .ok();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS api_request_stats (
+                method           TEXT NOT NULL,
+                path             TEXT NOT NULL,
+                status           INTEGER NOT NULL,
+                count            INTEGER NOT NULL DEFAULT 0,
+                total_latency_us INTEGER NOT NULL DEFAULT 0,
+                max_latency_us   INTEGER NOT NULL DEFAULT 0,
+                last_seen_at     TEXT NOT NULL,
+                PRIMARY KEY (method, path, status)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_api_request_stats_last_seen ON api_request_stats(last_seen_at)",
+            [],
+        )?;
         // Backfill: rows recorded before the goal_hash column existed carry
         // the '' default and are invisible to every goal-keyed read. Their
         // task IDs still join to the tasks table, whose goal text yields the
@@ -361,7 +390,7 @@ impl Store {
     // -----------------------------------------------------------------
 
     /// Stores a failure entry and prunes beyond the kernel cap. `goal_hash`
-    /// is the stable digest of the task text (finding 12.3): failure memory
+    /// is the stable digest of the task text: failure memory
     /// is keyed by WHAT was attempted, not by the random per-run task ID, so
     /// re-submitting the same failing goal is recognized across runs.
     pub fn record_failure(
@@ -436,7 +465,7 @@ impl Store {
     }
 
     /// Whether ANY prior failure exists for this goal digest, regardless of
-    /// which task ID recorded it (finding 12.3 remediation: the old lookup
+    /// which task ID recorded it (the legacy lookup
     /// keyed on the freshly generated task ID and therefore always missed).
     pub fn has_goal_failure(&self, goal_hash: &str) -> Result<bool> {
         if goal_hash.is_empty() {
@@ -495,7 +524,7 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Loop-detector persistence (finding 12.2)
+    // Loop-detector persistence
     // -----------------------------------------------------------------
 
     /// Appends a failed attempt to the durable loop window for a scope (the
@@ -539,7 +568,7 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
-    // Evolution S25: verified solution cache
+    // Verified solution cache
     // -----------------------------------------------------------------
 
     /// Admits a verified output to the solution cache. Idempotent: a repeat
@@ -699,7 +728,7 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Records one specific provider attempt (F-09).
+    /// Records one specific provider attempt.
     #[allow(clippy::too_many_arguments)]
     pub fn record_attempt(
         &self,
@@ -736,7 +765,7 @@ impl Store {
         Ok(())
     }
 
-    /// Queries the aggregate spend over the last N days (F-13).
+    /// Queries the aggregate spend over the last N days.
     pub fn aggregate_spend_usd(&self, days: usize) -> Result<f64> {
         let conn = self.conn.lock().unwrap();
         let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
@@ -775,7 +804,35 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Deletes telemetry records older than retention_days (F-11).
+    /// Aggregates HTTP control-plane requests without storing request bodies,
+    /// authorization headers, query strings, or per-request rows.
+    pub fn record_api_request(
+        &self,
+        method: &str,
+        path: &str,
+        status: u16,
+        latency_us: u128,
+    ) -> Result<()> {
+        let method = method.chars().take(16).collect::<String>();
+        let path = path.chars().take(160).collect::<String>();
+        let latency_us = latency_us.min(i64::MAX as u128) as i64;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"INSERT INTO api_request_stats
+                  (method, path, status, count, total_latency_us, max_latency_us, last_seen_at)
+               VALUES (?1, ?2, ?3, 1, ?4, ?4, ?5)
+               ON CONFLICT(method, path, status) DO UPDATE SET
+                  count = count + 1,
+                  total_latency_us = total_latency_us + excluded.total_latency_us,
+                  max_latency_us = MAX(max_latency_us, excluded.max_latency_us),
+                  last_seen_at = excluded.last_seen_at"#,
+            params![method, path, status as i64, latency_us, now],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes telemetry records older than retention_days.
     pub fn prune_old_records(&self, retention_days: usize) -> Result<usize> {
         if retention_days == 0 {
             return Ok(0);
@@ -809,6 +866,10 @@ impl Store {
             "DELETE FROM api_token_usage WHERE window_start < ?1",
             params![(Utc::now() - chrono::Duration::days(retention_days as i64)).timestamp()],
         )?;
+        let api_stats_deleted = conn.execute(
+            "DELETE FROM api_request_stats WHERE last_seen_at < ?1",
+            params![cutoff],
+        )?;
 
         Ok(execs_deleted
             + failures_deleted
@@ -816,7 +877,8 @@ impl Store {
             + loops_deleted
             + cache_deleted
             + attempts_deleted
-            + api_usage_deleted)
+            + api_usage_deleted
+            + api_stats_deleted)
     }
 
     /// Computes Effective Cost Per Successful Task per route.
@@ -867,6 +929,36 @@ impl Store {
                 success_rate: r.get(3)?,
                 total_cost_usd: r.get(4)?,
                 total_tokens: r.get(5)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn stats_by_api_route(&self, limit: usize) -> Result<Vec<ApiRequestStats>> {
+        let limit = if limit == 0 { 50 } else { limit.min(500) };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT method, path, status, count, total_latency_us, max_latency_us, last_seen_at
+               FROM api_request_stats
+               ORDER BY count DESC, max_latency_us DESC, method ASC, path ASC, status ASC
+               LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            let count = r.get::<_, i64>(3)?.max(0);
+            let total_latency_us = r.get::<_, i64>(4)?.max(0);
+            let max_latency_us = r.get::<_, i64>(5)?.max(0);
+            Ok(ApiRequestStats {
+                method: r.get(0)?,
+                path: r.get(1)?,
+                status: r.get::<_, i64>(2)? as u16,
+                count: count as usize,
+                avg_latency_ms: if count > 0 {
+                    total_latency_us as f64 / count as f64 / 1000.0
+                } else {
+                    0.0
+                },
+                max_latency_ms: max_latency_us as f64 / 1000.0,
+                last_seen_at: r.get(6)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1010,6 +1102,18 @@ pub struct ProviderStats {
     pub total_tokens: i64,
 }
 
+/// Aggregated HTTP control-plane request telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiRequestStats {
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub count: usize,
+    pub avg_latency_ms: f64,
+    pub max_latency_ms: f64,
+    pub last_seen_at: String,
+}
+
 /// Global telemetry headline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Summary {
@@ -1032,7 +1136,7 @@ mod tests {
         Store::open(Some(Path::new(":memory:"))).unwrap()
     }
 
-    /// Evolution S25: cache admit → hit (with counters) → evict → miss.
+    /// Cache admit to hit with counters to evict to miss.
     #[test]
     fn solution_cache_lifecycle() {
         let s = mem();
@@ -1085,7 +1189,7 @@ mod tests {
 
     #[test]
     fn failure_memory_capped_per_goal_across_task_ids() {
-        // Review finding: pruning keyed by task_id let a goal retried under
+        // Pruning keyed by task_id let a goal retried under
         // many task IDs grow without bound. Pruning must cap per goal_hash —
         // the key every read uses.
         let s = mem();
@@ -1161,7 +1265,7 @@ mod tests {
 
     #[test]
     fn goal_failure_memory_crosses_task_ids() {
-        // Finding 12.3: the same goal failed under a DIFFERENT task ID must
+        // The same goal failed under a DIFFERENT task ID must
         // still register as a repeated failure on the next attempt.
         let s = mem();
         s.record_failure("task-aaaa", "gh-goal-1", "execute via mock", "boom")
@@ -1220,6 +1324,32 @@ mod tests {
         assert!((sum.cost_per_success - 0.006).abs() < 1e-9);
         let routes = s.stats_by_route().unwrap();
         assert_eq!(routes[0].runs, 2);
+    }
+
+    #[test]
+    fn api_request_stats_aggregate() {
+        let s = mem();
+        s.record_api_request("GET", "/api/summary", 200, 1_000)
+            .unwrap();
+        s.record_api_request("GET", "/api/summary", 200, 3_000)
+            .unwrap();
+        s.record_api_request("POST", "/api/run", 429, 5_000)
+            .unwrap();
+
+        let stats = s.stats_by_api_route(10).unwrap();
+        let summary = stats
+            .iter()
+            .find(|r| r.method == "GET" && r.path == "/api/summary" && r.status == 200)
+            .unwrap();
+        assert_eq!(summary.count, 2);
+        assert!((summary.avg_latency_ms - 2.0).abs() < 1e-9);
+        assert!((summary.max_latency_ms - 3.0).abs() < 1e-9);
+
+        let run = stats
+            .iter()
+            .find(|r| r.method == "POST" && r.path == "/api/run" && r.status == 429)
+            .unwrap();
+        assert_eq!(run.count, 1);
     }
 
     #[test]

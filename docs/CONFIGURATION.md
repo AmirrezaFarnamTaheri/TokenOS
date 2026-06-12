@@ -38,8 +38,8 @@ policy:
   direct_max_tokens: 600      # estimated tokens at or below this can take DIRECT
   delegation_penalty: 1500    # fixed token-equivalent cost charged to DELEGATE
   delegation_min_scale: 1.5   # savings must exceed penalty * this scale
-  max_cost_per_task_usd: 0    # budget sentinel (S29); 0 = disabled
-  reuse_cache: true           # verified solution cache (S25)
+  max_cost_per_task_usd: 0    # budget sentinel; 0 = disabled
+  reuse_cache: true           # verified solution cache
   verification_command: ""    # global local verification command
   verification_commands:      # route-specific local verification commands
     PATCH: "cargo check"
@@ -52,8 +52,8 @@ policy:
 | `direct_max_tokens` | int | `600` | Ceiling (conservative token estimate) for the `DIRECT` fast path. |
 | `delegation_penalty` | float | `1500` | Fixed overhead (in token-equivalents) any delegation must amortize. |
 | `delegation_min_scale` | float | `1.5` | Estimated savings must exceed `delegation_penalty × delegation_min_scale` before `DELEGATE` is chosen. |
-| `max_cost_per_task_usd` | float | `0` | Budget sentinel (S29): hard per-task USD ceiling. Over-budget providers are pruned from the failover chain; if **every** candidate exceeds it, the run terminates locally at zero token cost. `0` disables. |
-| `reuse_cache` | bool | `true` | Verified solution cache (S25): identical goal+constraints re-requests are served from SQLite at zero tokens. Only verified successes are cached; a later failure of the goal evicts the entry. |
+| `max_cost_per_task_usd` | float | `0` | Budget sentinel: hard per-task USD ceiling. Over-budget providers are pruned from the failover chain; if **every** candidate exceeds it, the run terminates locally at zero token cost. `0` disables. |
+| `reuse_cache` | bool | `true` | Verified solution cache: identical goal+constraints re-requests are served from SQLite at zero tokens. Only verified successes are cached; a later failure of the goal evicts the entry. |
 | `verification_command` | string | `""` | Optional global verification shell command. Runs on successful execution of tasks. |
 | `verification_commands` | map | `{}` | Optional route-specific verification shell commands overrides (keys are route types, e.g. `PATCH` or `IMPLEMENT`). |
 

@@ -204,7 +204,7 @@ pub fn mask_prompt(prompt: &str) -> (String, MaskCodec) {
 
 /// True when text still contains an opaque placeholder emitted by this codec.
 /// Durable caches use this as a replay guard: a placeholder is safe at rest but
-/// not useful as a future user-facing answer because the reverse vault dies at
+/// not useful as a later user-facing answer because the reverse vault dies at
 /// request end.
 pub fn contains_placeholder(text: &str) -> bool {
     text.contains("\u{00AB}SECRET:k")

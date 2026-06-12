@@ -2,7 +2,7 @@
 //! verification, telemetry and flight recording around dumb worker adapters.
 //! The workers are not smart — this layer is.
 //!
-//! Concurrency note (audit finding 12.1): `Engine::run` takes `&self`, so an
+//! Concurrency invariant: `Engine::run` takes `&self`, so an
 //! `Arc<Engine>` can serve many concurrent web/CLI requests without any
 //! coarse global lock. Internal state (adapter cache, pricing tracker,
 //! SQLite handle) is guarded by fine-grained mutexes held only for
@@ -33,12 +33,12 @@ pub struct Engine {
     pub store: Store,
     pub recorder: Recorder,
     pub tracker: Tracker,
-    /// Lock-free UCB1 bandit over the configured provider fleet
-    /// (evolution S19): live success/latency evidence bends the shadow-priced
+    /// Lock-free UCB1 bandit over the configured provider fleet: live
+    /// success/latency evidence bends the shadow-priced
     /// failover order toward arms that actually deliver, with guaranteed
     /// exploration of unpulled arms.
     pub bandit: Ucb1Router,
-    /// Estimator drift watchdog (evolution S30): EWMA of actual/estimated
+    /// Estimator drift watchdog: EWMA of actual/estimated
     /// token ratios per provider. Drift outside the trusted band means every
     /// shadow price is silently degrading — surfaced in telemetry.
     pub drift: DriftWatchdog,
@@ -95,10 +95,10 @@ fn loop_scope(task: &str) -> String {
     hex::encode(Sha256::digest(task.trim().as_bytes()))[..16].to_string()
 }
 
-/// Stable digest of the task text used to key failure memory (finding 12.2):
+/// Stable digest of the task text used to key failure memory:
 /// "have we failed at THIS GOAL before?" must survive the random per-run
 /// task ID, so the key is derived from the goal itself.
-/// Cache key for the verified solution cache (evolution S25): the goal
+/// Cache key for the verified solution cache: the goal
 /// digest extended with the constraint set, so the same goal under different
 /// constraints never collides.
 fn solution_cache_key(task: &str, constraints: &[String]) -> String {
@@ -131,7 +131,7 @@ fn clarifying_question(sig: &Signals) -> String {
 }
 
 /// Best-effort persistence: failures are surfaced on stderr instead of being
-/// silently swallowed (finding 12.3). Used ONLY for telemetry/trace writes —
+/// silently swallowed. Used ONLY for telemetry/trace writes —
 /// task-state transitions are must-succeed and use `?`.
 fn warn_persist<T>(what: &str, r: Result<T>) {
     if let Err(e) = r {
@@ -164,7 +164,7 @@ impl Engine {
             dry_run: opt.dry_run,
             adapters: RwLock::new(HashMap::new()),
         };
-        // Startup pruning of telemetry and traces (F-11)
+        // Startup pruning of telemetry and traces.
         if engine.cfg.security.retention_days > 0 {
             let _ = engine
                 .store
@@ -226,7 +226,7 @@ impl Engine {
 
     /// Deterministic routing without executing (zero cost).
     ///
-    /// Budget estimates use the conservative counter (evolution S23): the
+    /// Budget estimates use the conservative counter: the
     /// max of the calibrated heuristic and the greedy BPE segmenter, so a
     /// route is never selected on an underestimate.
     pub fn route_only(&self, task: &str) -> (Decision, String) {
@@ -301,7 +301,7 @@ impl Engine {
         Ok(sha)
     }
 
-    /// Loads the persisted loop window (finding 12.2) and replays it through
+    /// Loads the persisted loop window and replays it through
     /// a detector: returns (loop already evident, seeded detector, scope).
     fn persisted_loop_detected(&self, task: &str) -> (bool, Detector, String) {
         let scope = loop_scope(task);
@@ -324,7 +324,7 @@ impl Engine {
     pub async fn run(&self, task: &str, constraints: &[String]) -> Result<RunResult> {
         let task_id = new_id();
 
-        // Daily and Monthly spend limits enforcement (F-13)
+        // Enforce configured daily and monthly spend limits before execution.
         if self.cfg.security.daily_spend_limit_usd > 0.0 {
             if let Ok(spend) = self.store.aggregate_spend_usd(1) {
                 if spend >= self.cfg.security.daily_spend_limit_usd {
@@ -353,7 +353,7 @@ impl Engine {
         st.constraints = constraints.to_vec();
         st.context = self.minimum_viable_context(task);
 
-        // Step 3 (finding 12.2): failure memory is keyed by the goal digest,
+        // Failure memory is keyed by the goal digest,
         // not the freshly generated task ID — the old task_id lookup could
         // never hit. Prior failures for the SAME goal text (recorded under
         // any task ID, in any prior process) now correctly set the
@@ -367,7 +367,7 @@ impl Engine {
                 .unwrap_or_default();
         }
 
-        // Step 3b (finding 12.2): durable semantic-loop window. History from
+        // Durable semantic-loop window. History from
         // prior cold processes seeds the detector so oscillation across
         // invocations is caught deterministically.
         let (loop_detected, mut detector, loop_key) = self.persisted_loop_detected(task);
@@ -375,7 +375,7 @@ impl Engine {
         let has_existing_solution = self.replayable_cache_hit(&cache_key);
 
         // Step 4: deterministic routing (zero token cost). Budgeting uses
-        // the conservative counter (evolution S23) so routes never trigger
+        // the conservative counter so routes never trigger
         // on an underestimate.
         let est = tokenizer::count_conservative(task)
             + tokenizer::count_conservative(&st.context)
@@ -413,7 +413,7 @@ impl Engine {
             success: false,
         };
 
-        // Finding 12.3: task-state transitions are MUST-SUCCEED writes. A
+        // Task-state transitions are MUST-SUCCEED writes. A
         // run whose state cannot be persisted is a failed run — silently
         // continuing would desynchronize the durable state machine.
         st.status = Status::Routed;
@@ -457,7 +457,7 @@ impl Engine {
             return Ok(res);
         }
 
-        // Evolution S25: verified solution cache. An exact goal+constraints
+        // Verified solution cache. An exact goal+constraints
         // re-request is served from the durable cache at ZERO tokens — the
         // cheapest possible execution. Only verified successes are admitted
         // (below), so a cache hit is by construction a verified answer.
@@ -501,7 +501,7 @@ impl Engine {
         }
 
         // Step 5: payload serialization (static→dynamic, conclusions only).
-        // Evolution section 24: secrets are masked at the edge BEFORE any
+        // Secrets are masked at the edge BEFORE any
         // network byte leaves the process; the reverse vault lives only in
         // this stack frame and the response leg unmasks echoes.
         let raw_prompt = payload::build(dec.route, &st);
@@ -522,7 +522,7 @@ impl Engine {
         let quotes = self.quote(&chain, sig.confidence, est, est_out);
         res.quotes = quotes.clone();
 
-        // Evolution S29: budget sentinel. A hard per-task cost ceiling —
+        // Budget sentinel. A hard per-task cost ceiling —
         // candidates whose shadow-priced estimate exceeds it are pruned; if
         // EVERY candidate exceeds it the run terminates locally at zero
         // token cost. Spending over an explicit budget is never correct.
@@ -553,7 +553,7 @@ impl Engine {
             return Ok(res);
         }
 
-        // JSON-shaped goals get the lenient rescue pass (evolution S20):
+        // JSON-shaped goals get the lenient rescue pass:
         // a generation cut mid-stream is salvaged instead of discarded.
         let expects_json = task_expects_json(task, constraints);
 
@@ -564,14 +564,14 @@ impl Engine {
         let mut last_err: Option<anyhow::Error> = None;
 
         for prov_name in ordered_providers_banditized(&quotes, &chain, &self.bandit) {
-            // Evolution S29: skip candidates priced over the task budget.
+            // Skip candidates priced over the task budget.
             if over_budget.contains(&prov_name) {
                 last_err = Some(anyhow!(
                     "provider {prov_name} pruned: estimate exceeds the per-task budget"
                 ));
                 continue;
             }
-            // Evolution S26: rate-limit circuit breaker. A provider that
+            // Rate-limit circuit breaker. A provider that
             // recently answered 429 is skipped while its cooldown is open —
             // retrying it is almost always wasted work.
             if self.tracker.in_cooldown(&prov_name) {
@@ -612,7 +612,7 @@ impl Engine {
                     route: dec.route.as_str().to_string(),
                     prompt: prompt.clone(),
                     model: model.clone(),
-                    // Evolution S27: route-scoped output budget — an ASK is
+                    // Route-scoped output budget: an ASK is
                     // one question, a PATCH is a minimal diff; only full
                     // builds get the wide ceiling.
                     max_out: dec.route.max_output_tokens(),
@@ -621,7 +621,7 @@ impl Engine {
                 .await;
             let lat = start.elapsed().as_millis() as i64;
             self.tracker.record(&prov_name, lat as f64, resp.is_ok());
-            // Evolution S26: a 429 opens the provider's circuit breaker with
+            // A 429 opens the provider's circuit breaker with
             // exponential backoff; any non-429 outcome closes it.
             match &resp {
                 Err(crate::provider::ProviderError::RateLimited) => {
@@ -629,7 +629,7 @@ impl Engine {
                 }
                 _ => self.tracker.clear_cooldown(&prov_name),
             }
-            // Feed the bandit (S19): transport failures earn zero reward
+            // Feed the bandit: transport failures earn zero reward
             // immediately; verified successes are credited after the static
             // check below so reward reflects useful output, not just bytes.
             if resp.is_err() {
@@ -670,7 +670,7 @@ impl Engine {
                 }
             };
 
-            // SECURITY INVARIANT (review finding): the masked form —
+            // Security invariant: the masked form —
             // placeholders intact — is the ONLY form that touches durable
             // sinks (flight-recorder blobs, loop history, failure reasons,
             // solution cache). Unmasking happens exactly once, at the very
@@ -678,7 +678,7 @@ impl Engine {
             // on the masked form so persisted artifacts never need secrets.
             let mut out_masked = payload::extract_solution(&resp.text);
 
-            // Evolution S20: when the goal demands JSON, rescue a truncated
+            // When the goal demands JSON, rescue a truncated
             // generation instead of failing verification and burning a
             // failover attempt. The rescuer never invents data — it only
             // closes what the model opened.
@@ -722,7 +722,7 @@ impl Engine {
             );
             res.verified = Some(v.clone());
             if !v.pass {
-                // Unverifiable output earns the arm zero reward (S19).
+                // Unverifiable output earns the arm zero reward.
                 self.bandit.record(&prov_name, false, lat as f64);
                 // Fast local loopback: remember failure, try next provider.
                 let reason = format!("verification failed ({:?}): {:?}", v.tier, v.issues);
@@ -762,7 +762,7 @@ impl Engine {
                     self.record_event(&task_id, "verify", &reason, out_masked.as_bytes()),
                 );
 
-                // Finding 12.2: persist the failed attempt into the durable
+                // Persist the failed attempt into the durable
                 // loop window AND feed the live detector. A mid-run loop hit
                 // aborts the failover ladder — burning more attempts on a
                 // semantically identical output is almost always wasted work.
@@ -806,7 +806,7 @@ impl Engine {
                 continue;
             }
 
-            // Evolution S30: feed the estimator drift watchdog with the
+            // Feed the estimator drift watchdog with the
             // (estimate, actual) pair whenever the provider reports real
             // usage. Drift outside the trusted band is surfaced in telemetry.
             if resp.tokens_in > 0 {
@@ -853,7 +853,7 @@ impl Engine {
                 / 1e6;
             res.success = true;
 
-            // Record successful attempt (F-09)
+            // Record successful provider attempt.
             let _ = self.store.record_attempt(
                 &task_id,
                 &prov_name,
@@ -867,7 +867,7 @@ impl Engine {
                 res.cost_usd,
             );
 
-            // Verified success: credit the bandit arm (S19).
+            // Verified success credits the bandit arm.
             self.bandit.record(&prov_name, true, lat as f64);
 
             // Success clears the durable loop window AND the goal-keyed
@@ -881,8 +881,8 @@ impl Engine {
                 self.store.clear_goal_failures(&goal_key),
             );
 
-            // Evolution S25: admit only replayable VERIFIED output to the
-            // solution cache so an identical future request costs zero tokens.
+            // Admit only replayable VERIFIED output to the
+            // solution cache so a later identical request costs zero tokens.
             // Masked forms are safe at rest; however, a response that still
             // contains an opaque secret placeholder cannot be reconstructed in
             // a later request because the reverse vault is intentionally
@@ -916,7 +916,7 @@ impl Engine {
 
         st.status = Status::Failed;
         self.store.save_task(&mut st)?;
-        // Evolution S25: a failed goal must never serve a stale cached answer
+        // A failed goal must never serve a stale cached answer
         // afterwards — the world has demonstrably changed.
         warn_persist(
             "solution cache evict",
@@ -990,7 +990,7 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    /// Telemetry write: best-effort but never silent (finding 12.3).
+    /// Telemetry write: best-effort but never silent.
     fn record(&self, r: &RunResult, latency_ms: i64) {
         warn_persist(
             "execution telemetry",
@@ -1040,7 +1040,7 @@ fn ordered_providers(quotes: &[PriceQuote], chain: &[String]) -> Vec<String> {
     out
 }
 
-/// Bandit-weighted ordering (evolution S19): each shadow-priced utility is
+/// Bandit-weighted ordering: each shadow-priced utility is
 /// scaled by the arm's exploitation weight (1.0 for unexplored arms — they
 /// keep their shadow-priced position and get explored; [0.5, 1.5] for
 /// explored arms based on observed reward), then re-sorted with the same
@@ -1310,7 +1310,7 @@ mod tests {
     #[tokio::test]
     async fn truncated_json_output_is_rescued() {
         // A mock provider returns JSON cut mid-stream; because the task
-        // demands JSON, the engine must repair it in-process (S20) and the
+        // demands JSON, the engine must repair it in-process and the
         // final output must parse strictly.
         let e = test_engine();
         {
@@ -1344,7 +1344,7 @@ mod tests {
         assert!(reward > 0.0);
     }
 
-    /// Evolution S25: an identical goal+constraints re-request is served
+    /// An identical goal+constraints re-request is served
     /// from the verified solution cache at zero tokens.
     #[tokio::test]
     async fn verified_solution_is_served_from_cache() {
@@ -1369,7 +1369,7 @@ mod tests {
         assert!(entries >= 1 && hits >= 1);
     }
 
-    /// Evolution S25: different constraints must not collide in the cache.
+    /// Different constraints must not collide in the cache.
     #[tokio::test]
     async fn cache_key_distinguishes_constraints() {
         let e = test_engine();
@@ -1386,7 +1386,7 @@ mod tests {
         );
     }
 
-    /// Evolution S25: caching can be disabled by policy.
+    /// Caching can be disabled by policy.
     #[tokio::test]
     async fn cache_respects_policy_toggle() {
         let mut e = test_engine();
@@ -1401,7 +1401,7 @@ mod tests {
         );
     }
 
-    /// Evolution S26: a 429 opens the breaker; failover skips the provider
+    /// A 429 opens the breaker; failover skips the provider
     /// while the cooldown is open; any success closes it.
     #[test]
     fn rate_limit_breaker_opens_and_clears() {
@@ -1413,7 +1413,7 @@ mod tests {
         assert!(!t.in_cooldown("p"), "success must close the breaker");
     }
 
-    /// Evolution S27: output budgets are route-scoped and monotone in the
+    /// Output budgets are route-scoped and monotone in the
     /// route's expected output size.
     #[test]
     fn route_scoped_output_budgets() {
@@ -1428,7 +1428,7 @@ mod tests {
         );
     }
 
-    /// Evolution S29: when every quote exceeds the per-task ceiling the run
+    /// When every quote exceeds the per-task ceiling the run
     /// terminates locally — blocked, zero tokens, sentinel message recorded.
     #[tokio::test]
     async fn budget_sentinel_terminates_locally() {
@@ -1450,7 +1450,7 @@ mod tests {
         assert!(r.provider.is_empty(), "no provider may be contacted");
     }
 
-    /// Evolution S30: the drift watchdog flags a calibration ratio outside
+    /// The drift watchdog flags a calibration ratio outside
     /// the trusted band only after enough samples accumulate.
     #[test]
     fn drift_watchdog_flags_sustained_drift() {
@@ -1479,7 +1479,7 @@ mod tests {
         assert!(all[0].provider < all[1].provider);
     }
 
-    /// Evolution S25 (engine): cache keys are order-sensitive in constraints
+    /// Cache keys are order-sensitive in constraints
     /// and stable across whitespace.
     #[test]
     fn solution_cache_key_properties() {
@@ -1501,7 +1501,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_failure_memory_survives_task_id_churn() {
-        // Finding 12.2: a failure recorded under a random prior task ID must
+        // A failure recorded under a random prior task ID must
         // set repeated_failure when the SAME goal text is submitted again.
         let e = test_engine();
         let task = "implement the flaky widget integration";
@@ -1525,7 +1525,7 @@ mod tests {
     #[tokio::test]
     async fn secrets_in_task_are_masked_outbound() {
         // The flight recorder traces the outbound prompt: verify the secret
-        // never reaches the prompt blob (evolution section 24).
+        // never reaches the prompt blob.
         let e = test_engine();
         let secret = "sk-supersecretapikey1234567890abcd";
         let task = format!("rotate the credential {secret} in the config");
@@ -1553,9 +1553,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_sinks_never_hold_unmasked_secrets() {
-        // Review finding (security): the response leg used to unmask BEFORE
-        // persisting, leaking raw secrets into flight-recorder blobs and the
-        // SQLite loop window / solution cache. Pin the invariant: every
+        // Pin the durable-secret invariant: every
         // durable artifact carries the masked form; only the caller-facing
         // result is unmasked.
         let e = test_engine();

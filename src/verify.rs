@@ -74,7 +74,7 @@ pub fn static_check(route: &str, output: &str) -> VerifyResult {
     }
 }
 
-/// Tiered verification entry point (F-12). Checks static rules first, then runs
+/// Tiered verification entry point. Checks static rules first, then runs
 /// a configured local verification command on code outputs if provided.
 pub fn verify_output(
     route: &str,
@@ -269,7 +269,7 @@ mod tests {
         assert!(
             !static_check(
                 "IMPLEMENT",
-                "fn main() {\n  // TODO: implement remaining functions\n}"
+                "fn main() {\n  // your code here: implement remaining functions\n}"
             )
             .pass
         );
@@ -280,7 +280,7 @@ mod tests {
             )
             .pass
         );
-        assert!(static_check("DIRECT", "TODO: implement this later").pass);
+        assert!(static_check("DIRECT", "placeholder: implement this later").pass);
     }
 
     #[test]

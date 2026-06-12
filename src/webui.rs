@@ -1,9 +1,7 @@
 //! Local observability dashboard + REST control plane.
 //!
-//! Concurrency (audit finding 12.1 remediation): unlike the original Go
-//! server — which held one coarse `sync.Mutex` across every handler,
-//! including 5-minute /api/run network calls — this implementation shares an
-//! `Arc<Engine>` across handlers with NO global lock. Telemetry reads hit
+//! Concurrency model: the server shares one `Arc<Engine>` across handlers with
+//! NO global lock, including 5-minute /api/run network calls. Telemetry reads hit
 //! SQLite through the store's fine-grained connection mutex (microseconds),
 //! and long-running /api/run executions never block dashboard reads.
 
@@ -44,8 +42,8 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(300);
 /// preview stay available even when execution slots are saturated.
 const MAX_CONCURRENT_RUNS: usize = 4;
 
-/// Hard cap on inbound request bodies (finding 12.1: resource-exhaustion
-/// hardening — a task description never legitimately approaches this).
+/// Hard cap on inbound request bodies: a task description never legitimately
+/// approaches this size.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
@@ -146,18 +144,34 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
     }
 }
 
-async fn log_request(req: Request, next: Next) -> Response {
+fn api_metric_path(path: &str) -> String {
+    if path.starts_with("/api/traces/") {
+        "/api/traces/:task_id".to_string()
+    } else if path.starts_with("/api/") || matches!(path, "/" | "/app.js" | "/style.css") {
+        path.to_string()
+    } else {
+        "<unmatched>".to_string()
+    }
+}
+
+async fn log_request(State(state): State<WebState>, req: Request, next: Next) -> Response {
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let path = api_metric_path(req.uri().path());
     let start = std::time::Instant::now();
     let response = next.run(req).await;
     let duration = start.elapsed();
+    let status = response.status();
+    if let Err(e) = state.engine.store.record_api_request(
+        method.as_str(),
+        &path,
+        status.as_u16(),
+        duration.as_micros(),
+    ) {
+        eprintln!("tokenos: WARN: failed to record API request telemetry: {e}");
+    }
     eprintln!(
         "tokenos: INFO: {} {} -> {} ({:?})",
-        method,
-        path,
-        response.status(),
-        duration
+        method, path, status, duration
     );
     response
 }
@@ -199,6 +213,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/summary", get(handle_summary))
         .route("/api/stats/routes", get(handle_route_stats))
         .route("/api/stats/providers", get(handle_provider_stats))
+        .route("/api/stats/api", get(handle_api_stats))
         .route("/api/stats/bandit", get(handle_bandit_stats))
         .route("/api/stats/drift", get(handle_drift_stats))
         .route("/api/executions", get(handle_executions))
@@ -212,7 +227,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
             require_bearer,
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(state);
+        .with_state(state.clone());
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
@@ -225,7 +240,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         )
         .merge(api)
         .layer(tower_http::catch_panic::CatchPanicLayer::new())
-        .layer(middleware::from_fn(log_request))
+        .layer(middleware::from_fn_with_state(state.clone(), log_request))
         .layer(middleware::from_fn(add_security_headers))
 }
 
@@ -426,7 +441,15 @@ async fn handle_provider_stats(State(state): State<WebState>) -> Response {
     }
 }
 
-/// Live UCB1 bandit standings (evolution S19): per-arm pulls, mean reward,
+async fn handle_api_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
+    match eng.store.stats_by_api_route(100) {
+        Ok(s) => ok_json(s),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Live UCB1 bandit standings: per-arm pulls, mean reward,
 /// mean latency and current UCB1 score. Lock-free read path.
 async fn handle_bandit_stats(State(state): State<WebState>) -> Response {
     let eng = state.engine;
@@ -448,9 +471,8 @@ async fn handle_bandit_stats(State(state): State<WebState>) -> Response {
     ok_json(json!({ "exploration": eng.bandit.exploration, "arms": arms }))
 }
 
-/// Estimator drift watchdog (evolution S30): per-provider EWMA of
-/// actual/estimated input-token ratios plus the solution-cache counters
-/// (evolution S25).
+/// Estimator drift watchdog: per-provider EWMA of actual/estimated
+/// input-token ratios plus the solution-cache counters.
 async fn handle_drift_stats(State(state): State<WebState>) -> Response {
     let eng = state.engine;
     let (cache_entries, test_verified, cache_hits) =
@@ -756,6 +778,32 @@ mod tests {
         // as an invalid JSON infinity.
         let unexplored = arms.iter().find(|a| a["provider"] != "mock").unwrap();
         assert_eq!(unexplored["ucb1_score"], "unexplored");
+    }
+
+    #[tokio::test]
+    async fn api_stats_endpoint_reports_requests() {
+        let engine = test_engine();
+        let app = router(engine.clone());
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/summary").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(Request::get("/api/stats/api").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = v.as_array().unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r["method"] == "GET" && r["path"] == "/api/summary"));
     }
 
     #[tokio::test]

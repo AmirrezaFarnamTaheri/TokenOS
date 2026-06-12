@@ -61,7 +61,7 @@ struct Health {
     ewma_latency_ms: f64,
     fail_ewma: f64, // 0..1
     calls: Vec<Instant>,
-    /// Evolution S26: rate-limit circuit breaker. A 429 opens the breaker
+    /// Rate-limit circuit breaker. A 429 opens the breaker
     /// until this instant; while open the provider is skipped in failover
     /// because retrying a recent 429 is almost always wasted work.
     cooldown_until: Option<Instant>,
@@ -119,7 +119,7 @@ impl Tracker {
     }
 
     // -----------------------------------------------------------------
-    // Evolution S26: rate-limit circuit breaker
+    // Rate-limit circuit breaker
     // -----------------------------------------------------------------
 
     /// Base cooldown applied on the first 429; doubles per consecutive 429
@@ -395,7 +395,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Evolution S30: estimator drift watchdog.
+// Estimator drift watchdog.
 //
 // The offline tokenizer estimates what the provider eventually bills. If the
 // estimator drifts (new model tokenizer, unusual content mix), every shadow
@@ -424,7 +424,7 @@ pub struct DriftStatus {
     pub drifting: bool,
 }
 
-/// Lock-free estimator drift watchdog (evolution S30).
+/// Lock-free estimator drift watchdog.
 #[derive(Debug, Default)]
 pub struct DriftWatchdog {
     state: Mutex<HashMap<String, (f64, u64)>>, // provider -> (ewma, samples)
