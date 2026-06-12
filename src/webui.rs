@@ -83,6 +83,28 @@ async fn require_bearer(State(auth): State<AuthToken>, req: Request, next: Next)
     }
 }
 
+async fn add_security_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none';"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
 pub fn router(engine: Arc<Engine>) -> Router {
     router_with_auth(engine, None)
 }
@@ -122,6 +144,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
             get(|| async { asset(STYLE_CSS, "text/css; charset=utf-8") }),
         )
         .merge(api)
+        .layer(middleware::from_fn(add_security_headers))
 }
 
 /// Serves the dashboard on addr until the process exits.
@@ -399,6 +422,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-security-policy").unwrap(),
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none';"
+        );
+        assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(
+            resp.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            resp.headers().get("referrer-policy").unwrap(),
+            "no-referrer"
+        );
     }
 
     #[tokio::test]
@@ -537,5 +573,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_run_concurrency_limiter_blocks_excess_requests() {
+        let engine = test_engine();
+        let state = WebState {
+            engine,
+            run_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_RUNS)),
+        };
+
+        // Acquire 4 permits to fully saturate the semaphore
+        let p1 = state.run_limiter.clone().acquire_owned().await.unwrap();
+        let p2 = state.run_limiter.clone().acquire_owned().await.unwrap();
+        let p3 = state.run_limiter.clone().acquire_owned().await.unwrap();
+        let p4 = state.run_limiter.clone().acquire_owned().await.unwrap();
+
+        // 5th request should fail with 429 TOO_MANY_REQUESTS
+        let body = Ok(axum::Json(TaskRequest {
+            task: "test concurrency limit".to_string(),
+            constraints: vec![],
+        }));
+        let resp = handle_run(axum::extract::State(state.clone()), body).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Release one permit
+        drop(p1);
+
+        // 6th request should now pass and return StatusCode::OK
+        let body2 = Ok(axum::Json(TaskRequest {
+            task: "test concurrency limit".to_string(),
+            constraints: vec![],
+        }));
+        let resp2 = handle_run(axum::extract::State(state), body2).await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Suppress unused warning on permits
+        drop(p2);
+        drop(p3);
+        drop(p4);
     }
 }

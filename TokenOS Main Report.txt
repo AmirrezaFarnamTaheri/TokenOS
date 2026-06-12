@@ -99,7 +99,7 @@ Following a rigorous source audit and verification pass, the core TokenOS codeba
  
 - The default release build succeeds on Windows after installing Rust 1.96.0.
 - The optional `native` feature also builds successfully on Windows.
-- `cargo test --locked` passes: 191 tests passed, 0 failed.
+- `cargo test --locked` passes: 192 tests passed, 0 failed.
 - `cargo fmt --all -- --check` passes.
 - `cargo clippy --all-targets -- -D warnings` passes.
 - The default configuration is offline-capable through the mock provider.
@@ -4227,7 +4227,7 @@ Baseline: docs were extensive but contained multiple drift points, and a large u
 
 **Evidence**  
 Baseline evidence: README said 177 tests while local test count was 180; README implied zero-warning gates while fmt/clippy failed; `git status --short` reported `?? "TokenOS Main Report.txt"`.  
-Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 191 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, and cache replay guards. `TokenOS Main Report.txt` is now fully tracked, integrated, and polished.
+Remediation evidence: README, architecture, security, API, CLI, configuration, getting-started, troubleshooting, contributing, and this report were updated to reflect 192 tests, active CI, ASK/REUSE semantics, browser auth, run backpressure, trace indexing, and cache replay guards. `TokenOS Main Report.txt` is now fully tracked, integrated, and polished.
 
 **Root Cause**  
 Documentation drift came from manual updates without active CI. CI is now active for code quality, and documentation is kept in sync with the codebase state.
@@ -4315,7 +4315,7 @@ Checks:
 ```text
 cargo test --locked
 EXIT=0
-191 passed; 0 failed
+192 passed; 0 failed
 
 cargo build --release --locked
 EXIT=0
