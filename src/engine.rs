@@ -166,6 +166,16 @@ impl Engine {
                 .recorder
                 .prune_old_traces(engine.cfg.security.retention_days);
         }
+
+        // Backfill bandit routing observations from execution history to make decisions durable (durable bandit storage)
+        if let Ok(execs) = engine.store.list_executions(1000) {
+            for exec in execs {
+                engine
+                    .bandit
+                    .record(&exec.provider, exec.success, exec.latency_ms as f64);
+            }
+        }
+
         Ok(engine)
     }
 
