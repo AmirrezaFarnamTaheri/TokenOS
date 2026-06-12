@@ -1,0 +1,143 @@
+# TokenOS Production Deployment Guide
+
+This guide describes how to deploy the **TokenOS** local execution kernel securely in a remote or server environment. 
+
+By default, TokenOS binds to loopback (`127.0.0.1`) and enforces token-based authentication. For remote access, it is highly recommended to place TokenOS behind a secure reverse proxy (e.g. Nginx) with TLS/HTTPS enabled, rather than exposing the raw TokenOS binding directly to the network.
+
+---
+
+## 1. Nginx Reverse Proxy with TLS Configuration
+
+Below is a template Nginx configuration. It terminates TLS (HTTPS), forwards requests to the local TokenOS daemon, and enforces security headers.
+
+Create a site configuration file (e.g., `/etc/nginx/sites-available/tokenos`) with the following content:
+
+```nginx
+server {
+    listen 80;
+    server_name tokenos.example.com;
+    
+    # Redirect all HTTP traffic to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name tokenos.example.com;
+
+    # SSL Certificate Paths (managed by Let's Encrypt / Certbot)
+    ssl_certificate /etc/letsencrypt/live/tokenos.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tokenos.example.com/privkey.pem;
+
+    # Harden SSL configurations
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
+
+    # Security Headers (Axum adds these natively, but Nginx reinforces them)
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+
+    # Max body payload limit matching TokenOS backend limit (e.g. 10MB)
+    client_max_body_size 10M;
+
+    # Location blocks for TokenOS Web UI and REST API
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        
+        # Support websockets for reactive telemetry syncing
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Standard proxy headers
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Enable the configuration and reload Nginx:
+```bash
+sudo ln -s /etc/nginx/sites-available/tokenos /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+---
+
+## 2. Systemd Service Configuration
+
+To run the TokenOS dashboard as a persistent background service daemon on Linux, use systemd.
+
+Create a systemd unit file at `/etc/systemd/system/tokenos.service`:
+
+```ini
+[Unit]
+Description=TokenOS Orchestration Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=tokenos
+Group=tokenos
+WorkingDirectory=/var/lib/tokenos
+
+# Load configuration and secrets from environment variables file
+EnvironmentFile=/etc/tokenos/tokenos.env
+
+# Execute tokenos server binding only to localhost
+ExecStart=/usr/local/bin/tokenos serve --host 127.0.0.1 --port 3000 --token ${TOKENOS_AUTH_TOKEN}
+
+Restart=always
+RestartSec=5
+
+# Restrict permissions
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tokenos
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Create the system user and configuration directories:
+```bash
+sudo useradd -r -s /bin/false tokenos
+sudo mkdir -p /var/lib/tokenos /etc/tokenos
+sudo chown -R tokenos:tokenos /var/lib/tokenos
+```
+
+Create `/etc/tokenos/tokenos.env` with your authentication token and provider secrets:
+```ini
+TOKENOS_AUTH_TOKEN=your-super-secure-token-here
+# Optional provider credentials (example)
+OPENAI_API_KEY=sk-proj-xxxx
+ANTHROPIC_API_KEY=sk-ant-xxxx
+```
+
+Set secure permissions on the environment file:
+```bash
+sudo chown tokenos:tokenos /etc/tokenos/tokenos.env
+sudo chmod 600 /etc/tokenos/tokenos.env
+```
+
+Start and enable the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now tokenos
+sudo systemctl status tokenos
+```
+
+---
+
+## 3. Remote Serving Best Practices
+
+1. **Never Bind Publicly Without Auth**: If you bind the service directly (e.g. `serve --host 0.0.0.0`), you **must** supply a non-empty bearer token (via `--token`) otherwise the server will refuse to start.
+2. **Reverse Proxy TLS Enforced**: Always proxy remote traffic through TLS (port 443) using Nginx, Apache, or Caddy. Transmitting bearer tokens or API execution payloads over plain HTTP exposes them to eavesdropping.
+3. **Database and trace permissions**: Standard SQLite and traces are stored in the user profile directory. If running as a system service, ensure `/var/lib/tokenos` is locked down with owner-only access permissions (`chmod 700`).
