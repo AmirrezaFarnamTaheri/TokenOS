@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "codex/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Format, lint, audit, build, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Dependency audit
+        run: cargo audit
+      - name: Build
+        run: cargo build --release --locked
+      - name: Test
+        run: cargo test --release --locked
+
+  native:
+    name: Native app (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: tokenos-linux
+            binary: target/release/tokenos
+          - os: macos-latest
+            artifact: tokenos-macos
+            binary: target/release/tokenos
+          - os: windows-latest
+            artifact: tokenos-windows
+            binary: target/release/tokenos.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.os }}
+      - name: Install WebKitGTK (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+      - name: Build native app
+        run: cargo build --release --locked --features native
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
+        run: ./${{ matrix.binary }} --version
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: .\target\release\tokenos.exe --version
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ runner.arch }}
+          path: ${{ matrix.binary }}
+          retention-days: 14
+
+  release:
+    name: Attach release binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Package
+        run: |
+          cd dist
+          for d in */; do
+            name="${d%/}"
+            (cd "$d" && tar -czf "../${name}.tar.gz" .)
+          done
+          ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
