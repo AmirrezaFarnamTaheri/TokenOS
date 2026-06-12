@@ -120,11 +120,13 @@ CREATE TABLE IF NOT EXISTS execution_attempts (
     task_id       TEXT NOT NULL,
     provider      TEXT NOT NULL,
     model         TEXT NOT NULL,
+    route         TEXT NOT NULL DEFAULT '',
     tokens_in     INTEGER NOT NULL DEFAULT 0,
     tokens_out    INTEGER NOT NULL DEFAULT 0,
     latency_ms    INTEGER NOT NULL DEFAULT 0,
     success       INTEGER NOT NULL DEFAULT 0,
     error_message TEXT NOT NULL DEFAULT '',
+    cost_usd      REAL NOT NULL DEFAULT 0.0,
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_exec_att_task ON execution_attempts(task_id);
@@ -182,6 +184,17 @@ impl Store {
         // Migration to add verification_tier to solution_cache (F-12)
         conn.execute(
             "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
+            [],
+        )
+        .ok();
+        // Migration to add route and cost_usd to execution_attempts (Medium-term S38.5)
+        conn.execute(
+            "ALTER TABLE execution_attempts ADD COLUMN route TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "ALTER TABLE execution_attempts ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0.0",
             [],
         )
         .ok();
@@ -626,26 +639,30 @@ impl Store {
         task_id: &str,
         provider: &str,
         model: &str,
+        route: &str,
         tokens_in: usize,
         tokens_out: usize,
         latency_ms: i64,
         success: bool,
         error_message: &str,
+        cost_usd: f64,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            r#"INSERT INTO execution_attempts (task_id, provider, model, tokens_in, tokens_out,
-                latency_ms, success, error_message, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"#,
+            r#"INSERT INTO execution_attempts (task_id, provider, model, route, tokens_in, tokens_out,
+                latency_ms, success, error_message, cost_usd, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"#,
             params![
                 task_id,
                 provider,
                 model,
+                route,
                 tokens_in as i64,
                 tokens_out as i64,
                 latency_ms,
                 if success { 1 } else { 0 },
                 error_message,
+                cost_usd,
                 Utc::now().to_rfc3339(),
             ],
         )?;

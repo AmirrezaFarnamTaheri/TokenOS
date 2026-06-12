@@ -633,11 +633,13 @@ impl Engine {
                         &task_id,
                         &prov_name,
                         &model,
+                        dec.route.as_str(),
                         0,
                         0,
                         lat,
                         false,
                         &e.to_string(),
+                        0.0,
                     );
                     warn_persist(
                         "failure memory",
@@ -709,15 +711,26 @@ impl Engine {
                 self.bandit.record(&prov_name, false, lat as f64);
                 // Fast local loopback: remember failure, try next provider.
                 let reason = format!("verification failed ({:?}): {:?}", v.tier, v.issues);
+                let p_cfg = self
+                    .cfg
+                    .providers
+                    .get(&prov_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let cost_usd = (resp.tokens_in as f64 * p_cfg.cost_per_mtok_in
+                    + resp.tokens_out as f64 * p_cfg.cost_per_mtok_out)
+                    / 1e6;
                 let _ = self.store.record_attempt(
                     &task_id,
                     &prov_name,
                     &resp.model,
+                    dec.route.as_str(),
                     resp.tokens_in as usize,
                     resp.tokens_out as usize,
                     lat,
                     false,
                     &reason,
+                    cost_usd,
                 );
                 st.remember_failure(&format!("output from {}", prov_name), &reason);
                 warn_persist(
@@ -748,15 +761,26 @@ impl Engine {
                     res.retries += 1;
                     let loop_msg =
                         "semantic execution loop detected (edit-distance ceiling) — escalating";
+                    let p_cfg = self
+                        .cfg
+                        .providers
+                        .get(&prov_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let cost_usd = (resp.tokens_in as f64 * p_cfg.cost_per_mtok_in
+                        + resp.tokens_out as f64 * p_cfg.cost_per_mtok_out)
+                        / 1e6;
                     let _ = self.store.record_attempt(
                         &task_id,
                         &prov_name,
                         &resp.model,
+                        dec.route.as_str(),
                         resp.tokens_in as usize,
                         resp.tokens_out as usize,
                         lat,
                         false,
                         loop_msg,
+                        cost_usd,
                     );
                     last_err = Some(anyhow!(loop_msg));
                     break;
@@ -819,11 +843,13 @@ impl Engine {
                 &task_id,
                 &prov_name,
                 &resp.model,
+                dec.route.as_str(),
                 tokens_in as usize,
                 tokens_out as usize,
                 lat,
                 true,
                 "",
+                res.cost_usd,
             );
 
             // Verified success: credit the bandit arm (S19).
