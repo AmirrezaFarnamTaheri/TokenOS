@@ -10,13 +10,13 @@ Out of scope: live provider API compatibility, cloud deployment posture, GitHub 
 
 ## 1. Executive Summary
 
-TokenOS is a compact Rust codebase implementing a local "execution kernel" for LLM-driven agent tasks. It is not a distributed platform in its current form. The actual system is a single Rust library plus CLI binary, an embedded Axum web control plane, an optional native webview shell, embedded static frontend assets, local SQLite persistence, and local content-addressed trace files.
+TokenOS is a compact Rust codebase implementing a local "execution kernel" for LLM-driven agent tasks. It is not a distributed platform in its current form. The actual system is a single Rust library plus CLI binary, an embedded Axum web control plane, an optional desktop browser launcher, embedded static frontend assets, local SQLite persistence, and local content-addressed trace files.
 
 The project has several strong foundations and, after this refinement pass, several former P0/P1 gaps are remediated in code and documentation:
 
 - The default release build succeeds on Windows after installing Rust 1.96.0.
 - The optional `native` feature also builds successfully on Windows.
-- `cargo test --locked` passes: 197 tests passed, 0 failed.
+- `cargo test --locked` passes: 200 tests passed, 0 failed.
 - `cargo fmt --all -- --check` passes.
 - `cargo clippy --all-targets -- -D warnings` passes.
 - The default configuration is offline-capable through the mock provider.
@@ -36,10 +36,10 @@ The project has several strong foundations and, after this refinement pass, seve
 
 The most decision-relevant residual issues are now narrower:
 
-- **Native supply-chain warnings remain:** `cargo audit` reports 11 unmaintained GTK3-family crates and 1 unsound `glib` advisory in the lockfile, primarily pulled through optional native GUI dependencies; this is formally risk-accepted for the optional `native` feature in `docs/RISK_ACCEPTANCE.md`.
-- **Remote/multi-user serving remains limited:** `/api/run` has process-local concurrency, timeout, body-size, bearer-auth, scoped-token, and spend guardrails, but no native TLS or distributed rate limiter. `docs/RISK_ACCEPTANCE.md` documents the required external controls.
+- **Native supply-chain warnings closed locally:** the optional `native` feature no longer pulls `tao`/`wry` or GTK3-family webview dependencies. It builds a desktop browser launcher over the same loopback dashboard, and `cargo audit` no longer reports the prior native advisory warnings.
+- **Remote/multi-user serving is stronger but still deployment-scoped:** `/api/run` has process-local concurrency, timeout, body-size, bearer-auth, scoped-token, spend guardrails, native HTTPS support, and a SQLite-backed per-token API request ledger for processes sharing one DB. Independent hosts/databases still need external fleet-level quota governance.
 
-Executive verdict: TokenOS is materially stronger after remediation. The former P0 routing defects, inactive CI, fmt/clippy failures, browser-auth gap, trace-index gap, verification-tier gap, first-class attempt telemetry gap, trace-governance gap, and `/api/run` backpressure/spend gap are closed and covered by tests or smoke checks. It is now credible as a local-first, single-user execution kernel with strong deterministic controls. It should still not be marketed as a native multi-tenant cloud service without TLS termination, distributed quotas/rate limits, hosted branch-protection verification, and formal acceptance of optional native dependency advisories.
+Executive verdict: TokenOS is materially stronger after remediation. The former P0 routing defects, inactive CI, fmt/clippy failures, browser-auth gap, trace-index gap, verification-tier gap, first-class attempt telemetry gap, trace-governance gap, `/api/run` backpressure/spend gap, native GTK advisory path, and missing native TLS/per-token API rate ledger are closed and covered by tests or smoke checks. It is now credible as a local-first execution kernel with strong deterministic controls. It should still not be marketed as a fully governed multi-tenant cloud service without hosted branch-protection verification, live provider validation, certificate operations, encryption-at-rest decisions, and fleet-level quota governance for independent hosts/databases.
 
 ## 2. System Overview
 
@@ -65,7 +65,7 @@ The primary runtime boundary is local:
 
 - CLI process invokes `Engine::run`.
 - Web server invokes the same `Engine` through Axum handlers.
-- Native app wraps the same web UI with a webview over loopback.
+- Native app opens the same web UI in the system browser over loopback.
 - Provider adapters make outbound HTTPS calls only when non-mock providers are enabled and selected.
 - SQLite and recorder files are local process-owned artifacts.
 
@@ -75,7 +75,7 @@ The primary runtime boundary is local:
 - `src/lib.rs:10-26` publicly exports all modules.
 - `src/main.rs:48-141` defines the CLI subcommands.
 - `src/webui.rs:85-114` builds the embedded static web/API router.
-- `src/nativeapp.rs:25-61` launches a native webview over an ephemeral loopback server.
+- `src/nativeapp.rs` launches the dashboard on an ephemeral loopback server and opens it in the system browser.
 - `src/store.rs:36-110` defines SQLite tables.
 - `src/recorder.rs:48-94` writes local trace journals and blobs.
 
@@ -118,7 +118,7 @@ Runtime is process-local:
 - Bandit: atomic counters and atomic f64 wrappers.
 - Web handlers: shared `Arc<Engine>` plus process-local `/api/run` semaphore.
 
-Concurrency is generally scoped well: no global web handler lock is held across network calls, and `/api/run` is now capped by a process-local semaphore. SQLite and filesystem operations remain synchronous inside async handlers. Server-side daily/monthly spend limits and scoped API tokens exist; distributed rate limiting and multi-process quota coordination remain out of scope.
+Concurrency is generally scoped well: no global web handler lock is held across network calls, and `/api/run` is now capped by a process-local semaphore. SQLite and filesystem operations remain synchronous inside async handlers. Server-side daily/monthly spend limits, scoped API tokens, native HTTPS, and a shared-DB per-token API request ledger exist. Fleet-wide quota governance across independent databases/hosts remains deployment-level work.
 
 ### Deployment Architecture
 
@@ -128,7 +128,7 @@ Current deployment options:
 - Local web dashboard via `tokenos serve`.
 - Optional native shell via `cargo build --release --features native` and `tokenos app`.
 
-CI/release architecture is active under `.github/workflows/ci.yml`; it runs on `main`, `development`, `feat/**`, `fix/**`, and `codex/**` pushes plus PRs into `main` or `development`. Local verification confirms the same fmt, clippy, test, audit, and build gates are currently clean except for known informational native dependency warnings from `cargo audit`.
+CI/release architecture is active under `.github/workflows/ci.yml`; it runs on `main`, `development`, `feat/**`, `fix/**`, and `codex/**` pushes plus PRs into `main` or `development`. Local verification confirms the same fmt, clippy, test, audit, and build gates are currently clean.
 
 ## 4. Component Inventory
 
@@ -149,15 +149,15 @@ CI/release architecture is active under `.github/workflows/ci.yml`; it runs on `
 | `src/contextidx.rs` | Symbol extraction and SQLite FTS/LIKE search | Core maintainer inferred | `rusqlite`, `walkdir`, `regex` | Search quality affects prompt relevance; no semantic code understanding | Medium | Critical |
 | `src/store.rs` | SQLite persistence | Core maintainer inferred | `rusqlite`, `serde_json` | No encryption; retention and Unix owner-only permissions are implemented | Medium | Critical |
 | `src/recorder.rs` | File-based trace journals and CAS blobs | Core maintainer inferred | filesystem, SHA-256 | Sensitive business content at rest; retention and Unix owner-only permissions are implemented | Medium | High |
-| `src/webui.rs` | Axum API and embedded assets | Core maintainer inferred | `axum`, `tokio` | No native TLS; security headers and process-local backpressure are implemented | Medium | High |
-| `src/nativeapp.rs` | Optional desktop shell | Core maintainer inferred | `tao`, `wry` | Optional dependency warnings; platform-specific runtime risk | Low-Medium | Medium |
+| `src/webui.rs` | Axum API and embedded assets | Core maintainer inferred | `axum`, `tokio`, `hyper`, `tokio-rustls` | Native TLS, security headers, shared API-token ledger, and process-local backpressure are implemented | Medium | High |
+| `src/nativeapp.rs` | Optional desktop launcher | Core maintainer inferred | standard library process launcher | Opens loopback dashboard in system browser; no webview dependency chain | Low | Medium |
 | `static/app.js` | Dashboard behavior | Core maintainer inferred | Browser APIs only | In-memory/session token handling; XSS mostly mitigated via escaping | Medium | Medium |
 | `static/index.html` | Dashboard shell | Core maintainer inferred | `app.js`, `style.css` | Help text can drift from engine semantics | Medium | Medium |
 | `static/style.css` | Dashboard styling | Core maintainer inferred | none | Low technical risk | Medium | Low |
 | `docs/*.md` | User/operator docs | Core maintainer inferred | Code behavior | Drift risk reduced but ongoing governance needed | Medium | High |
 | `.github/workflows/ci.yml` | Active CI/release | Core maintainer inferred | GitHub Actions | Hosted branch protection still requires authenticated GitHub verification | Medium | Critical |
-| `Cargo.toml` | Build manifest | Core maintainer inferred | Rust toolchain | Optional GUI dependencies widen lockfile | Medium | Critical |
-| `Cargo.lock` | Locked dependency graph | Core maintainer inferred | crates.io | 409 deps per cargo audit lockfile summary | Medium | Critical |
+| `Cargo.toml` | Build manifest | Core maintainer inferred | Rust toolchain | Native feature avoids embedded GUI/webview dependency chain | Medium | Critical |
+| `Cargo.lock` | Locked dependency graph | Core maintainer inferred | crates.io | 240 deps per cargo audit lockfile summary | Medium | Critical |
 | `TokenOS Main Report.txt` | Untracked large report-like artifact | Unknown | Unknown | Not in git; may confuse evidence provenance | Unknown | Low-Medium |
 
 ## 5. Workflow Analysis
@@ -287,12 +287,11 @@ Current status: trace indexing and first-class execution-attempt telemetry are r
 | `rusqlite` with `bundled` | SQLite persistence | Bundled C build increases build complexity but reduces system skew |
 | `reqwest` with `rustls-tls`, `http2` | Provider HTTP | Good TLS default; live compatibility unverified |
 | `tokio` | Async runtime | Normal |
-| `axum`, `tower-http` | Web API | `tower-http` timeout feature present but run timeout implemented via `tokio::time::timeout` |
+| `axum`, `hyper`, `hyper-util`, `tokio-rustls`, `tower-http` | Web API and native HTTPS | `tower-http` timeout feature present but run timeout implemented via `tokio::time::timeout`; native TLS is served through Hyper over Rustls with local PEM parsing |
 | `sha2`, `hex` | Hashing IDs/blobs/cache keys | Normal |
 | `regex`, `once_cell` | Heuristics and masking patterns | Rust regex avoids catastrophic backtracking |
 | `rand` | Task IDs | 64-bit IDs; collision risk low for local usage |
 | `chrono`, `dirs`, `walkdir` | Time, paths, indexing | Normal |
-| `tao`, `wry` optional | Native desktop shell | Pulls GUI dependency warnings in lockfile |
 | `tower` dev | Web tests | Normal |
 
 ### Lockfile and Audit Evidence
@@ -307,13 +306,11 @@ Summary:
 
 - `vulnerabilities.found`: false
 - `vulnerabilities.count`: 0
-- `lockfile.dependency-count`: 409
-- advisory database last updated: 2026-06-11 17:21:36 -0700
-- warnings:
-  - 11 unmaintained packages: `atk`, `atk-sys`, `gdk`, `gdk-sys`, `gdkwayland-sys`, `gdkx11`, `gdkx11-sys`, `gtk`, `gtk-sys`, `gtk3-macros`, `proc-macro-error`
-  - 1 unsound package warning: `glib`
+- `lockfile.dependency-count`: 240
+- advisory database loaded successfully from RustSec
+- warnings: none
 
-Inference: default non-native builds are materially less exposed than native builds, but the lockfile and optional native artifact strategy still carry governance and future maintenance risk.
+Inference: removing the optional webview dependency chain eliminates the prior GTK3-family native advisory surface from the lockfile.
 
 ## 7. Security Assessment
 
@@ -331,9 +328,10 @@ Strengths:
 
 Weaknesses:
 
-- No TLS is served by TokenOS itself; docs require reverse proxy for remote.
+- TokenOS can serve native HTTPS when `--tls-cert` and `--tls-key` PEM files are supplied; reverse proxies remain useful for broader edge controls.
 - CSP and common browser hardening headers are emitted by the static/API router.
-- No server-side RBAC: token equals full control.
+- Scoped API tokens support `read`, `run`, and `admin` access boundaries.
+- Optional shared per-token API request limits are stored in SQLite by token hash.
 - Token storage is browser memory by default with opt-in sessionStorage; no cookie/session invalidation model exists.
 
 ### Secrets
@@ -352,7 +350,7 @@ Weaknesses:
 
 - Generated inbound secrets not present in the original prompt are not generally re-masked before recorder storage.
 - SQLite and trace files are not encrypted by implementation.
-- No explicit Windows ACL or Unix chmod hardening is applied.
+- Unix owner-only permission hardening is implemented; Windows ACL hardening remains dependent on the chosen service account and filesystem policy.
 
 ### Attack Surface
 
@@ -365,7 +363,7 @@ Primary surfaces:
 - SQLite database files.
 - Recorder trace files.
 - Config YAML.
-- Native webview shell.
+- Desktop browser launcher.
 
 Most credible attacks:
 
@@ -411,7 +409,7 @@ Scaling positives:
 Scaling limits:
 
 - SQLite connection is serialized through one mutex.
-- Web/API executions have daily and monthly spend governors in the engine; distributed or organization-level quotas remain out of scope.
+- Web/API executions have daily and monthly spend governors in the engine plus a shared-DB per-token API request ledger; organization-level quotas across independent databases/hosts remain out of scope.
 - Indexing is synchronous and in-memory by default for CLI workspace usage.
 - Provider health and bandit learning do not survive process restarts.
 - No queue, admission control, or cancellation API exists.
@@ -628,7 +626,7 @@ Baseline: local test/build passed, but `cargo fmt --check` and clippy failed. Cu
 **Evidence**  
 Installed toolchain: `rustc 1.96.0`, `cargo 1.96.0`.  
 Baseline evidence: `cargo fmt --all -- --check` exited 1 and `cargo clippy --all-targets -- -D warnings` exited 101.  
-Remediation evidence: `cargo fmt --all -- --check` exits 0; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo test --locked` exits 0 with 197 passed; release and native release builds exit 0.
+Remediation evidence: `cargo fmt --all -- --check` exits 0; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo test --locked` exits 0 with 200 passed; release and native release builds exit 0.
 
 **Root Cause**  
 Formatting drift accumulated because CI did not enforce it; current active CI makes these gates blocking.
@@ -706,7 +704,7 @@ Weakens product usability.
 Baseline: High for remote dashboard users. Current residual likelihood: Low-Medium.
 
 **Severity**  
-Baseline: High. Current residual severity: Medium because remote deployment still needs TLS/RBAC outside TokenOS.
+Baseline: High. Current residual severity: Low-Medium because native HTTPS and scoped tokens exist, while certificate operations and broader access governance remain deployment-specific.
 
 **Confidence**  
 High.
@@ -927,36 +925,36 @@ P2; closed.
 **Validation Method**  
 Completed for trace indexing and attempt recording through unit tests and source-level verification of the engine failover branches.
 
-### F-10: Optional Native Dependency Chain Has RustSec Informational Warnings
+### F-10: Optional Native Dependency Chain Has RustSec Informational Warnings (Closed)
 
 **Description**  
-`cargo audit` found no known vulnerabilities, but reported unmaintained GTK3-family crates and an unsound `glib` advisory in the lockfile.
+Earlier `cargo audit` runs found no known vulnerabilities, but reported unmaintained GTK3-family crates and an unsound `glib` advisory pulled through the optional `tao`/`wry` webview stack. Current status: **Closed**. The optional `native` feature no longer depends on `tao`/`wry`; it launches the loopback dashboard in the system browser.
 
 **Evidence**  
-`cargo audit --json` exit 0.  
-Warnings: 11 unmaintained packages and 1 unsound package (`glib`).  
-Optional native dependencies in `Cargo.toml:38-44` enable `tao` and `wry`.
+`cargo audit --json` exit 0.
+Warnings: none.
+`Cargo.toml` keeps `native = []`, and `src/nativeapp.rs` uses only the standard library process launcher plus the existing Axum dashboard server.
 
 **Root Cause**  
-Native webview ecosystem pulls GTK3-era crates through optional dependency graph.
+Native webview ecosystem pulled GTK3-era crates through the optional dependency graph.
 
 **Technical Impact**  
-Default build risk appears lower, but native releases inherit maintenance warnings.
+The lockfile no longer carries the prior native GTK3-family advisory path.
 
 **Operational Impact**  
-Native app support may become harder on Linux/GTK stacks.
+Linux native builds no longer need WebKitGTK system packages.
 
 **Security Impact**  
-Unsound dependency advisory requires review even if code paths may not use affected functions.
+Prior unsound advisory is removed from the resolved dependency graph.
 
 **Reliability Impact**  
-Platform-specific crashes or build drift possible.
+The launcher relies on the user's system browser and Ctrl+C process shutdown instead of an embedded native window.
 
 **Scalability Impact**  
-Cross-platform release burden grows.
+Cross-platform release burden is lower because no GUI toolkit is compiled.
 
 **Business Impact**  
-Native app promise carries hidden maintenance liability.
+Native launcher remains available without the webview maintenance liability.
 
 **Likelihood**  
 Medium.
@@ -968,16 +966,16 @@ Medium.
 Medium-High.
 
 **Remediation**  
-Track native dependency advisories separately. Current status is formal risk acceptance for the optional `native` feature in `docs/RISK_ACCEPTANCE.md`. Evaluate newer `wry`/GTK4-compatible paths when available.
+Removed `tao`/`wry`, replaced webview shell with browser launcher, updated CI to remove WebKitGTK installation, and updated `docs/RISK_ACCEPTANCE.md`.
 
 **Effort**  
 M-L.
 
 **Priority**  
-P2.
+P2; closed.
 
 **Validation Method**  
-Run `cargo audit`, `cargo build --features native`, and smoke tests on Linux/macOS/Windows in active CI.
+Run `cargo audit`, `cargo build --features native`, and `tokenos app`/`tokenos --version` smoke tests. CI builds the feature on Linux/macOS/Windows.
 
 ### F-11: Sensitive Local Artifacts Lack Implementation-Level Retention and Permission Controls (Remediated)
 
@@ -1088,29 +1086,29 @@ Completed through command-verification tests that assert failing commands preven
 ### F-13: `/api/run` Has No Server-Wide Concurrency, Spend, or Rate Limit (Remediated)
 
 **Description**  
-Baseline: the endpoint had a per-request timeout and request body limit, but no run concurrency limit, per-token spend enforcement at server level, or per-token auth scopes. Current status: **Remediated for single-process serving**: a process-local concurrency limiter caps `/api/run` at four simultaneous executions, engine spend limits enforce daily/monthly budgets, and scoped API tokens gate read/run/admin access.
+Baseline: the endpoint had a per-request timeout and request body limit, but no run concurrency limit, per-token spend enforcement at server level, per-token auth scopes, or shared API-token request ledger. Current status: **Remediated for shared-DB serving**: a process-local concurrency limiter caps `/api/run` at four simultaneous executions, engine spend limits enforce daily/monthly budgets, scoped API tokens gate read/run/admin access, and `security.api_token_rate_limit_per_min` coordinates per-token API request limits through SQLite.
 
 **Evidence**  
 Baseline evidence: run timeout and body limit existed; no semaphore/rate limiter was present.  
-Remediation evidence: `MAX_CONCURRENT_RUNS` and `WebState.run_limiter` are implemented in `src/webui.rs`; saturated requests return HTTP `429` before provider execution. `SecurityPolicy` includes `daily_spend_limit_usd`, `monthly_spend_limit_usd`, and `api_tokens`; `Engine::run` checks aggregate spend before execution; web auth middleware enforces `read`, `run`, and `admin` scopes.
+Remediation evidence: `MAX_CONCURRENT_RUNS` and `WebState.run_limiter` are implemented in `src/webui.rs`; saturated requests return HTTP `429` before provider execution. `SecurityPolicy` includes `daily_spend_limit_usd`, `monthly_spend_limit_usd`, `api_tokens`, and `api_token_rate_limit_per_min`; `Engine::run` checks aggregate spend before execution; web auth middleware enforces `read`, `run`, and `admin` scopes and calls `Store::record_api_token_use` for the shared SQLite token ledger.
 
 **Root Cause**  
-Single-user local assumption. The single-process backpressure and budget layer is now implemented; distributed quota/rate governance remains deployment-level work.
+Single-user local assumption. The single-process backpressure, spend budget layer, and shared-DB API token ledger are now implemented; fleet-wide quota governance across independent databases/hosts remains deployment-level work.
 
 **Technical Impact**  
-Concurrent callers are capped per process and paid provider executions are bounded by daily/monthly spend limits.
+Concurrent callers are capped per process, paid provider executions are bounded by daily/monthly spend limits, and API request volume can be capped per bearer token across processes sharing one SQLite DB.
 
 **Operational Impact**  
-A shared/public deployment still needs TLS and external/distributed rate limiting if multiple TokenOS processes or hosts are used.
+A shared/public deployment can use native HTTPS or reverse-proxy TLS. Multiple TokenOS processes sharing one DB coordinate per-token API request limits; independent hosts/databases still need external fleet-level quota governance.
 
 **Security Impact**  
-Token compromise grants execution only within the token's configured scopes and the engine spend limits until revoked; no per-token quota ledger exists.
+Token compromise grants execution only within the token's configured scopes, engine spend limits, and configured per-token request ceiling until revoked.
 
 **Reliability Impact**  
 Provider quota exhaustion and local resource pressure are mitigated by process backpressure and aggregate spend limits.
 
 **Scalability Impact**  
-Process-local backpressure and engine spend limits exist; distributed or per-user quota coordination does not.
+Process-local backpressure, engine spend limits, and shared-DB per-token API request coordination exist. Multi-region or independent-DB quota coordination remains external.
 
 **Business Impact**  
 Cost exposure is reduced by daily/monthly spend ceilings.
@@ -1125,16 +1123,16 @@ Baseline: Medium-High. Current residual severity: Low-Medium.
 High.
 
 **Remediation**  
-Implemented: per-process semaphore and `429` saturation response, daily/monthly spend checks, SQLite aggregate spend calculation, and scoped API-token middleware. Remaining: distributed deployment limits and per-token quota accounting.
+Implemented: per-process semaphore and `429` saturation response, daily/monthly spend checks, SQLite aggregate spend calculation, scoped API-token middleware, and shared SQLite per-token request accounting. Remaining: fleet-wide quota governance for independent hosts/databases.
 
 **Effort**  
 M-L.
 
 **Priority**  
-P2; closed for single-process serving.
+P2; closed for shared-DB serving.
 
 **Validation Method**  
-Completed: `api_run_concurrency_limiter_blocks_excess_requests`, `daily_spend_limit_blocks_execution`, and `api_scopes_governance` pin the implemented guardrails.
+Completed: `api_run_concurrency_limiter_blocks_excess_requests`, `daily_spend_limit_blocks_execution`, `api_scopes_governance`, and `api_token_rate_limit_blocks_excess_requests` pin the implemented guardrails.
 
 ### F-14: Documentation and Evidence Provenance Drift (Remediated)
 
@@ -1195,13 +1193,13 @@ Completed by source reconciliation and final `rg`/test verification; docs smoke 
 | R-02 | Workspace context hit causes false REUSE | Critical baseline / Low-Medium current | High baseline / Low current | P0 | Core | Closed |
 | R-03 | CI inactive | High baseline / Medium current | High baseline / Medium current | P1 | Maintainer | Source remediated; hosted branch protection unverified |
 | R-04 | Clippy/fmt fail | Medium baseline / Low current | Current baseline / Low current | P1 | Core | Closed |
-| R-05 | Authenticated dashboard unusable | High baseline / Medium current | High baseline / Low-Medium current | P1 | Frontend/API | Closed for browser UX; remote TLS/RBAC residual |
+| R-05 | Authenticated dashboard unusable | High baseline / Low current | High baseline / Low current | P1 | Frontend/API | Closed: browser UX, scoped tokens, native HTTPS, and shared token ledger implemented |
 | R-06 | Static verification overstates success | High baseline / Low-Medium current | High baseline / Low-Medium current | P1 | Core | Closed for configured command verification; static-only entries are tier-labeled |
 | R-07 | Missing live key validation | Medium baseline / Low current | Medium-High baseline / Low-Medium current | P1 | Config/provider | Closed |
-| R-08 | Native dependency advisory warnings | Medium | Medium | P2 | Platform | Formally risk accepted in `docs/RISK_ACCEPTANCE.md`; default build unaffected |
+| R-08 | Native dependency advisory warnings | Medium baseline / Low current | Medium baseline / Low current | P2 | Platform | Closed: webview dependency chain removed; `cargo audit` warning-free |
 | R-09 | Trace/state at-rest controls incomplete | Medium baseline / Low-Medium current | Medium baseline / Low-Medium current | P2 | Security/ops | Closed for retention, disablement, and Unix owner-only permissions |
 | R-10 | Telemetry misses failed attempts as first-class rows | Medium baseline / Low current | Medium baseline / Low current | P2 | Observability | Closed: `execution_attempts` wired |
-| R-11 | No `/api/run` concurrency/spend limiter | Medium-High baseline / Low-Medium current | Medium baseline / Low-Medium current | P2 | Web/API | Closed for single-process serving: semaphore + spend limits + scopes |
+| R-11 | No `/api/run` concurrency/spend limiter | Medium-High baseline / Low current | Medium baseline / Low current | P2 | Web/API | Closed for shared-DB serving: semaphore + spend limits + scopes + per-token API ledger |
 | R-12 | Documentation drift | Medium baseline / Low current | High baseline / Low current | P2 | Docs | Closed: reports and docs reconciled/tracked |
 
 ## 14. Remediation Matrix
@@ -1217,9 +1215,9 @@ Completed by source reconciliation and final `rg`/test verification; docs smoke 
 | Done | Add semantic config validation | F-07 | M | Invalid live configs, routes, verification route keys, and policy ranges fail before run |
 | Done | Fix constant-time comparison implementation or docs | F-06 | S | No length early return |
 | Done | Add execution_attempts telemetry | F-09 | M | Failed and successful attempts visible in SQL telemetry |
-| Risk accepted | Review native dependency strategy | F-10 | M-L | Optional native warnings formally documented in `docs/RISK_ACCEPTANCE.md`; default build unaffected |
+| Done | Remove native GTK/webview dependency risk | F-10 | M-L | `tao`/`wry` removed; `cargo audit` warning-free; native feature remains as browser launcher |
 | Done | Add trace retention and permission hardening | F-11 | M-L | Retention, trace disablement, and Unix owner-only permissions implemented |
-| Done | Add run concurrency/spend guardrails | F-13 | M-L | Process semaphore, scoped API tokens, and aggregate daily/monthly budgets implemented |
+| Done | Add run concurrency/spend/rate guardrails | F-13 | M-L | Process semaphore, scoped API tokens, aggregate daily/monthly budgets, and shared per-token API ledger implemented |
 | Done | Clean docs and report governance | F-14 | S-M | Reports and tracked docs updated to current verification state |
 
 ## 15. Strategic Recommendations
@@ -1228,25 +1226,25 @@ Completed by source reconciliation and final `rg`/test verification; docs smoke 
 
 1. Verify hosted GitHub branch protection requires `.github/workflows/ci.yml` checks.
 2. Add docs smoke checks for command snippets and test-count evidence.
-3. Add remote deployment examples that pair TokenOS with TLS termination and external/distributed rate limiting.
-4. Decide whether optional native dependency warnings remain formally risk-accepted for release notes.
+3. Add docs smoke checks for the native HTTPS and shared rate-limit snippets.
+4. Verify `tokenos app` behavior on macOS/Linux/Windows CI runners beyond `--version` smoke.
 5. Encourage users to configure route-specific verification commands for production code workflows.
 
 ### Medium Term: 2-6 Weeks
 
-1. Add per-token quota ledgers and distributed quota coordination for multi-process deployments.
+1. Add fleet-level quota coordination for independent databases/hosts if multi-region deployment is required.
 2. Add encryption-at-rest integration such as SQLCipher or OS keychain-backed secret storage for sensitive deployments.
 3. Add richer built-in route-specific validators beyond shell-command hooks.
 4. Add provider attempt APIs/dashboard views over the `execution_attempts` table.
-5. Re-evaluate native GTK3-family dependency warnings as the `wry` ecosystem evolves.
+5. Add richer deployment conformance tests around TLS certificates and scoped API tokens.
 
 ### Long Term: 6-12 Weeks
 
 1. Build a richer verification framework with route-specific validators beyond optional local test commands.
 2. Introduce durable provider health and drift storage if routing decisions must survive process restarts.
-3. Add distributed budget governance: per-token quotas, per-user rate limits, and organization-level quota ledgers.
+3. Add organization-level quota ledgers for independent hosts/databases.
 4. Harden remote deployment story beyond single-process local serving.
-5. Re-evaluate native app dependency chain and platform support strategy.
+5. Re-evaluate whether a true embedded webview shell is worth reintroducing only if its dependency chain is warning-free.
 
 ## 16. Evidence Appendix
 
@@ -1271,7 +1269,7 @@ Checks:
 ```text
 cargo test --locked
 EXIT=0
-197 passed; 0 failed
+200 passed; 0 failed
 
 cargo build --release --locked
 EXIT=0
@@ -1295,9 +1293,9 @@ cargo audit --json
 EXIT=0
 vulnerabilities_found=False
 vulnerability_count=0
-dependency_count=409
-unmaintained_count=11
-unsound_count=1
+dependency_count=240
+unmaintained_count=0
+unsound_count=0
 ```
 
 ### CLI Smoke Evidence
@@ -1315,6 +1313,18 @@ cost_usd 0.0
 
 tokenos providers
 mock enabled; openai/anthropic/gemini disabled by default
+```
+
+### Native HTTPS Smoke Evidence
+
+```text
+tokenos serve --host 127.0.0.1 --port 9443 --auth-token smoke-token --tls-cert target/smoke-tls/cert.pem --tls-key target/smoke-tls/key.pem --dry-run
+curl -k -H "Authorization: Bearer smoke-token" https://127.0.0.1:9443/api/summary
+HTTP=200
+tasks=0
+executions=0
+total_tokens=0
+total_cost_usd=0.0
 ```
 
 ### Baseline Defect Reproduction and Remediation Evidence
@@ -1390,4 +1400,4 @@ chain mock
 
 TokenOS is technically coherent as a local Rust execution-kernel and is materially stronger after this remediation pass. The two most serious route-contract defects are closed: ASK now terminates locally at zero provider cost, and workspace context no longer implies REUSE. CI is active in the repository, fmt/clippy/tests/builds are green, browser bearer-token UX exists, trace events and execution attempts are indexed, placeholder-bearing cache replay is blocked, configured verification commands can gate success/cache admission, trace retention/disablement and Unix owner-only permissions are implemented, and `/api/run` has process-local backpressure, scoped API tokens, and daily/monthly spend controls.
 
-The remaining risks are now governance and productionization risks rather than basic correctness contradictions: optional native dependencies carry RustSec informational warnings, encryption-at-rest is not built in, remote serving still needs TLS and distributed rate limiting outside TokenOS, and hosted branch-protection verification cannot be proven from a local checkout. TokenOS can credibly be positioned as a local-first, single-user execution kernel with strong deterministic controls. It should not yet be positioned as a native multi-tenant cloud platform without those remaining controls.
+The remaining risks are now governance and productionization risks rather than basic correctness contradictions: encryption-at-rest is not built in, live provider compatibility requires real credentials, certificate operations are deployment-specific, fleet-level quota governance across independent databases/hosts remains external, and hosted branch-protection verification cannot be proven from a local checkout. TokenOS can credibly be positioned as a local-first execution kernel with strong deterministic controls. It should not yet be positioned as a fully governed multi-tenant cloud platform without those remaining external controls.

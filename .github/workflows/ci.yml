@@ -23,6 +23,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --all -- --check
+      - name: Documentation drift guard
+        run: |
+          if rg -n "native webview shell|No TLS is served by TokenOS itself|remote serving still needs TLS|no per-token quota ledger exists|Web /api/run has no per-token|Optional native warnings formally documented|formal risk acceptance for the optional native|WebKitGTK for the system webview" README.md docs TOKENOS_DUE_DILIGENCE_AUDIT.md "TokenOS Main Report.txt"; then
+            echo "stale remediation claim found"
+            exit 1
+          fi
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Install cargo-audit
@@ -35,7 +41,7 @@ jobs:
         run: cargo test --release --locked
 
   native:
-    name: Native app (${{ matrix.os }})
+    name: Desktop launcher (${{ matrix.os }})
     needs: test
     strategy:
       fail-fast: false
@@ -57,12 +63,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: native-${{ matrix.os }}
-      - name: Install WebKitGTK (Linux only)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
-      - name: Build native app
+      - name: Build desktop launcher
         run: cargo build --release --locked --features native
       - name: Smoke test (Unix)
         if: runner.os != 'Windows'

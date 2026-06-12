@@ -24,11 +24,11 @@ cargo build --release                          # no system deps; SQLite is bundl
 ./target/release/tokenos serve --dry-run       # dashboard at http://127.0.0.1:8080
 ```
 
-Prefer a native desktop window over a browser tab?
+Prefer a desktop-style launcher over typing a URL?
 
 ```sh
-cargo build --release --features native        # system-webview shell (Linux: needs WebKitGTK)
-./target/release/tokenos app --dry-run         # same dashboard, native window, loopback-only
+cargo build --release --features native        # no webview/GTK dependency chain
+./target/release/tokenos app --dry-run         # opens the loopback dashboard in your browser
 ```
 
 No API key is needed for any of the above — the fault-injectable mock provider
@@ -173,19 +173,17 @@ cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
 
-The optional **native desktop app** (`tokenos app`) is feature-gated so
-headless/server builds stay dependency-free:
+The optional **desktop launcher** (`tokenos app`) is feature-gated so
+headless/server builds stay lean:
 
 ```sh
-# Linux build deps (Debian/Ubuntu): WebKitGTK for the system webview
-sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
 cargo build --release --features native
 ```
 
-macOS (WKWebView) and Windows (WebView2) need no extra packages. Active CI lives
-in `.github/workflows/ci.yml`; it checks formatting, clippy, audit, release
-build, tests, and native binaries for Linux/macOS/Windows, and attaches binaries
-to tagged releases.
+The launcher opens the embedded loopback dashboard in the system browser and
+does not compile a webview stack. Active CI lives in `.github/workflows/ci.yml`;
+it checks formatting, clippy, audit, release build, tests, and launcher binaries
+for Linux/macOS/Windows, and attaches binaries to tagged releases.
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
 kernel can be embedded inside other agent runtimes.
@@ -272,14 +270,13 @@ Full endpoint reference: [docs/API.md](docs/API.md).
 
 ### Native desktop app
 
-`tokenos app` (build feature `native`) wraps the SAME dashboard in a system
-webview window (WebKitGTK / WKWebView / WebView2 via `wry`):
+`tokenos app` (build feature `native`) starts the SAME dashboard on an
+ephemeral loopback port and opens it in the system browser:
 
 - the axum control plane binds an **ephemeral loopback port** (127.0.0.1:0)
   on a background runtime — the kernel never faces a network in app mode
-- the window closing tears down the whole process, server included
-- external links open in the system browser; the control panel itself can
-  never be navigated away from the kernel
+- Ctrl+C tears down the process, server included
+- no WebKitGTK/WebView2/WKWebView dependency chain is compiled
 - engine, API, auth model and frontend bytes are identical to `tokenos serve`
 
 ## Design principles

@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -166,6 +167,14 @@ CREATE TABLE IF NOT EXISTS drift_ratios (
     ewma_ratio  REAL NOT NULL,
     samples     INTEGER NOT NULL DEFAULT 0,
     updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_token_usage (
+    token_hash   TEXT NOT NULL,
+    scope        TEXT NOT NULL,
+    window_start INTEGER NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (token_hash, scope, window_start)
 );
 "#;
 
@@ -739,6 +748,33 @@ impl Store {
         Ok(total)
     }
 
+    /// Records one API-token request in a shared SQLite minute bucket.
+    /// Returns false when the configured per-token per-minute limit is full.
+    pub fn record_api_token_use(
+        &self,
+        token: &str,
+        scope: &str,
+        limit_per_min: u32,
+    ) -> Result<bool> {
+        if limit_per_min == 0 {
+            return Ok(true);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let token_hash = hex::encode(hasher.finalize());
+        let now = Utc::now().timestamp();
+        let window_start = now - (now % 60);
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            r#"INSERT INTO api_token_usage (token_hash, scope, window_start, count)
+               VALUES (?1, ?2, ?3, 1)
+               ON CONFLICT(token_hash, scope, window_start) DO UPDATE SET count = count + 1
+               WHERE count < ?4"#,
+            params![token_hash, scope, window_start, limit_per_min as i64],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Deletes telemetry records older than retention_days (F-11).
     pub fn prune_old_records(&self, retention_days: usize) -> Result<usize> {
         if retention_days == 0 {
@@ -769,13 +805,18 @@ impl Store {
             "DELETE FROM execution_attempts WHERE created_at < ?1",
             params![cutoff],
         )?;
+        let api_usage_deleted = conn.execute(
+            "DELETE FROM api_token_usage WHERE window_start < ?1",
+            params![(Utc::now() - chrono::Duration::days(retention_days as i64)).timestamp()],
+        )?;
 
         Ok(execs_deleted
             + failures_deleted
             + traces_deleted
             + loops_deleted
             + cache_deleted
-            + attempts_deleted)
+            + attempts_deleted
+            + api_usage_deleted)
     }
 
     /// Computes Effective Cost Per Successful Task per route.

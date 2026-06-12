@@ -136,6 +136,12 @@ enum Command {
         /// Falls back to the TOKENOS_AUTH_TOKEN environment variable.
         #[arg(long)]
         auth_token: Option<String>,
+        /// PEM certificate file for native HTTPS serving.
+        #[arg(long)]
+        tls_cert: Option<String>,
+        /// PEM private key file for native HTTPS serving.
+        #[arg(long)]
+        tls_key: Option<String>,
         #[command(flatten)]
         engine: EngineFlags,
     },
@@ -487,6 +493,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             host,
             public,
             auth_token,
+            tls_cert,
+            tls_key,
             engine: ef,
         } => {
             // Finding 12.1 (CWE-306): the dashboard binds loopback by default.
@@ -518,8 +526,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 );
             }
             let eng = Arc::new(build_engine(&ef)?);
+            let tls_paths = match (tls_cert, tls_key) {
+                (Some(cert), Some(key)) => Some((cert, key)),
+                (None, None) => None,
+                _ => {
+                    return Err(anyhow!(
+                        "--tls-cert and --tls-key must be provided together"
+                    ))
+                }
+            };
             println!(
-                "TokenOS control panel listening on http://{}:{} (dry-run={}, auth={})",
+                "TokenOS control panel listening on {}://{}:{} (dry-run={}, auth={})",
+                if tls_paths.is_some() { "https" } else { "http" },
                 host,
                 port,
                 ef.dry_run,
@@ -529,7 +547,19 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     "off (loopback only)"
                 }
             );
-            webui::serve(eng, &host, port, token).await
+            if let Some((cert, key)) = tls_paths {
+                webui::serve_tls(
+                    eng,
+                    &host,
+                    port,
+                    token,
+                    std::path::Path::new(&cert),
+                    std::path::Path::new(&key),
+                )
+                .await
+            } else {
+                webui::serve(eng, &host, port, token).await
+            }
         }
     }
 }

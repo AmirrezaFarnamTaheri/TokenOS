@@ -174,12 +174,20 @@ impl Engine {
                 .prune_old_traces(engine.cfg.security.retention_days);
         }
 
-        // Backfill bandit routing observations from execution history to make decisions durable (durable bandit storage)
+        // Backfill bandit routing observations and provider health tracker from execution history to make decisions durable
         if let Ok(execs) = engine.store.list_executions(1000) {
-            for exec in execs {
+            // Replay from oldest to newest so EWMA latency/failure updates correctly.
+            // Note that list_executions returns executions ordered DESC by id (newest first),
+            // so we should reverse them to replay them chronologically (oldest first).
+            let mut execs_chronological = execs;
+            execs_chronological.reverse();
+            for exec in &execs_chronological {
                 engine
                     .bandit
                     .record(&exec.provider, exec.success, exec.latency_ms as f64);
+                engine
+                    .tracker
+                    .record(&exec.provider, exec.latency_ms as f64, exec.success);
             }
         }
 

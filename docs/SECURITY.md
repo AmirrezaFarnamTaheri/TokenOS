@@ -60,6 +60,9 @@ placeholder, the response leg restores the original value. Properties:
   regardless of where a mismatch occurs, closing the timing side channel.
 - Static assets bypass auth (they contain no data); every data endpoint
   enforces it.
+- `security.api_token_rate_limit_per_min` enables a shared SQLite-backed
+  per-token request ledger. Tokens are hashed before storage, and multiple
+  TokenOS processes using the same DB coordinate this API request limit.
 - The embedded dashboard includes a bearer-token dialog. By default the token
   is held in memory; users may opt into `sessionStorage` for the current browser
   tab. The token is then injected by the single `fetch` wrapper for every
@@ -136,8 +139,10 @@ vault is request-scoped and cannot reconstruct the value later.
 
 - [ ] Run with the default loopback bind unless remote access is required.
 - [ ] If exposing remotely: set a strong `$TOKENOS_AUTH_TOKEN`, use
-      `--public` deliberately, and terminate TLS in front (reverse proxy) —
-      TokenOS itself serves plain HTTP.
+      `--public` deliberately, and use either native HTTPS
+      (`--tls-cert`/`--tls-key`) or a TLS-terminating reverse proxy.
+- [ ] Configure `security.api_token_rate_limit_per_min` for shared/public API
+      deployments where multiple processes may use the same DB.
 - [ ] Keep provider keys in env vars managed by your secret store; never
       commit them.
 - [ ] Point `$TOKENOS_TRACES` and `$TOKENOS_DB` at appropriately

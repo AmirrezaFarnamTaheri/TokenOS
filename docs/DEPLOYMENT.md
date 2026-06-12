@@ -2,7 +2,7 @@
 
 This guide describes how to deploy the **TokenOS** local execution kernel securely in a remote or server environment.
 
-By default, TokenOS binds to loopback (`127.0.0.1`) and enforces token-based authentication. For remote access, it is highly recommended to place TokenOS behind a secure reverse proxy (e.g. Nginx) with TLS/HTTPS enabled, rather than exposing the raw TokenOS binding directly to the network.
+By default, TokenOS binds to loopback (`127.0.0.1`) and enforces token-based authentication. For remote access, either run TokenOS with native HTTPS (`--tls-cert` and `--tls-key`) or place it behind a secure reverse proxy such as Nginx/Caddy/Apache with TLS enabled.
 
 ---
 
@@ -67,6 +67,28 @@ sudo ln -s /etc/nginx/sites-available/tokenos /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl reload nginx
 ```
+
+---
+
+## 1.1 Native HTTPS Serving
+
+TokenOS can also terminate TLS directly when you provide PEM certificate and
+key files:
+
+```bash
+TOKENOS_AUTH_TOKEN=your-super-secure-token-here \
+  tokenos serve \
+  --host 0.0.0.0 \
+  --port 8443 \
+  --public \
+  --tls-cert /etc/letsencrypt/live/tokenos.example.com/fullchain.pem \
+  --tls-key /etc/letsencrypt/live/tokenos.example.com/privkey.pem
+```
+
+Use a reverse proxy when you need HTTP-to-HTTPS redirects, HSTS management,
+centralized access logging, WAF controls, or multiple backend services. Native
+HTTPS is useful for a minimal single-service deployment where those controls
+are handled elsewhere.
 
 ---
 
@@ -139,6 +161,7 @@ sudo systemctl status tokenos
 ## 3. Remote Serving Best Practices
 
 1. **Never Bind Publicly Without Auth**: If you bind the service directly (e.g. `serve --host 0.0.0.0`), you **must** supply a non-empty bearer token (via `--auth-token`) otherwise the server will refuse to start.
-2. **Reverse Proxy TLS Enforced**: Always proxy remote traffic through TLS (port 443) using Nginx, Apache, or Caddy. Transmitting bearer tokens or API execution payloads over plain HTTP exposes them to eavesdropping.
+2. **TLS Enforced**: Use either native TokenOS HTTPS (`--tls-cert`/`--tls-key`) or proxy remote traffic through TLS (port 443) using Nginx, Apache, or Caddy. Transmitting bearer tokens or API execution payloads over plain HTTP exposes them to eavesdropping.
 3. **Database and trace permissions**: Standard SQLite and traces are stored in the user profile directory. If running as a system service, ensure `/var/lib/tokenos` is locked down with owner-only access permissions (`chmod 700`).
 4. **Scoped API Tokens**: Instead of sharing the single master/admin CLI token, use the `security.api_tokens` section in `config.yaml` to define granular, scoped credentials (e.g. `read`-only access for dashboards, `run` access for automation/agents, and `admin` for operations).
+5. **Shared API Token Rate Limits**: Set `security.api_token_rate_limit_per_min` to enforce a per-token request ceiling. The ledger is stored in SQLite by token hash, so multiple TokenOS processes using the same DB coordinate the limit.

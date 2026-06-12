@@ -163,6 +163,9 @@ pub struct SecurityPolicy {
     /// Map of scoped API tokens (token -> list of scopes)
     #[serde(default)]
     pub api_tokens: std::collections::HashMap<String, Vec<String>>,
+    /// Shared SQLite-backed per-token request limit per minute (0 = disabled)
+    #[serde(default)]
+    pub api_token_rate_limit_per_min: u32,
 }
 
 fn default_retention_days() -> usize {
@@ -182,6 +185,7 @@ impl Default for SecurityPolicy {
             daily_spend_limit_usd: 0.0,
             monthly_spend_limit_usd: 0.0,
             api_tokens: std::collections::HashMap::new(),
+            api_token_rate_limit_per_min: 0,
         }
     }
 }

@@ -124,6 +124,8 @@ tokenos config init --config ./tokenos.yaml
 tokenos serve                                  # http://127.0.0.1:8080, local only
 tokenos serve --port 3000 --dry-run            # offline demo mode
 TOKENOS_AUTH_TOKEN=s3cret tokenos serve --host 0.0.0.0 --public
+TOKENOS_AUTH_TOKEN=s3cret tokenos serve --host 0.0.0.0 --public \
+  --tls-cert ./fullchain.pem --tls-key ./privkey.pem
 ```
 
 | Option | Default | Meaning |
@@ -132,6 +134,8 @@ TOKENOS_AUTH_TOKEN=s3cret tokenos serve --host 0.0.0.0 --public
 | `--host <h>` | `127.0.0.1` | Listen address |
 | `--public` | off | Required to bind a non-loopback interface; **refused without an auth token** |
 | `--auth-token <t>` | `$TOKENOS_AUTH_TOKEN` | Bearer token enforced on every `/api/*` request |
+| `--tls-cert <path>` | none | PEM certificate file for native HTTPS serving; requires `--tls-key` |
+| `--tls-key <path>` | none | PEM private key file for native HTTPS serving; requires `--tls-cert` |
 | `[engine flags]` | | See above |
 
 Static assets (`/`, `/app.js`, `/style.css`) are served without auth; all
@@ -143,6 +147,9 @@ token passed via `--auth-token` or `$TOKENOS_AUTH_TOKEN`; the frontend keeps it
 in memory by default, or in `sessionStorage` for the current tab if you opt in.
 Interactive executions are capped at four concurrent `/api/run` calls per
 server process; saturated requests return `429` while telemetry remains live.
+If `security.api_token_rate_limit_per_min` is configured, each bearer token
+also has a SQLite-backed per-minute request ledger shared by every TokenOS
+process using the same database.
 
 ---
 

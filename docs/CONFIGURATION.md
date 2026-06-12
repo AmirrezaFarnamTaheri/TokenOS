@@ -231,6 +231,7 @@ security:
   owner_only_permissions: true    # enforces owner-only (0o600/0o700) file permissions on Unix
   daily_spend_limit_usd: 0.0      # daily cost ceiling; 0 disables
   monthly_spend_limit_usd: 0.0    # monthly cost ceiling; 0 disables
+  api_token_rate_limit_per_min: 60 # shared SQLite-backed per-token API request limit; 0 disables
   api_tokens:
     read_only_token_abc: ["read"]
     runner_token_xyz: ["run", "read"]
@@ -244,6 +245,7 @@ security:
 | `owner_only_permissions` | bool | `true` | Enforces owner-only file permissions on traces and state files. |
 | `daily_spend_limit_usd` | float | `0.0` | Saturated daily spend blocks further execution; 0 disables. |
 | `monthly_spend_limit_usd` | float | `0.0` | Saturated monthly spend blocks further execution; 0 disables. |
+| `api_token_rate_limit_per_min` | int | `0` | Per-token API request ceiling per minute. Counts are stored by SHA-256 token hash in SQLite, so multiple TokenOS processes sharing the same DB coordinate this limit. |
 | `api_tokens` | map | `{}` | Map of API bearer token to list of authorized scopes (`read`, `run`, `admin`). |
 
 ---

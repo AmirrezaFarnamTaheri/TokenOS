@@ -431,72 +431,59 @@ pub fn count_bpe(s: &str) -> usize {
     }
     let (vocab, max_len) = (&VOCAB.0, VOCAB.1);
     let mut tokens = 0usize;
-    // Word splitter: runs of alphanumerics are words; runs of spaces merge
-    // into the following token (BPE-style leading-space units); every other
-    // symbol is its own token.
-    let mut word = String::new();
-    let flush = |w: &mut String, tokens: &mut usize| {
-        if w.is_empty() {
+    let mut buf = [0u8; 128];
+    let mut len = 0usize;
+
+    let flush = |b: &[u8], tokens: &mut usize| {
+        if b.is_empty() {
             return;
         }
-        let lower = w.to_lowercase();
-        let bytes = lower.as_bytes();
         let mut i = 0usize;
-        while i < bytes.len() {
+        while i < b.len() {
             let mut matched = 0usize;
-            let cap = (bytes.len() - i).min(max_len);
+            let cap = (b.len() - i).min(max_len);
             for l in (2..=cap).rev() {
-                if !lower.is_char_boundary(i) || !lower.is_char_boundary(i + l) {
-                    continue;
-                }
-                if vocab.contains(&lower[i..i + l]) {
-                    matched = l;
-                    break;
+                if let Ok(slice) = std::str::from_utf8(&b[i..i + l]) {
+                    if vocab.contains(slice) {
+                        matched = l;
+                        break;
+                    }
                 }
             }
             if matched > 0 {
-                tokens_add(tokens, 1);
+                *tokens += 1;
                 i += matched;
             } else {
-                // Residue: consume up to 4 bytes as one fallback token —
-                // mirrors byte-level BPE density on ASCII. The end is pulled
-                // back to a valid char boundary (minimum one char).
-                let mut j = (i + 4).min(bytes.len());
-                while j > i + 1 && !lower.is_char_boundary(j) {
-                    j -= 1;
-                }
-                if !lower.is_char_boundary(j) {
-                    // single multi-byte char wider than 4 bytes: take it whole
-                    j = i + 1;
-                    while j < bytes.len() && !lower.is_char_boundary(j) {
-                        j += 1;
-                    }
-                }
-                tokens_add(tokens, 1);
+                let j = (i + 4).min(b.len());
+                *tokens += 1;
                 i = j;
             }
         }
-        w.clear();
     };
-    #[inline]
-    fn tokens_add(t: &mut usize, n: usize) {
-        *t += n;
-    }
+
     for ch in s.chars() {
         if ch.is_alphanumeric() && ch.is_ascii() {
-            word.push(ch);
+            if len >= 128 {
+                flush(&buf[..len], &mut tokens);
+                len = 0;
+            }
+            buf[len] = (ch as u8).to_ascii_lowercase();
+            len += 1;
         } else if (ch as u32) > 127 {
-            flush(&mut word, &mut tokens);
+            flush(&buf[..len], &mut tokens);
+            len = 0;
             tokens += 1; // non-ASCII: ~1 token per scalar (CJK-conservative)
         } else if ch.is_whitespace() {
-            flush(&mut word, &mut tokens);
+            flush(&buf[..len], &mut tokens);
+            len = 0;
             // whitespace fuses into the next token (BPE leading-space): free
         } else {
-            flush(&mut word, &mut tokens);
+            flush(&buf[..len], &mut tokens);
+            len = 0;
             tokens += 1; // each symbol is a token
         }
     }
-    flush(&mut word, &mut tokens);
+    flush(&buf[..len], &mut tokens);
     tokens.max(1)
 }
 

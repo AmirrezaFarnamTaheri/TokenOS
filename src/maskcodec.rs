@@ -172,13 +172,20 @@ impl MaskCodec {
         if self.vault.is_empty() || !text.contains('\u{00AB}') {
             return text.to_string();
         }
-        let mut out = text.to_string();
-        for (ph, original) in &self.vault {
-            if out.contains(ph.as_str()) {
-                out = out.replace(ph.as_str(), original);
-            }
-        }
-        out
+
+        static PLACEHOLDER_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"\u{00AB}SECRET:k\d+\u{00BB}").unwrap());
+
+        PLACEHOLDER_RE
+            .replace_all(text, |caps: &regex::Captures| {
+                let ph = caps.get(0).unwrap().as_str();
+                if let Some(original) = self.vault.get(ph) {
+                    original.clone()
+                } else {
+                    ph.to_string()
+                }
+            })
+            .into_owned()
     }
 
     /// Number of distinct secrets currently held in the vault.
@@ -384,5 +391,37 @@ mod tests {
         assert_eq!(c.vault_len(), 2);
         assert!(!masked.contains("sk-aaaa"));
         assert!(!masked.contains("sk-bbbb"));
+    }
+
+    #[test]
+    fn cascading_placeholder_unmasks_correctly() {
+        let mut c = MaskCodec::new();
+        // The value of a secret literally contains the placeholder format of another secret.
+        let secret1 = "10.0.0.1"; // masks to «SECRET:k1»
+        let secret2 = "password = \"\u{00AB}SECRET:k1\u{00BB}\""; // contains «SECRET:k1», masks value to «SECRET:k2»
+
+        let text = format!("ip is {secret1} and {secret2}");
+        let (masked, _) = c.mask(&text);
+
+        // Single-pass replacement prevents double-replacement corruption.
+        assert_eq!(
+            c.unmask(&masked),
+            "ip is 10.0.0.1 and password = \"\u{00AB}SECRET:k1\u{00BB}\""
+        );
+    }
+
+    #[test]
+    fn many_secrets_unmasks_correctly() {
+        let mut c = MaskCodec::new();
+        let mut text = String::new();
+        let mut expected = String::new();
+        for i in 1..=20 {
+            // Generate 20 distinct openai keys
+            let key = format!("sk-abcdefghijklmnopqrstuvwxyz{:06}", i);
+            text.push_str(&format!("key{}: {}, ", i, key));
+            expected.push_str(&format!("key{}: {}, ", i, key));
+        }
+        let (masked, _) = c.mask(&text);
+        assert_eq!(c.unmask(&masked), expected);
     }
 }

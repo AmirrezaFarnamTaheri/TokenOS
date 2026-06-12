@@ -16,11 +16,22 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperBuilder;
+use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
 use serde_json::json;
+use std::net::ToSocketAddrs;
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::TlsAcceptor;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -87,32 +98,68 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
         "read"
     };
 
+    let mut matched_token: Option<&str> = None;
+
     // 1. Check CLI token (admin scope, satisfies everything)
     if let Some(expected) = cli_token {
         if ct_eq(header_val.as_bytes(), expected.as_bytes()) {
-            return next.run(req).await;
+            matched_token = Some(header_val);
         }
     }
 
     // 2. Check config API tokens (constant-time check for each)
-    let mut authenticated = false;
-    for (cfg_token, scopes) in api_tokens {
-        if ct_eq(header_val.as_bytes(), cfg_token.as_bytes())
-            && scopes.iter().any(|s| s == required_scope || s == "admin")
-        {
-            authenticated = true;
+    if matched_token.is_none() {
+        for (cfg_token, scopes) in api_tokens {
+            if ct_eq(header_val.as_bytes(), cfg_token.as_bytes())
+                && scopes.iter().any(|s| s == required_scope || s == "admin")
+            {
+                matched_token = Some(header_val);
+            }
         }
     }
 
-    if authenticated {
-        next.run(req).await
-    } else {
-        (
+    let Some(token) = matched_token else {
+        return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "insufficient permissions or invalid token" })),
         )
-            .into_response()
+            .into_response();
+    };
+
+    let limit = state.engine.cfg.security.api_token_rate_limit_per_min;
+    match state
+        .engine
+        .store
+        .record_api_token_use(token, required_scope, limit)
+    {
+        Ok(true) => next.run(req).await,
+        Ok(false) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "API token rate limit exceeded" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("API token rate limiter failed: {e}") })),
+        )
+            .into_response(),
     }
+}
+
+async fn log_request(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let start = std::time::Instant::now();
+    let response = next.run(req).await;
+    let duration = start.elapsed();
+    eprintln!(
+        "tokenos: INFO: {} {} -> {} ({:?})",
+        method,
+        path,
+        response.status(),
+        duration
+    );
+    response
 }
 
 async fn add_security_headers(req: Request, next: Next) -> Response {
@@ -177,6 +224,8 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
             get(|| async { asset(STYLE_CSS, "text/css; charset=utf-8") }),
         )
         .merge(api)
+        .layer(tower_http::catch_panic::CatchPanicLayer::new())
+        .layer(middleware::from_fn(log_request))
         .layer(middleware::from_fn(add_security_headers))
 }
 
@@ -194,10 +243,120 @@ pub async fn serve(
     Ok(())
 }
 
+/// Serves the dashboard with native HTTPS using PEM certificate and key files.
+pub async fn serve_tls(
+    engine: Arc<Engine>,
+    host: &str,
+    port: u16,
+    auth_token: Option<String>,
+    cert_path: &FsPath,
+    key_path: &FsPath,
+) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve bind address {host}:{port}"))?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    let tls = Arc::new(load_tls_config(cert_path, key_path)?);
+    let acceptor = TlsAcceptor::from(tls);
+    let app = router_with_auth(engine, auth_token).into_service::<Incoming>();
+
+    println!("TokenOS dashboard listening on https://{}", local);
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let service = app.clone();
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("TLS handshake failed from {peer}: {e}");
+                    return;
+                }
+            };
+            let service = TowerToHyperService::new(service);
+            if let Err(e) = HyperBuilder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls_stream), service)
+                .await
+            {
+                eprintln!("HTTPS connection failed from {peer}: {e}");
+            }
+        });
+    }
+}
+
+fn load_tls_config(cert_path: &FsPath, key_path: &FsPath) -> anyhow::Result<ServerConfig> {
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let cert_pem = std::fs::read_to_string(cert_path)
+        .map_err(|e| anyhow::anyhow!("failed to read TLS cert {}: {e}", cert_path.display()))?;
+    let key_pem = std::fs::read_to_string(key_path)
+        .map_err(|e| anyhow::anyhow!("failed to read TLS key {}: {e}", key_path.display()))?;
+
+    let certs = pem_sections(&cert_pem, "CERTIFICATE")?
+        .into_iter()
+        .map(CertificateDer::from)
+        .collect::<Vec<_>>();
+    if certs.is_empty() {
+        anyhow::bail!(
+            "TLS cert file {} contains no CERTIFICATE blocks",
+            cert_path.display()
+        );
+    }
+
+    let mut keys = Vec::new();
+    for label in ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"] {
+        keys.extend(pem_sections(&key_pem, label)?);
+    }
+    let key = keys
+        .into_iter()
+        .find_map(|der| PrivateKeyDer::try_from(der).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "TLS key file {} contains no supported PKCS#8, RSA, or EC private key",
+                key_path.display()
+            )
+        })?;
+
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow::anyhow!("failed to configure TLS certificate: {e}"))
+}
+
+fn pem_sections(pem: &str, label: &str) -> anyhow::Result<Vec<Vec<u8>>> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let mut rest = pem;
+    let mut sections = Vec::new();
+
+    while let Some(start) = rest.find(&begin) {
+        let after_begin = &rest[start + begin.len()..];
+        let end_pos = after_begin
+            .find(&end)
+            .ok_or_else(|| anyhow::anyhow!("unterminated PEM block: {label}"))?;
+        let body = &after_begin[..end_pos];
+        let encoded = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.contains(':'))
+            .collect::<String>();
+        sections.push(
+            BASE64_STANDARD
+                .decode(encoded)
+                .map_err(|e| anyhow::anyhow!("invalid base64 in PEM block {label}: {e}"))?,
+        );
+        rest = &after_begin[end_pos + end.len()..];
+    }
+
+    Ok(sections)
+}
+
 /// Serves the dashboard and reports the actual bound address through
 /// `ready` before accepting traffic. Used by the native desktop shell,
 /// which binds port 0 (ephemeral) and must learn the real port to point
-/// the webview at. Loopback-only by convention of its single caller.
+/// the system browser at. Loopback-only by convention of its single caller.
 pub async fn serve_with_ready(
     engine: Arc<Engine>,
     host: &str,
@@ -764,5 +923,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_token_rate_limit_blocks_excess_requests() {
+        let mut cfg = Config::default();
+        cfg.security
+            .api_tokens
+            .insert("limited".into(), vec!["read".into()]);
+        cfg.security.api_token_rate_limit_per_min = 1;
+        let arms: Vec<String> = cfg.providers.keys().cloned().collect();
+
+        let engine = Arc::new(Engine {
+            cfg,
+            store: Store::open(Some(std::path::Path::new(":memory:"))).unwrap(),
+            recorder: Recorder::new(Some(std::path::Path::new(&format!(
+                "{}/tokenos-web-rate-test-{}",
+                std::env::temp_dir().display(),
+                std::process::id()
+            ))))
+            .unwrap(),
+            tracker: Tracker::new(),
+            bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
+            indexer: None,
+            dry_run: true,
+            adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
+        });
+
+        let app = router_with_auth(engine, None);
+        let first = app
+            .clone()
+            .oneshot(
+                Request::get("/api/summary")
+                    .header("authorization", "Bearer limited")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::get("/api/summary")
+                    .header("authorization", "Bearer limited")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

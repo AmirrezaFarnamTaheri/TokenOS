@@ -1,20 +1,34 @@
-# TokenOS Risk Acceptance Register
+# TokenOS Closure and External-Control Register
 
 Date: 2026-06-13
 
-This register separates completed local remediation from items that are external, deployment-specific, or intentionally risk-accepted for the current local-first release posture.
+This register separates items closed in local source from items that require
+repository administration, live credentials, certificates, or deployment
+infrastructure outside this checkout.
 
-## Accepted Or External Items
+## Closed In Local Source
 
-| ID | Item | Status | Rationale | Required Operator Action |
-|---|---|---|---|---|
-| RA-01 | Optional native GTK3-family dependency advisories | Accepted for optional `native` feature | `cargo audit` reports no known vulnerabilities, but reports unmaintained GTK3-family crates and one `glib` unsound advisory pulled through optional desktop webview dependencies. Default/headless builds do not enable `native`. | Treat native builds as a separately reviewed release artifact; monitor `wry`/GTK ecosystem updates before broad Linux desktop distribution. |
-| RA-02 | Hosted GitHub branch protection / required checks | External verification required | The workflow exists locally and now triggers for `main`, `development`, `feat/**`, `fix/**`, and `codex/**`, but branch-protection settings live in GitHub. This checkout has no authenticated GitHub CLI token, so enforcement cannot be proven locally. | Repository admin must require the CI checks in GitHub branch protection or rulesets. |
-| RA-03 | Live provider API compatibility | Out of local scope | Local tests use the mock provider and do not spend live provider tokens. Live API schemas, model IDs, and pricing can drift. | Verify OpenAI, Anthropic, Gemini, and proxy adapters with real credentials in a controlled staging environment before production use. |
-| RA-04 | Encryption at rest | Deployment-specific | TokenOS masks durable secrets where designed, supports trace disablement, startup retention pruning, and Unix owner-only permissions. It does not embed SQLCipher or OS keychain encryption. | Use OS disk encryption or add SQLCipher/keychain integration for sensitive deployments. |
-| RA-05 | Native TLS | Deployment-specific | TokenOS intentionally serves plain HTTP locally and relies on loopback binding plus bearer auth. | Terminate TLS at a reverse proxy such as Nginx, Caddy, Apache, or a cloud load balancer for remote access. |
-| RA-06 | Distributed rate limits and multi-process quota coordination | Future production work | Current controls are process-local concurrency limits, scoped bearer tokens, and SQLite daily/monthly spend ceilings. They do not coordinate quotas across multiple TokenOS processes or hosts. | Use an external gateway/rate limiter for distributed deployments, or implement shared quota storage before multi-tenant use. |
+| ID | Item | Closure |
+|---|---|---|
+| C-01 | Optional native GTK3-family dependency advisories | Removed `tao`/`wry` webview dependencies. The `native` feature now builds a zero-extra-dependency desktop launcher that opens the loopback dashboard in the system browser. `cargo audit` no longer reports the GTK3-family or `glib` advisories. |
+| C-02 | Native HTTPS serving | `tokenos serve` supports `--tls-cert` and `--tls-key` PEM files for direct HTTPS serving. Reverse proxies remain useful for redirects, HSTS policy, WAFs, and centralized logging. |
+| C-03 | Shared API-token request limits | `security.api_token_rate_limit_per_min` enables a SQLite-backed per-token per-minute request ledger. Tokens are stored by SHA-256 hash, so multiple TokenOS processes using the same DB coordinate API request limits. |
+
+## External Or Deployment-Specific Items
+
+| ID | Item | Status | Required Operator Action |
+|---|---|---|---|
+| E-01 | Hosted GitHub branch protection / required checks | External verification required | Repository admin must require CI checks in GitHub branch protection or rulesets. This checkout has no authenticated GitHub CLI token, so hosted enforcement cannot be proven locally. |
+| E-02 | Live provider API compatibility | Requires live credentials and spend approval | Verify OpenAI, Anthropic, Gemini, and proxy adapters with real credentials in a controlled staging environment before production use. |
+| E-03 | Encryption at rest | Deployment-specific | Use OS disk encryption today, or add SQLCipher/keychain integration if application-level DB encryption is required for the deployment. |
+| E-04 | TLS certificate operations | Deployment-specific | Supply valid PEM files to `--tls-cert`/`--tls-key`, or terminate TLS at a reverse proxy/load balancer. |
+| E-05 | Fleet-wide quota governance across independent hosts/databases | External distributed-systems control | Use one shared TokenOS DB for the built-in per-token request ledger, or deploy an external gateway/rate limiter for fleets with separate databases or regions. |
 
 ## Release Position
 
-TokenOS is finalized as a local-first, single-user execution kernel with verified local quality gates. It is not claimed to be a native multi-tenant cloud platform without the external controls listed above.
+TokenOS is finalized as a local-first execution kernel with verified local
+quality gates, native HTTPS support, scoped bearer tokens, shared per-token API
+request limits for a shared DB, and no accepted native GTK advisory path.
+It is not claimed to control GitHub-hosted branch settings, live provider API
+behavior, certificate issuance, or independent multi-region quota ledgers from
+inside this local checkout.
