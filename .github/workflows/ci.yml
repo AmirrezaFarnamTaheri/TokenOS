@@ -41,6 +41,8 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
       - name: Dependency audit
         run: cargo audit
+      - name: Cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
       - name: Build
         run: cargo build --release --locked
       - name: Test

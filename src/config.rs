@@ -222,7 +222,7 @@ impl Default for Config {
                 cost_per_mtok_in: 0.0,
                 cost_per_mtok_out: 0.0,
                 models: ModelFilter::default(),
-                disabled: false,
+                disabled: true,
             },
         );
         providers.insert(
@@ -375,6 +375,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.providers.is_empty() {
             bail!("config: at least one provider required");
+        }
+        if self.providers.values().all(|p| p.disabled) {
+            bail!("config: at least one enabled provider required");
         }
         if self.policy.ask_threshold < 0.0 || self.policy.ask_threshold > 1.0 {
             bail!("config: policy.ask_threshold must be between 0.0 and 1.0");
@@ -568,7 +571,9 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        Config::default().validate().unwrap();
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        cfg.validate().unwrap();
     }
 
     #[test]
@@ -584,6 +589,7 @@ mod tests {
     #[test]
     fn unknown_adapter_is_rejected() {
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.providers.get_mut("mock").unwrap().adapter = "mystery".into();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("unknown adapter"), "{err}");
@@ -606,14 +612,16 @@ mod tests {
 
     #[test]
     fn disabled_providers_skipped() {
-        let cfg = Config::default(); // only mock enabled
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         let chain = cfg.provider_chain("IMPLEMENT");
         assert_eq!(chain, vec!["mock".to_string()]);
     }
 
     #[test]
     fn yaml_roundtrip() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         let y = serde_yaml::to_string(&cfg).unwrap();
         let back: Config = serde_yaml::from_str(&y).unwrap();
         back.validate().unwrap();
@@ -623,6 +631,7 @@ mod tests {
     #[test]
     fn invalid_policy_numeric_ranges_are_rejected() {
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.policy.ask_threshold = 1.5;
         assert!(cfg
             .validate()
@@ -631,6 +640,7 @@ mod tests {
             .contains("ask_threshold"));
 
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.policy.delegation_penalty = -0.5;
         assert!(cfg
             .validate()
@@ -639,6 +649,7 @@ mod tests {
             .contains("delegation_penalty"));
 
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.policy.delegation_min_scale = -0.1;
         assert!(cfg
             .validate()
@@ -647,6 +658,7 @@ mod tests {
             .contains("delegation_min_scale"));
 
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.policy.max_cost_per_task_usd = -10.0;
         assert!(cfg
             .validate()
@@ -658,6 +670,7 @@ mod tests {
     #[test]
     fn invalid_route_type_is_rejected() {
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.routing[0].route_types.push("INVALID-ROUTE".into());
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("unknown route type"), "{err}");
@@ -666,6 +679,7 @@ mod tests {
     #[test]
     fn invalid_verification_command_route_is_rejected() {
         let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         cfg.policy
             .verification_commands
             .insert("INVALID-ROUTE".into(), "echo 'test'".into());

@@ -3,7 +3,7 @@
 //! Deterministic, zero-token routing for LLM agents: route locally, spend
 //! upstream tokens only when a cheaper local action cannot finish the task.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::sync::Arc;
 use tokenos::engine::{Engine, Options};
@@ -158,6 +158,14 @@ enum Command {
         /// PEM private key file for native HTTPS serving.
         #[arg(long)]
         tls_key: Option<String>,
+        #[command(flatten)]
+        engine: EngineFlags,
+    },
+    /// Run routing-accuracy evaluation over a labeled dataset
+    Eval {
+        /// Labeled dataset path
+        #[arg(long)]
+        dataset: String,
         #[command(flatten)]
         engine: EngineFlags,
     },
@@ -741,5 +749,105 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 webui::serve(eng, &host, port, token).await
             }
         }
+        Command::Eval {
+            dataset,
+            engine: ef,
+        } => run_eval(&dataset, &ef).await,
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvalItem {
+    #[serde(alias = "prompt", alias = "goal")]
+    task: String,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(alias = "expected")]
+    expected_route: String,
+}
+
+async fn run_eval(dataset_path: &str, ef: &EngineFlags) -> Result<()> {
+    let content = std::fs::read_to_string(dataset_path)
+        .with_context(|| format!("failed to read dataset file at {}", dataset_path))?;
+
+    let items: Vec<EvalItem> = if dataset_path.ends_with(".yaml") || dataset_path.ends_with(".yml")
+    {
+        serde_yaml::from_str(&content).context("failed to parse dataset as YAML")?
+    } else if dataset_path.ends_with(".json") {
+        serde_json::from_str(&content).context("failed to parse dataset as JSON")?
+    } else {
+        serde_json::from_str(&content)
+            .or_else(|_| serde_yaml::from_str(&content))
+            .context("failed to parse dataset as JSON or YAML")?
+    };
+
+    if items.is_empty() {
+        return Err(anyhow!("evaluation dataset is empty"));
+    }
+
+    let eng = build_engine(ef)?;
+    let total = items.len();
+    let mut correct = 0;
+    let mut mismatches = Vec::new();
+
+    println!(
+        "{:<4} {:<15} {:<15} TASK",
+        "NUM", "EXPECTED", "PREDICTED"
+    );
+    println!("{}", "-".repeat(80));
+
+    for (idx, item) in items.iter().enumerate() {
+        let (dec, _) = eng.route_only_with_constraints(&item.task, &item.constraints);
+        let predicted = dec.route.as_str();
+        let expected = item.expected_route.trim().to_uppercase();
+        let is_ok = predicted == expected;
+
+        let status_mark = if is_ok {
+            correct += 1;
+            "+"
+        } else {
+            mismatches.push((idx + 1, item, predicted.to_string(), dec.reason.clone()));
+            "x"
+        };
+
+        let task_trunc = if item.task.chars().count() > 45 {
+            format!("{}...", item.task.chars().take(42).collect::<String>())
+        } else {
+            item.task.clone()
+        };
+
+        println!(
+            "{:<4} {:<4} {:<15} {:<15} {:?}",
+            status_mark,
+            idx + 1,
+            expected,
+            predicted,
+            task_trunc
+        );
+    }
+
+    println!("{}", "-".repeat(80));
+    let accuracy = (correct as f64 / total as f64) * 100.0;
+    println!("Evaluation results:");
+    println!("  Total items: {}", total);
+    println!("  Correct:     {}", correct);
+    println!("  Incorrect:   {}", total - correct);
+    println!("  Accuracy:    {:.2}%", accuracy);
+
+    if !mismatches.is_empty() {
+        println!("\nMismatches detail:");
+        println!("{}", "=".repeat(80));
+        for (num, item, pred, reason) in mismatches {
+            println!("Item #{} - {}", num, item.task);
+            println!("  Expected:  {}", item.expected_route.trim().to_uppercase());
+            println!("  Predicted: {}", pred);
+            println!("  Reason:    {}", reason);
+            if !item.constraints.is_empty() {
+                println!("  Constraints: {:?}", item.constraints);
+            }
+            println!("{}", "-".repeat(80));
+        }
+    }
+
+    Ok(())
 }

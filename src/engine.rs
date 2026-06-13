@@ -175,8 +175,23 @@ impl Engine {
         }
 
         // Backfill routing observations and provider health from the most
-        // granular durable evidence available. Attempt rows include failed
-        // failover legs; older databases may only have final execution rows.
+        // durable evidence available.
+        let hydrated_bandit = match engine.store.load_bandit_states() {
+            Ok(states) if !states.is_empty() => {
+                let mut total_pulls = 0;
+                for s in &states {
+                    engine
+                        .bandit
+                        .set_state(&s.provider, s.pulls, s.reward_sum, s.latency_sum_ms);
+                    total_pulls += s.pulls;
+                }
+                engine.bandit.set_total_pulls(total_pulls);
+                true
+            }
+            _ => false,
+        };
+
+        // Attempt rows include failed failover legs; older databases may only have final execution rows.
         let hydrated_from_attempts = match engine.store.list_attempts(1000) {
             Ok(mut attempts) => {
                 if attempts.is_empty() {
@@ -184,11 +199,13 @@ impl Engine {
                 } else {
                     attempts.reverse();
                     for attempt in &attempts {
-                        engine.bandit.record(
-                            &attempt.provider,
-                            attempt.success,
-                            attempt.latency_ms as f64,
-                        );
+                        if !hydrated_bandit {
+                            engine.bandit.record(
+                                &attempt.provider,
+                                attempt.success,
+                                attempt.latency_ms as f64,
+                            );
+                        }
                         engine.tracker.record(
                             &attempt.provider,
                             attempt.latency_ms as f64,
@@ -210,9 +227,13 @@ impl Engine {
                 Ok(mut execs_chronological) => {
                     execs_chronological.reverse();
                     for exec in &execs_chronological {
-                        engine
-                            .bandit
-                            .record(&exec.provider, exec.success, exec.latency_ms as f64);
+                        if !hydrated_bandit {
+                            engine.bandit.record(
+                                &exec.provider,
+                                exec.success,
+                                exec.latency_ms as f64,
+                            );
+                        }
                         engine
                             .tracker
                             .record(&exec.provider, exec.latency_ms as f64, exec.success);
@@ -232,6 +253,22 @@ impl Engine {
         }
 
         Ok(engine)
+    }
+
+    /// Computes the cache key incorporating workspace hash if indexer is present.
+    pub fn solution_cache_key(&self, task: &str, constraints: &[String]) -> String {
+        let mut key = solution_cache_key(task, constraints);
+        if let Some(ix) = &self.indexer {
+            if let Ok(wh) = ix.workspace_hash() {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(key.as_bytes());
+                h.update(b"\x1f");
+                h.update(wh.as_bytes());
+                key = format!("{:x}", h.finalize());
+            }
+        }
+        key
     }
 
     /// Lazily constructs and caches a provider adapter.
@@ -279,7 +316,7 @@ impl Engine {
             + tokenizer::count_conservative(&ctx_block)
             + tokenizer::count_conservative(payload::KERNEL_CONTRACT);
         let has_existing_solution =
-            self.replayable_cache_hit(&solution_cache_key(task, constraints));
+            self.replayable_cache_hit(&self.solution_cache_key(task, constraints));
         let loop_detected = self.persisted_loop_detected(task).0;
         let repeated = self
             .store
@@ -404,7 +441,7 @@ impl Engine {
         // prior cold processes seeds the detector so oscillation across
         // invocations is caught deterministically.
         let (loop_detected, mut detector, loop_key) = self.persisted_loop_detected(task);
-        let cache_key = solution_cache_key(task, constraints);
+        let cache_key = self.solution_cache_key(task, constraints);
         let has_existing_solution = self.replayable_cache_hit(&cache_key);
 
         // Step 4: deterministic routing (zero token cost). Budgeting uses
@@ -657,8 +694,12 @@ impl Engine {
             // A 429 opens the provider's circuit breaker with
             // exponential backoff; any non-429 outcome closes it.
             match &resp {
-                Err(crate::provider::ProviderError::RateLimited) => {
-                    self.tracker.open_cooldown(&prov_name);
+                Err(crate::provider::ProviderError::RateLimited { retry_after }) => {
+                    if let Some(dur) = retry_after {
+                        self.tracker.open_cooldown_with_duration(&prov_name, *dur);
+                    } else {
+                        self.tracker.open_cooldown(&prov_name);
+                    }
                 }
                 _ => self.tracker.clear_cooldown(&prov_name),
             }
@@ -667,6 +708,12 @@ impl Engine {
             // check below so reward reflects useful output, not just bytes.
             if resp.is_err() {
                 self.bandit.record(&prov_name, false, lat as f64);
+                let (pulls, reward_sum, latency_sum_ms) = self.bandit.arm_sums(&prov_name);
+                warn_persist(
+                    "save bandit state",
+                    self.store
+                        .save_bandit_state(&prov_name, pulls, reward_sum, latency_sum_ms),
+                );
             }
 
             let resp = match resp {
@@ -760,6 +807,12 @@ impl Engine {
             if !v.pass {
                 // Unverifiable output earns the arm zero reward.
                 self.bandit.record(&prov_name, false, lat as f64);
+                let (pulls, reward_sum, latency_sum_ms) = self.bandit.arm_sums(&prov_name);
+                warn_persist(
+                    "save bandit state",
+                    self.store
+                        .save_bandit_state(&prov_name, pulls, reward_sum, latency_sum_ms),
+                );
                 // Fast local loopback: remember failure, try next provider.
                 let reason = format!("verification failed ({:?}): {:?}", v.tier, v.issues);
                 let p_cfg = self
@@ -914,6 +967,12 @@ impl Engine {
 
             // Verified success credits the bandit arm.
             self.bandit.record(&prov_name, true, lat as f64);
+            let (pulls, reward_sum, latency_sum_ms) = self.bandit.arm_sums(&prov_name);
+            warn_persist(
+                "save bandit state",
+                self.store
+                    .save_bandit_state(&prov_name, pulls, reward_sum, latency_sum_ms),
+            );
 
             // Success clears the durable loop window AND the goal-keyed
             // failure memory for this task text.
@@ -937,11 +996,19 @@ impl Engine {
                 && dec.route != Route::Ask
                 && !crate::maskcodec::contains_placeholder(&out_masked)
             {
-                warn_persist(
-                    "solution cache",
-                    self.store
-                        .cache_solution(&cache_key, dec.route.as_str(), &out_masked, &v.tier),
-                );
+                // Prevent caching mock provider outputs in live runs (unless dry_run is true)
+                let is_mock = p_cfg.adapter == "mock";
+                if !is_mock || self.dry_run {
+                    warn_persist(
+                        "solution cache",
+                        self.store.cache_solution(
+                            &cache_key,
+                            dec.route.as_str(),
+                            &out_masked,
+                            &v.tier,
+                        ),
+                    );
+                }
             }
 
             // Stop rule: acceptance satisfied, no known blocker => stop now.
@@ -1151,7 +1218,8 @@ mod tests {
     use super::*;
 
     fn test_engine() -> Engine {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         let arms: Vec<String> = cfg.providers.keys().cloned().collect();
         Engine {
             cfg,
@@ -1269,7 +1337,7 @@ mod tests {
         let e = test_engine();
         let task = "implement cached route preview behavior";
         let constraints = vec!["keep API stable".to_string()];
-        let key = solution_cache_key(task, &constraints);
+        let key = e.solution_cache_key(task, &constraints);
         e.store
             .cache_solution(&key, "IMPLEMENT", "cached answer", "static")
             .unwrap();
@@ -1690,7 +1758,7 @@ mod tests {
         // 2. Placeholder-bearing output is not cached for replay. The masked
         // form is safe in recorder blobs, but the reverse vault is deliberately
         // ephemeral, so replaying placeholders later would be incorrect.
-        let key = solution_cache_key(&task, &[]);
+        let key = e.solution_cache_key(&task, &[]);
         assert!(
             e.store.peek_cached_solution(&key).unwrap().is_none(),
             "placeholder-bearing output must not enter the solution cache"
@@ -1848,5 +1916,68 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Daily spend limit"));
+    }
+
+    #[tokio::test]
+    async fn mock_provider_not_cached_in_live_run() {
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        let arms: Vec<String> = cfg.providers.keys().cloned().collect();
+        let e = Engine {
+            cfg,
+            store: Store::open(Some(Path::new(":memory:"))).unwrap(),
+            recorder: Recorder::new(Some(Path::new(&format!(
+                "{}/tokenos-eng-livemock-test-{}-{}",
+                std::env::temp_dir().display(),
+                std::process::id(),
+                rand::thread_rng().gen::<u32>()
+            ))))
+            .unwrap(),
+            tracker: Tracker::new(),
+            bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
+            indexer: None,
+            dry_run: false, // live run!
+            adapters: RwLock::new(HashMap::new()),
+        };
+        let task = "some test task for mock caching";
+        let r1 = e.run(task, &[]).await.unwrap();
+        assert!(r1.success);
+        assert_eq!(r1.provider, "mock");
+
+        let r2 = e.run(task, &[]).await.unwrap();
+        assert!(r2.success);
+        assert_ne!(
+            r2.provider, "cache",
+            "mock provider output must NOT be served from cache in live runs"
+        );
+        let (entries, _, hits) = e.store.solution_cache_stats().unwrap();
+        assert_eq!(entries, 0, "no entries should be cached");
+        assert_eq!(hits, 0, "no hits should occur");
+    }
+
+    #[test]
+    fn workspace_cache_key_integration() {
+        let mut e = test_engine();
+        // 1. Without indexer
+        let task = "search files for key";
+        let key_no_indexer = e.solution_cache_key(task, &[]);
+
+        // 2. Set indexer
+        let ix = Indexer::open(Some(":memory:")).unwrap();
+        // Index some dummy data so there's a symbol
+        let temp_dir = std::env::temp_dir().join(format!("tokenos_test_{}", new_id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let test_file = temp_dir.join("main.py");
+        std::fs::write(&test_file, "def foo():\n    pass\n").unwrap();
+        ix.index_workspace(&temp_dir).unwrap();
+
+        e.indexer = Some(ix);
+        let key_with_indexer = e.solution_cache_key(task, &[]);
+
+        assert_ne!(key_no_indexer, key_with_indexer);
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

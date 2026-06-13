@@ -477,6 +477,31 @@ impl Indexer {
         let n: i64 = conn.query_row("SELECT COUNT(1) FROM symbols", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+
+    /// Computes a hash of the current indexed symbols.
+    pub fn workspace_hash(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT file, name, kind, start_line, end_line FROM symbols ORDER BY file, name, start_line"
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut hasher = Sha256::new();
+        while let Some(row) = rows.next()? {
+            let file: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let start_line: i64 = row.get(3)?;
+            let end_line: i64 = row.get(4)?;
+
+            hasher.update(file.as_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(kind.as_bytes());
+            hasher.update(start_line.to_be_bytes());
+            hasher.update(end_line.to_be_bytes());
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
 }
 
 fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<Symbol> {

@@ -43,7 +43,7 @@ pub struct Response {
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("provider rate limited (429)")]
-    RateLimited,
+    RateLimited { retry_after: Option<Duration> },
     #[error("provider authentication failed")]
     Auth,
     #[error("provider unavailable")]
@@ -56,11 +56,27 @@ pub enum ProviderError {
 
 fn classify_http(status: u16) -> ProviderError {
     match status {
-        429 => ProviderError::RateLimited,
+        429 => ProviderError::RateLimited { retry_after: None },
         401 | 403 => ProviderError::Auth,
         s if s >= 500 => ProviderError::Unavailable(None),
         s => ProviderError::Http(s),
     }
+}
+
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?;
+    let val_str = value.to_str().ok()?;
+    if let Ok(secs) = val_str.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    if let Ok(date) = chrono::DateTime::parse_from_rfc2822(val_str) {
+        let now = chrono::Utc::now();
+        let diff = date.with_timezone(&chrono::Utc) - now;
+        if diff.num_seconds() > 0 {
+            return Some(Duration::from_secs(diff.num_seconds() as u64));
+        }
+    }
+    None
 }
 
 /// Pooled HTTP client: keep-alives + HTTP/2 multiplexing keep upstream
@@ -210,7 +226,7 @@ impl Mock {
             tokio::time::sleep(self.latency).await;
         }
         if self.fail_every_n > 0 && n % self.fail_every_n == 0 {
-            return Err(ProviderError::RateLimited);
+            return Err(ProviderError::RateLimited { retry_after: None });
         }
         let body = if !self.canned.is_empty() {
             self.canned.clone()
@@ -350,6 +366,10 @@ async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
         .map_err(|e| ProviderError::Unavailable(Some(e.into())))?;
     let status = resp.status().as_u16();
     if status != 200 {
+        if status == 429 {
+            let retry_after = parse_retry_after(resp.headers());
+            return Err(ProviderError::RateLimited { retry_after });
+        }
         return Err(classify_http(status));
     }
     let body_bytes = read_response_limit(resp, 10 * 1024 * 1024)
@@ -436,6 +456,10 @@ async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, P
         .map_err(|e| ProviderError::Unavailable(Some(e.into())))?;
     let status = resp.status().as_u16();
     if status != 200 {
+        if status == 429 {
+            let retry_after = parse_retry_after(resp.headers());
+            return Err(ProviderError::RateLimited { retry_after });
+        }
         return Err(classify_http(status));
     }
     let body_bytes = read_response_limit(resp, 10 * 1024 * 1024)
@@ -558,6 +582,10 @@ async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
         .map_err(|e| ProviderError::Unavailable(Some(e.into())))?;
     let status = resp.status().as_u16();
     if status != 200 {
+        if status == 429 {
+            let retry_after = parse_retry_after(resp.headers());
+            return Err(ProviderError::RateLimited { retry_after });
+        }
         return Err(classify_http(status));
     }
     let body_bytes = read_response_limit(resp, 10 * 1024 * 1024)
@@ -630,18 +658,40 @@ mod tests {
         assert!(m.execute(&req("DIRECT", "GOAL: a")).await.is_ok()); // call 1
         assert!(matches!(
             m.execute(&req("DIRECT", "GOAL: b")).await,
-            Err(ProviderError::RateLimited)
+            Err(ProviderError::RateLimited { .. })
         )); // call 2
         assert!(m.execute(&req("DIRECT", "GOAL: c")).await.is_ok()); // call 3
     }
 
     #[test]
     fn classify_http_codes() {
-        assert!(matches!(classify_http(429), ProviderError::RateLimited));
+        assert!(matches!(
+            classify_http(429),
+            ProviderError::RateLimited { .. }
+        ));
         assert!(matches!(classify_http(401), ProviderError::Auth));
         assert!(matches!(classify_http(403), ProviderError::Auth));
         assert!(matches!(classify_http(500), ProviderError::Unavailable(_)));
         assert!(matches!(classify_http(404), ProviderError::Http(404)));
+    }
+
+    #[test]
+    fn test_parse_retry_after() {
+        use reqwest::header::{HeaderMap, RETRY_AFTER};
+
+        // Test seconds format
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, "120".parse().unwrap());
+        let dur = parse_retry_after(&headers).unwrap();
+        assert_eq!(dur, Duration::from_secs(120));
+
+        // Test HTTP date format
+        let mut headers = HeaderMap::new();
+        let future_time = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let future_time_str = future_time.to_rfc2822();
+        headers.insert(RETRY_AFTER, future_time_str.parse().unwrap());
+        let dur = parse_retry_after(&headers).unwrap();
+        assert!(dur.as_secs() >= 55 && dur.as_secs() <= 65);
     }
 
     #[test]

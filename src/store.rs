@@ -191,6 +191,14 @@ CREATE TABLE IF NOT EXISTS api_request_stats (
     PRIMARY KEY (method, path, status)
 );
 CREATE INDEX IF NOT EXISTS idx_api_request_stats_last_seen ON api_request_stats(last_seen_at);
+
+CREATE TABLE IF NOT EXISTS bandit_state (
+    provider       TEXT PRIMARY KEY,
+    pulls          INTEGER NOT NULL DEFAULT 0,
+    reward_sum     REAL NOT NULL DEFAULT 0.0,
+    latency_sum_ms REAL NOT NULL DEFAULT 0.0,
+    updated_at     TEXT NOT NULL
+);
 "#;
 
 impl Store {
@@ -239,76 +247,100 @@ impl Store {
                 harden_db_files(path);
             }
         }
-        conn.execute_batch(SCHEMA).context("migrate schema")?;
-        // Migration for pre-goal_hash databases: the column
-        // addition is idempotent — the error on already-migrated DBs is
-        // expected and ignored, then the index creation is retried.
-        conn.execute(
-            "ALTER TABLE failure_memory ADD COLUMN goal_hash TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
-            [],
-        )?;
-        // Migration to add verification_tier to executions.
-        conn.execute(
-            "ALTER TABLE executions ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
-            [],
-        )
-        .ok();
-        // Migration to add verification_tier to solution_cache.
-        conn.execute(
-            "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
-            [],
-        )
-        .ok();
-        // Migration to add route and cost_usd to execution_attempts.
-        conn.execute(
-            "ALTER TABLE execution_attempts ADD COLUMN route TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "ALTER TABLE execution_attempts ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0.0",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_exec_att_created ON execution_attempts(id DESC)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_exec_att_provider ON execution_attempts(provider, id DESC)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_exec_att_route ON execution_attempts(route, id DESC)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS api_request_stats (
-                method           TEXT NOT NULL,
-                path             TEXT NOT NULL,
-                status           INTEGER NOT NULL,
-                count            INTEGER NOT NULL DEFAULT 0,
-                total_latency_us INTEGER NOT NULL DEFAULT 0,
-                max_latency_us   INTEGER NOT NULL DEFAULT 0,
-                last_seen_at     TEXT NOT NULL,
-                PRIMARY KEY (method, path, status)
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_api_request_stats_last_seen ON api_request_stats(last_seen_at)",
-            [],
-        )?;
+
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 1 {
+            conn.execute_batch(SCHEMA).context("migrate schema")?;
+            // Migration for pre-goal_hash databases: the column
+            // addition is idempotent — the error on already-migrated DBs is
+            // expected and ignored, then the index creation is retried.
+            conn.execute(
+                "ALTER TABLE failure_memory ADD COLUMN goal_hash TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .ok();
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
+                [],
+            )?;
+            // Migration to add verification_tier to executions.
+            conn.execute(
+                "ALTER TABLE executions ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
+                [],
+            )
+            .ok();
+            // Migration to add verification_tier to solution_cache.
+            conn.execute(
+                "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
+                [],
+            )
+            .ok();
+            // Migration to add route and cost_usd to execution_attempts.
+            conn.execute(
+                "ALTER TABLE execution_attempts ADD COLUMN route TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .ok();
+            conn.execute(
+                "ALTER TABLE execution_attempts ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0.0",
+                [],
+            )
+            .ok();
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exec_att_created ON execution_attempts(id DESC)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exec_att_provider ON execution_attempts(provider, id DESC)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exec_att_route ON execution_attempts(route, id DESC)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS api_request_stats (
+                    method           TEXT NOT NULL,
+                    path             TEXT NOT NULL,
+                    status           INTEGER NOT NULL,
+                    count            INTEGER NOT NULL DEFAULT 0,
+                    total_latency_us INTEGER NOT NULL DEFAULT 0,
+                    max_latency_us   INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at     TEXT NOT NULL,
+                    PRIMARY KEY (method, path, status)
+                )",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_request_stats_last_seen ON api_request_stats(last_seen_at)",
+                [],
+            )?;
+            // Backfill: rows recorded before the goal_hash column existed carry
+            // the '' default and are invisible to every goal-keyed read.
+            conn.pragma_update(None, "user_version", 1)?;
+        }
+
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS bandit_state (
+                    provider       TEXT PRIMARY KEY,
+                    pulls          INTEGER NOT NULL DEFAULT 0,
+                    reward_sum     REAL NOT NULL DEFAULT 0.0,
+                    latency_sum_ms REAL NOT NULL DEFAULT 0.0,
+                    updated_at     TEXT NOT NULL
+                )",
+                [],
+            )?;
+            conn.pragma_update(None, "user_version", 2)?;
+        }
+
         // Backfill: rows recorded before the goal_hash column existed carry
         // the '' default and are invisible to every goal-keyed read. Their
         // task IDs still join to the tasks table, whose goal text yields the
         // exact digest. One-time cost, idempotent (the WHERE clause empties).
         Self::backfill_goal_hashes(&conn)?;
+
         if owner_only_permissions {
             if let Some(path) = db_path.as_deref() {
                 harden_db_files(path);
@@ -601,9 +633,13 @@ impl Store {
     // Verified solution cache
     // -----------------------------------------------------------------
 
+    // -----------------------------------------------------------------
+    // Verified solution cache
+    // -----------------------------------------------------------------
+
     /// Admits a verified output to the solution cache. Idempotent: a repeat
     /// admission for the same key refreshes the stored output (last verified
-    /// answer wins).
+    /// answer wins). Also enforces LRU eviction rules when cache size exceeds the limit.
     pub fn cache_solution(
         &self,
         cache_key: &str,
@@ -618,30 +654,78 @@ impl Store {
              ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3, verification_tier = ?4",
             params![cache_key, route, output, verification_tier, Utc::now().to_rfc3339()],
         )?;
+
+        // LRU Eviction: if solution_cache exceeds MAX_CACHE_SIZE, evict the least recently used entries.
+        let count: i64 = conn.query_row("SELECT COUNT(1) FROM solution_cache", [], |r| r.get(0))?;
+        const MAX_CACHE_SIZE: usize = 1000;
+        if count > MAX_CACHE_SIZE as i64 {
+            let overflow = count - MAX_CACHE_SIZE as i64;
+            let mut stmt = conn.prepare(
+                "SELECT cache_key FROM solution_cache
+                 ORDER BY COALESCE(last_hit_at, created_at) ASC
+                 LIMIT ?1",
+            )?;
+            let keys: Vec<String> = stmt
+                .query_map(params![overflow], |r| r.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for key in keys {
+                conn.execute(
+                    "DELETE FROM solution_cache WHERE cache_key = ?1",
+                    params![key],
+                )?;
+            }
+        }
         Ok(())
+    }
+
+    /// Helper to check if a solution cache entry is expired.
+    fn is_cache_entry_expired(&self, created_at_str: &str) -> bool {
+        const CACHE_TTL_SECS: i64 = 7 * 24 * 3600; // 7 days
+        if let Ok(dt) = DateTime::parse_from_rfc3339(created_at_str) {
+            let created_at = dt.with_timezone(&Utc);
+            if Utc::now() - created_at > chrono::Duration::seconds(CACHE_TTL_SECS) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Looks up a cached verified solution without recording a hit. This is
     /// used by the router so route preview can ask "would this be reusable?"
-    /// without mutating telemetry.
+    /// without mutating telemetry. Expired entries are deleted on read.
     pub fn peek_cached_solution(
         &self,
         cache_key: &str,
     ) -> Result<Option<(String, String, String)>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT route, output, verification_tier FROM solution_cache WHERE cache_key = ?1",
-            params![cache_key],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+        let row = conn
+            .query_row(
+                "SELECT route, output, verification_tier, created_at FROM solution_cache WHERE cache_key = ?1",
+                params![cache_key],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((route, output, tier, created_at)) = row {
+            if self.is_cache_entry_expired(&created_at) {
+                conn.execute(
+                    "DELETE FROM solution_cache WHERE cache_key = ?1",
+                    params![cache_key],
+                )?;
+                Ok(None)
+            } else {
+                Ok(Some((route, output, tier)))
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     /// Whether a verified solution exists for a cache key. This is a
@@ -652,28 +736,40 @@ impl Store {
 
     /// Looks up a cached verified solution. A hit increments the hit counter
     /// and stamps last_hit_at — telemetry for proving the cache pays rent.
+    /// Expired entries are deleted on read.
     pub fn cached_solution(&self, cache_key: &str) -> Result<Option<(String, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT route, output, verification_tier FROM solution_cache WHERE cache_key = ?1",
+                "SELECT route, output, verification_tier, created_at FROM solution_cache WHERE cache_key = ?1",
                 params![cache_key],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
                     ))
                 },
             )
             .optional()?;
-        if row.is_some() {
-            conn.execute(
-                "UPDATE solution_cache SET hits = hits + 1, last_hit_at = ?2 WHERE cache_key = ?1",
-                params![cache_key, Utc::now().to_rfc3339()],
-            )?;
+        if let Some((route, output, tier, created_at)) = row {
+            if self.is_cache_entry_expired(&created_at) {
+                conn.execute(
+                    "DELETE FROM solution_cache WHERE cache_key = ?1",
+                    params![cache_key],
+                )?;
+                Ok(None)
+            } else {
+                conn.execute(
+                    "UPDATE solution_cache SET hits = hits + 1, last_hit_at = ?2 WHERE cache_key = ?1",
+                    params![cache_key, Utc::now().to_rfc3339()],
+                )?;
+                Ok(Some((route, output, tier)))
+            }
+        } else {
+            Ok(None)
         }
-        Ok(row)
     }
 
     /// Evicts one cached solution (e.g. when its goal later fails — a stale
@@ -889,6 +985,55 @@ impl Store {
         Ok(())
     }
 
+    /// Saves or updates the bandit state for a provider.
+    pub fn save_bandit_state(
+        &self,
+        provider: &str,
+        pulls: u64,
+        reward_sum: f64,
+        latency_sum_ms: f64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO bandit_state (provider, pulls, reward_sum, latency_sum_ms, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider) DO UPDATE SET
+                pulls = ?2,
+                reward_sum = ?3,
+                latency_sum_ms = ?4,
+                updated_at = ?5",
+            params![
+                provider,
+                pulls as i64,
+                reward_sum,
+                latency_sum_ms,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Loads all saved provider bandit states.
+    pub fn load_bandit_states(&self) -> Result<Vec<BanditStateEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT provider, pulls, reward_sum, latency_sum_ms FROM bandit_state")?;
+        let rows = stmt.query_map([], |row| {
+            let pulls_i64: i64 = row.get(1)?;
+            Ok(BanditStateEntry {
+                provider: row.get(0)?,
+                pulls: pulls_i64 as u64,
+                reward_sum: row.get(2)?,
+                latency_sum_ms: row.get(3)?,
+            })
+        })?;
+        let mut res = Vec::new();
+        for r in rows {
+            res.push(r?);
+        }
+        Ok(res)
+    }
+
     /// Deletes telemetry records older than retention_days.
     pub fn prune_old_records(&self, retention_days: usize) -> Result<usize> {
         if retention_days == 0 {
@@ -947,7 +1092,7 @@ impl Store {
                   COALESCE(AVG(CAST(success AS REAL)),0),
                   COALESCE(SUM(est_cost_usd),0),
                   COALESCE(SUM(success),0)
-               FROM executions GROUP BY route ORDER BY COUNT(1) DESC"#,
+               FROM executions WHERE provider != 'mock' GROUP BY route ORDER BY COUNT(1) DESC"#,
         )?;
         let rows = stmt.query_map([], |r| {
             let successes: f64 = r.get(7)?;
@@ -963,7 +1108,7 @@ impl Store {
                 cost_per_success: if successes > 0.0 {
                     total_cost / successes
                 } else {
-                    0.0
+                    f64::INFINITY
                 },
             })
         })?;
@@ -1108,7 +1253,7 @@ impl Store {
         ) = conn.query_row(
             r#"SELECT COUNT(1), COALESCE(SUM(success),0), COALESCE(SUM(tokens_in+tokens_out),0),
                       COALESCE(SUM(est_cost_usd),0), COALESCE(AVG(latency_ms),0)
-                   FROM executions"#,
+                   FROM executions WHERE provider != 'mock'"#,
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
@@ -1121,7 +1266,7 @@ impl Store {
             cost_per_success: if successes > 0 {
                 total_cost / successes as f64
             } else {
-                0.0
+                f64::INFINITY
             },
             avg_latency_ms: avg_latency,
             overall_success_pct: if executions > 0 {
@@ -1303,6 +1448,15 @@ pub struct Summary {
     pub overall_success_pct: f64,
 }
 
+/// Durable bandit state entry per provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanditStateEntry {
+    pub provider: String,
+    pub pulls: u64,
+    pub reward_sum: f64,
+    pub latency_sum_ms: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,6 +1492,37 @@ mod tests {
         // Eviction makes it a miss again.
         s.evict_solution("k1").unwrap();
         assert!(s.cached_solution("k1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_solution_cache_ttl_and_lru() {
+        let s = mem();
+        // Insert an expired entry (8 days ago) using raw SQL
+        let expired_time = (Utc::now() - chrono::Duration::days(8)).to_rfc3339();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO solution_cache (cache_key, route, output, verification_tier, hits, created_at)
+                 VALUES ('expired_key', 'IMPLEMENT', 'old output', 'static', 0, ?1)",
+                params![expired_time],
+            )
+            .unwrap();
+        }
+
+        // peek_cached_solution and cached_solution should return None because it's expired
+        assert!(s.peek_cached_solution("expired_key").unwrap().is_none());
+        assert!(s.cached_solution("expired_key").unwrap().is_none());
+
+        // Check LRU eviction (MAX_CACHE_SIZE is 1000)
+        for i in 0..1005 {
+            let key = format!("k_{}", i);
+            s.cache_solution(&key, "IMPLEMENT", "output", "static")
+                .unwrap();
+        }
+
+        // The total number of cached entries should be capped at 1000
+        let (total, _, _) = s.solution_cache_stats().unwrap();
+        assert_eq!(total, 1000);
     }
 
     #[test]
@@ -1510,7 +1695,7 @@ mod tests {
         s.record_execution(&Execution {
             task_id: "t1".into(),
             route: "IMPLEMENT".into(),
-            provider: "mock".into(),
+            provider: "openai".into(),
             tokens_in: 100,
             tokens_out: 50,
             est_cost_usd: 0.002,
@@ -1521,7 +1706,7 @@ mod tests {
         s.record_execution(&Execution {
             task_id: "t2".into(),
             route: "IMPLEMENT".into(),
-            provider: "mock".into(),
+            provider: "openai".into(),
             est_cost_usd: 0.004,
             success: false,
             ..Default::default()

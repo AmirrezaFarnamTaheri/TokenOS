@@ -45,7 +45,7 @@ pub fn estimate_bytes(b: &[u8]) -> usize {
 
 /// Whether text fits within `max_tokens`.
 pub fn fits_budget(s: &str, max_tokens: usize) -> bool {
-    estimate(s) <= max_tokens
+    count_conservative(s) <= max_tokens
 }
 
 /// Trims `s` so its estimate fits within `max_tokens`, cutting at the nearest
@@ -59,7 +59,7 @@ pub fn truncate(s: &str, max_tokens: usize) -> String {
     let (mut lo, mut hi) = (0usize, idxs.len() - 1);
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if estimate(&s[..idxs[mid]]) <= max_tokens {
+        if count_conservative(&s[..idxs[mid]]) <= max_tokens {
             lo = mid;
         } else {
             hi = mid - 1;
@@ -102,7 +102,7 @@ mod tests {
     fn truncate_respects_budget() {
         let s = "line one\n".repeat(500);
         let t = truncate(&s, 100);
-        assert!(estimate(&t) <= 100);
+        assert!(count_conservative(&t) <= 100);
         assert!(!t.is_empty());
     }
 
@@ -115,7 +115,7 @@ mod tests {
     fn truncate_multibyte_safe() {
         let s = "日本語のテキスト".repeat(200);
         let t = truncate(&s, 50);
-        assert!(estimate(&t) <= 50);
+        assert!(count_conservative(&t) <= 50);
     }
 
     #[test]

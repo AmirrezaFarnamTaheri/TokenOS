@@ -20,7 +20,7 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use hyper_util::service::TowerToHyperService;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::ToSocketAddrs;
 use std::path::Path as FsPath;
@@ -88,13 +88,14 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
 
     // Determine the required scope based on path
     let path = req.uri().path();
-    let required_scope = if path == "/api/run" || path == "/api/route" {
-        "run"
-    } else if path.starts_with("/api/traces/") {
-        "admin"
-    } else {
-        "read"
-    };
+    let required_scope =
+        if path == "/api/run" || path == "/api/route" || path == "/v1/chat/completions" {
+            "run"
+        } else if path.starts_with("/api/traces/") {
+            "admin"
+        } else {
+            "read"
+        };
 
     let mut matched_token: Option<&str> = None;
 
@@ -147,7 +148,10 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
 fn api_metric_path(path: &str) -> String {
     if path.starts_with("/api/traces/") {
         "/api/traces/:task_id".to_string()
-    } else if path.starts_with("/api/") || matches!(path, "/" | "/app.js" | "/style.css") {
+    } else if path.starts_with("/api/")
+        || path.starts_with("/v1/")
+        || matches!(path, "/" | "/app.js" | "/style.css" | "/metrics")
+    {
         path.to_string()
     } else {
         "<unmatched>".to_string()
@@ -225,6 +229,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/traces/:task_id", get(handle_traces))
         .route("/api/route", post(handle_route_preview))
         .route("/api/run", post(handle_run))
+        .route("/v1/chat/completions", post(handle_openai_compat))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -241,6 +246,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
             "/style.css",
             get(|| async { asset(STYLE_CSS, "text/css; charset=utf-8") }),
         )
+        .route("/metrics", get(handle_metrics).with_state(state.clone()))
         .merge(api)
         .layer(tower_http::catch_panic::CatchPanicLayer::new())
         .layer(middleware::from_fn_with_state(state.clone(), log_request))
@@ -628,6 +634,290 @@ async fn handle_run(
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiChatRequest {
+    pub model: Option<String>,
+    pub messages: Vec<OpenAiMessage>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiChatResponse {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<OpenAiChoice>,
+    pub usage: OpenAiUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiChoice {
+    pub index: usize,
+    pub message: OpenAiMessage,
+    pub finish_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+fn openai_err(status: StatusCode, msg: String) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": msg,
+                "type": "invalid_request_error",
+                "param": null,
+                "code": null
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn handle_openai_compat(
+    State(state): State<WebState>,
+    body: Result<Json<OpenAiChatRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let req = match body {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return openai_err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid JSON payload: {}", e),
+            )
+        }
+    };
+
+    let last_user_msg = req.messages.iter().rev().find(|m| m.role == "user");
+
+    let task_desc = match last_user_msg {
+        Some(msg) if !msg.content.trim().is_empty() => msg.content.trim().to_string(),
+        _ => {
+            return openai_err(
+                StatusCode::BAD_REQUEST,
+                "No active user message found in the request messages list".to_string(),
+            )
+        }
+    };
+
+    let Ok(permit) = state.run_limiter.clone().try_acquire_owned() else {
+        return openai_err(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("too many concurrent executions; limit is {MAX_CONCURRENT_RUNS}"),
+        );
+    };
+
+    let run = tokio::time::timeout(RUN_TIMEOUT, state.engine.run(&task_desc, &[])).await;
+    drop(permit);
+
+    match run {
+        Err(_) => openai_err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "execution timed out".to_string(),
+        ),
+        Ok(Ok(res)) => {
+            let resp = OpenAiChatResponse {
+                id: format!("chatcmpl-{}", res.task_id),
+                object: "chat.completion".to_string(),
+                created: chrono::Utc::now().timestamp(),
+                model: if res.model.is_empty() {
+                    "tokenos".to_string()
+                } else {
+                    res.model.clone()
+                },
+                choices: vec![OpenAiChoice {
+                    index: 0,
+                    message: OpenAiMessage {
+                        role: "assistant".to_string(),
+                        content: res.output,
+                    },
+                    finish_reason: "stop".to_string(),
+                }],
+                usage: OpenAiUsage {
+                    prompt_tokens: res.tokens_in,
+                    completion_tokens: res.tokens_out,
+                    total_tokens: res.tokens_in + res.tokens_out,
+                },
+            };
+            ok_json(resp)
+        }
+        Ok(Err(e)) => openai_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_metrics(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
+    let mut out = String::new();
+
+    // 1. Global summary metrics
+    if let Ok(sum) = eng.store.get_summary() {
+        out.push_str("# HELP tokenos_tasks_total Total tasks in the system\n");
+        out.push_str("# TYPE tokenos_tasks_total counter\n");
+        out.push_str(&format!("tokenos_tasks_total {}\n\n", sum.tasks));
+
+        out.push_str("# HELP tokenos_executions_total Total executions run\n");
+        out.push_str("# TYPE tokenos_executions_total counter\n");
+        out.push_str(&format!("tokenos_executions_total {}\n\n", sum.executions));
+
+        out.push_str("# HELP tokenos_successes_total Total successful executions\n");
+        out.push_str("# TYPE tokenos_successes_total counter\n");
+        out.push_str(&format!("tokenos_successes_total {}\n\n", sum.successes));
+
+        out.push_str("# HELP tokenos_tokens_total Total tokens consumed\n");
+        out.push_str("# TYPE tokenos_tokens_total counter\n");
+        out.push_str(&format!("tokenos_tokens_total {}\n\n", sum.total_tokens));
+
+        out.push_str("# HELP tokenos_cost_usd_total Total cost in USD\n");
+        out.push_str("# TYPE tokenos_cost_usd_total counter\n");
+        out.push_str(&format!(
+            "tokenos_cost_usd_total {}\n\n",
+            sum.total_cost_usd
+        ));
+
+        out.push_str("# HELP tokenos_avg_latency_ms Average latency in milliseconds\n");
+        out.push_str("# TYPE tokenos_avg_latency_ms gauge\n");
+        out.push_str(&format!(
+            "tokenos_avg_latency_ms {}\n\n",
+            sum.avg_latency_ms
+        ));
+
+        out.push_str(
+            "# HELP tokenos_cost_per_success ECPST (Effective Cost Per Successful Task) globally\n",
+        );
+        out.push_str("# TYPE tokenos_cost_per_success gauge\n");
+        out.push_str(&format!(
+            "tokenos_cost_per_success {}\n\n",
+            sum.cost_per_success
+        ));
+    }
+
+    // 2. Per-route stats
+    if let Ok(routes) = eng.store.stats_by_route() {
+        out.push_str("# HELP tokenos_route_runs Total runs per route\n");
+        out.push_str("# TYPE tokenos_route_runs counter\n");
+        for r in &routes {
+            out.push_str(&format!(
+                "tokenos_route_runs{{route=\"{}\"}} {}\n",
+                r.route, r.runs
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("# HELP tokenos_route_success_rate Success rate per route\n");
+        out.push_str("# TYPE tokenos_route_success_rate gauge\n");
+        for r in &routes {
+            out.push_str(&format!(
+                "tokenos_route_success_rate{{route=\"{}\"}} {}\n",
+                r.route, r.success_rate
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("# HELP tokenos_route_cost_per_success Effective cost per successful task (ECPST) per route\n");
+        out.push_str("# TYPE tokenos_route_cost_per_success gauge\n");
+        for r in &routes {
+            out.push_str(&format!(
+                "tokenos_route_cost_per_success{{route=\"{}\"}} {}\n",
+                r.route, r.cost_per_success
+            ));
+        }
+        out.push('\n');
+    }
+
+    // 3. Per-provider stats
+    if let Ok(providers) = eng.store.stats_by_provider() {
+        out.push_str("# HELP tokenos_provider_runs Total runs per provider\n");
+        out.push_str("# TYPE tokenos_provider_runs counter\n");
+        for p in &providers {
+            out.push_str(&format!(
+                "tokenos_provider_runs{{provider=\"{}\"}} {}\n",
+                p.provider, p.runs
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("# HELP tokenos_provider_success_rate Success rate per provider\n");
+        out.push_str("# TYPE tokenos_provider_success_rate gauge\n");
+        for p in &providers {
+            out.push_str(&format!(
+                "tokenos_provider_success_rate{{provider=\"{}\"}} {}\n",
+                p.provider, p.success_rate
+            ));
+        }
+        out.push('\n');
+
+        out.push_str(
+            "# HELP tokenos_provider_avg_latency_ms Average latency in milliseconds per provider\n",
+        );
+        out.push_str("# TYPE tokenos_provider_avg_latency_ms gauge\n");
+        for p in &providers {
+            out.push_str(&format!(
+                "tokenos_provider_avg_latency_ms{{provider=\"{}\"}} {}\n",
+                p.provider, p.avg_latency_ms
+            ));
+        }
+        out.push('\n');
+    }
+
+    // 4. Cooldown status
+    out.push_str("# HELP tokenos_provider_cooldown Active cooldown status per provider (1 = in cooldown, 0 = active)\n");
+    out.push_str("# TYPE tokenos_provider_cooldown gauge\n");
+    for (name, opt_dur) in eng.tracker.active_cooldowns() {
+        let val = if opt_dur.is_some() { 1 } else { 0 };
+        out.push_str(&format!(
+            "tokenos_provider_cooldown{{provider=\"{}\"}} {}\n",
+            name, val
+        ));
+    }
+    out.push('\n');
+
+    // 5. Drift ratios
+    out.push_str(
+        "# HELP tokenos_provider_drift_ratio EWMA ratio of actual / estimated input tokens\n",
+    );
+    out.push_str("# TYPE tokenos_provider_drift_ratio gauge\n");
+    for d in eng.drift.all() {
+        out.push_str(&format!(
+            "tokenos_provider_drift_ratio{{provider=\"{}\"}} {}\n",
+            d.provider, d.ratio_ewma
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("# HELP tokenos_provider_drifting Is provider drifting (1 = drifting, 0 = ok)\n");
+    out.push_str("# TYPE tokenos_provider_drifting gauge\n");
+    for d in eng.drift.all() {
+        let val = if d.drifting { 1 } else { 0 };
+        out.push_str(&format!(
+            "tokenos_provider_drifting{{provider=\"{}\"}} {}\n",
+            d.provider, val
+        ));
+    }
+    out.push('\n');
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        out,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,7 +930,8 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     fn test_engine() -> Arc<Engine> {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
         let arms: Vec<String> = cfg.providers.keys().cloned().collect();
         Arc::new(Engine {
             cfg,
@@ -1150,5 +1441,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn openai_compat_proxy_works() {
+        let app = router(test_engine());
+        let request_body = json!({
+            "messages": [
+                {"role": "user", "content": "implement cached route preview behavior"}
+            ]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let completions_resp: OpenAiChatResponse = serde_json::from_slice(&body).unwrap();
+        assert!(completions_resp.id.starts_with("chatcmpl-"));
+        assert_eq!(completions_resp.object, "chat.completion");
+        assert_eq!(completions_resp.choices.len(), 1);
+        assert_eq!(completions_resp.choices[0].message.role, "assistant");
+        assert!(!completions_resp.choices[0].message.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_prometheus_text() {
+        let app = router(test_engine());
+        let resp = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/plain; version=0.0.4"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("tokenos_tasks_total"));
+        assert!(text.contains("tokenos_provider_runs"));
     }
 }

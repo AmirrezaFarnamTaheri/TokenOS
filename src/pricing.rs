@@ -142,9 +142,26 @@ impl Tracker {
         }
         h.consecutive_429s = h.consecutive_429s.saturating_add(1);
         let shift = (h.consecutive_429s - 1).min(8);
-        let dur = Self::COOLDOWN_BASE
+        let base_dur = Self::COOLDOWN_BASE
             .saturating_mul(1u32 << shift)
             .min(Self::COOLDOWN_CAP);
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let jitter_factor: f64 = rng.gen_range(0.8..1.2);
+        let secs = base_dur.as_secs_f64() * jitter_factor;
+        let dur = Duration::from_secs_f64(secs).min(Self::COOLDOWN_CAP);
+        h.cooldown_until = Some(now + dur);
+    }
+
+    /// Opens the provider's breaker with a specific duration (e.g. from Retry-After header).
+    pub fn open_cooldown_with_duration(&self, provider: &str, dur: Duration) {
+        let mut state = self.state.lock().unwrap();
+        let h = state.entry(provider.to_string()).or_default();
+        let now = Instant::now();
+        if matches!(h.cooldown_until, Some(until) if until <= now) {
+            h.consecutive_429s = 0;
+        }
+        h.consecutive_429s = h.consecutive_429s.saturating_add(1);
         h.cooldown_until = Some(now + dur);
     }
 
@@ -164,6 +181,21 @@ impl Tracker {
             Some(t) => Instant::now() < t,
             None => false,
         }
+    }
+
+    /// Returns the names and remaining cooldown duration of all tracked providers.
+    pub fn active_cooldowns(&self) -> Vec<(String, Option<std::time::Duration>)> {
+        let state = self.state.lock().unwrap();
+        let now = Instant::now();
+        state
+            .iter()
+            .map(|(k, h)| {
+                let rem = h
+                    .cooldown_until
+                    .and_then(|t| if t > now { Some(t - now) } else { None });
+                (k.clone(), rem)
+            })
+            .collect()
     }
 }
 
@@ -667,6 +699,29 @@ impl Ucb1Router {
             None => 1.0,
             Some(a) if a.pulls() == 0 => 1.0,
             Some(a) => 0.5 + a.mean_reward(),
+        }
+    }
+
+    /// Sets the pulls, reward_sum, and latency_sum_ms for a provider.
+    pub fn set_state(&self, provider: &str, pulls: u64, reward_sum: f64, latency_sum_ms: f64) {
+        if let Some(arm) = self.arm(provider) {
+            arm.pulls.store(pulls, Ordering::Release);
+            arm.reward_sum.store(reward_sum);
+            arm.latency_sum_ms.store(latency_sum_ms);
+        }
+    }
+
+    /// Sets the total pull count for the router.
+    pub fn set_total_pulls(&self, total: u64) {
+        self.total_pulls.store(total, Ordering::Release);
+    }
+
+    /// Raw per-arm sum statistics: (pulls, reward_sum, latency_sum_ms).
+    /// Unknown providers report zeros. Lock-free.
+    pub fn arm_sums(&self, provider: &str) -> (u64, f64, f64) {
+        match self.arm(provider) {
+            None => (0, 0.0, 0.0),
+            Some(a) => (a.pulls(), a.reward_sum.load(), a.latency_sum_ms.load()),
         }
     }
 }

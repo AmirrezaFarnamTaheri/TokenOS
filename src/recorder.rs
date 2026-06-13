@@ -158,7 +158,7 @@ impl Recorder {
 
     /// Fetch a stored payload by SHA.
     pub fn blob(&self, sha: &str) -> Result<Vec<u8>> {
-        if sha.len() < 3 {
+        if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(anyhow!("invalid sha"));
         }
         Ok(fs::read(
