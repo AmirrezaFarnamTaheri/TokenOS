@@ -179,7 +179,7 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos
-cargo test                   # 211 unit tests across all subsystems, fully offline
+cargo test                   # 231 unit tests across all subsystems, fully offline
 cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
