@@ -311,6 +311,15 @@ impl Engine {
         task: &str,
         constraints: &[String],
     ) -> (Decision, String) {
+        self.route_only_with_policy_constraints(task, constraints, &self.cfg.policy)
+    }
+
+    pub fn route_only_with_policy_constraints(
+        &self,
+        task: &str,
+        constraints: &[String],
+        policy: &crate::kernel::RouterPolicy,
+    ) -> (Decision, String) {
         let ctx_block = self.minimum_viable_context(task);
         let est = tokenizer::count_conservative(task)
             + tokenizer::count_conservative(&ctx_block)
@@ -324,10 +333,10 @@ impl Engine {
             .unwrap_or(false);
         let sig =
             kernel::extract_signals(task, est, has_existing_solution, repeated, loop_detected);
-        let mut dec = kernel::decide(sig.clone(), &self.cfg.policy);
+        let mut dec = kernel::decide(sig.clone(), policy);
 
         // P10: Opt-in learned routing classifier fallback
-        if self.cfg.policy.opt_in_learned_routing && sig.confidence >= 0.2 && sig.confidence < 0.5 {
+        if policy.opt_in_learned_routing && sig.confidence >= 0.2 && sig.confidence < 0.5 {
             if let Ok(Some((route_str, sim))) = self.store.get_similar_successful_route(task, 0.3) {
                 let matched_route = match route_str.as_str() {
                     "DIRECT" => Some(kernel::Route::Direct),

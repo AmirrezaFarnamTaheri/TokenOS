@@ -51,7 +51,7 @@ cargo build --release --locked --features native
 ```
 
 Expected current local result: all gates pass; the unit test suite contains
-231 tests. If the count changes, update the README and this document in the
+234 tests. If the count changes, update the README and this document in the
 same change as the tests.
 
 ## Smoke Gates

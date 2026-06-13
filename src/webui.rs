@@ -134,7 +134,11 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
     if let Some(budget) = state.engine.cfg.security.api_token_budgets.get(token) {
         if budget.daily_spend_limit_usd > 0.0 {
             let day_ago = chrono::Utc::now() - chrono::Duration::try_days(1).unwrap();
-            if let Ok(spend) = state.engine.store.get_api_token_spend_since(&token_hash, day_ago) {
+            if let Ok(spend) = state
+                .engine
+                .store
+                .get_api_token_spend_since(&token_hash, day_ago)
+            {
                 if spend >= budget.daily_spend_limit_usd {
                     return (
                         StatusCode::PAYMENT_REQUIRED,
@@ -146,7 +150,11 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
         }
         if budget.monthly_spend_limit_usd > 0.0 {
             let month_ago = chrono::Utc::now() - chrono::Duration::try_days(30).unwrap();
-            if let Ok(spend) = state.engine.store.get_api_token_spend_since(&token_hash, month_ago) {
+            if let Ok(spend) = state
+                .engine
+                .store
+                .get_api_token_spend_since(&token_hash, month_ago)
+            {
                 if spend >= budget.monthly_spend_limit_usd {
                     return (
                         StatusCode::PAYMENT_REQUIRED,
@@ -166,9 +174,9 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
     {
         Ok(true) => {
             let token_hash_str = token_hash.clone();
-            crate::store::CURRENT_TOKEN_HASH.scope(token_hash_str, async move {
-                next.run(req).await
-            }).await
+            crate::store::CURRENT_TOKEN_HASH
+                .scope(token_hash_str, async move { next.run(req).await })
+                .await
         }
         Ok(false) => (
             StatusCode::TOO_MANY_REQUESTS,
@@ -268,6 +276,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/traces/:task_id", get(handle_traces))
         .route("/api/route", post(handle_route_preview))
         .route("/api/run", post(handle_run))
+        .route("/api/eval", post(handle_eval))
         .route("/v1/chat/completions", post(handle_openai_compat))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -677,6 +686,208 @@ async fn handle_route_preview(
         })
     })
     .await;
+    match result {
+        Ok(v) => ok_json(v),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct EvalItemRequest {
+    task: String,
+    #[serde(default)]
+    constraints: Vec<String>,
+    expected_route: String,
+}
+
+#[derive(Deserialize)]
+struct EvalRequest {
+    items: Vec<EvalItemRequest>,
+    #[serde(default)]
+    sweep: bool,
+}
+
+#[derive(Serialize)]
+struct SweepRowResponse {
+    threshold: f64,
+    accuracy: f64,
+    router_cost: f64,
+    savings: f64,
+    apgr: f64,
+}
+
+#[derive(Serialize)]
+struct EvalMismatchResponse {
+    index: usize,
+    task: String,
+    expected_route: String,
+    predicted_route: String,
+    reason: String,
+    constraints: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct EvalResponse {
+    total: usize,
+    correct: usize,
+    accuracy: f64,
+    accuracy_weak: f64,
+    most_frequent_route: String,
+    apgr: f64,
+    total_router_cost: f64,
+    total_strong_cost: f64,
+    savings_usd: f64,
+    savings_pct: f64,
+    mismatches: Vec<EvalMismatchResponse>,
+    sweep: Option<Vec<SweepRowResponse>>,
+}
+
+async fn handle_eval(
+    State(state): State<WebState>,
+    body: Result<Json<EvalRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let req = match body {
+        Ok(Json(r)) if !r.items.is_empty() => r,
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "body must be {\"items\": [...]}".into(),
+            )
+        }
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let eng = state.engine;
+        let total = req.items.len();
+
+        // Compute weak baseline
+        let mut counts = std::collections::HashMap::new();
+        for item in &req.items {
+            *counts
+                .entry(item.expected_route.trim().to_uppercase())
+                .or_insert(0) += 1;
+        }
+        let most_frequent_route = counts
+            .iter()
+            .max_by_key(|e| e.1)
+            .map(|e| e.0.clone())
+            .unwrap_or_else(|| "IMPLEMENT".to_string());
+        let weak_correct = req
+            .items
+            .iter()
+            .filter(|item| item.expected_route.trim().to_uppercase() == most_frequent_route)
+            .count();
+        let accuracy_weak = weak_correct as f64 / total as f64;
+
+        if req.sweep {
+            let thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+            let mut sweep_rows = Vec::new();
+            for &t in &thresholds {
+                let mut policy = eng.cfg.policy.clone();
+                policy.ask_threshold = t;
+
+                let mut correct = 0;
+                let mut cost_router = 0.0;
+                for item in &req.items {
+                    let (dec, _) = eng.route_only_with_policy_constraints(
+                        &item.task,
+                        &item.constraints,
+                        &policy,
+                    );
+                    let predicted = dec.route.as_str();
+                    let expected = item.expected_route.trim().to_uppercase();
+                    if predicted == expected {
+                        correct += 1;
+                    }
+                    cost_router += dec.route.cost();
+                }
+                let accuracy = (correct as f64 / total as f64) * 100.0;
+                let cost_strong = total as f64 * crate::kernel::Route::Implement.cost();
+                let savings = cost_strong - cost_router;
+                let apgr = if accuracy_weak < 1.0 {
+                    (((accuracy / 100.0) - accuracy_weak) / (1.0 - accuracy_weak)).max(0.0) * 100.0
+                } else {
+                    100.0
+                };
+                sweep_rows.push(SweepRowResponse {
+                    threshold: t,
+                    accuracy,
+                    router_cost: cost_router,
+                    savings,
+                    apgr,
+                });
+            }
+            return json!({
+                "total": total,
+                "correct": 0,
+                "accuracy": 0.0,
+                "accuracy_weak": accuracy_weak * 100.0,
+                "most_frequent_route": most_frequent_route,
+                "apgr": 0.0,
+                "total_router_cost": 0.0,
+                "total_strong_cost": 0.0,
+                "savings_usd": 0.0,
+                "savings_pct": 0.0,
+                "mismatches": Vec::<EvalMismatchResponse>::new(),
+                "sweep": Some(sweep_rows),
+            });
+        }
+
+        let mut correct = 0;
+        let mut mismatches = Vec::new();
+        let mut total_router_cost = 0.0;
+        let mut total_strong_cost = 0.0;
+
+        for (idx, item) in req.items.iter().enumerate() {
+            let (dec, _) = eng.route_only_with_constraints(&item.task, &item.constraints);
+            let predicted = dec.route.as_str();
+            let expected = item.expected_route.trim().to_uppercase();
+            let is_ok = predicted == expected;
+
+            let cost_p = dec.route.cost();
+            total_router_cost += cost_p;
+            total_strong_cost += crate::kernel::Route::Implement.cost();
+
+            if is_ok {
+                correct += 1;
+            } else {
+                mismatches.push(EvalMismatchResponse {
+                    index: idx + 1,
+                    task: item.task.clone(),
+                    expected_route: expected,
+                    predicted_route: predicted.to_string(),
+                    reason: dec.reason.clone(),
+                    constraints: item.constraints.clone(),
+                });
+            }
+        }
+
+        let accuracy = (correct as f64 / total as f64) * 100.0;
+        let savings_usd = total_strong_cost - total_router_cost;
+        let savings_pct = (savings_usd / total_strong_cost) * 100.0;
+        let apgr = if accuracy_weak < 1.0 {
+            (((accuracy / 100.0) - accuracy_weak) / (1.0 - accuracy_weak)).max(0.0) * 100.0
+        } else {
+            100.0
+        };
+
+        json!(EvalResponse {
+            total,
+            correct,
+            accuracy,
+            accuracy_weak: accuracy_weak * 100.0,
+            most_frequent_route,
+            apgr,
+            total_router_cost,
+            total_strong_cost,
+            savings_usd,
+            savings_pct,
+            mismatches,
+            sweep: None,
+        })
+    })
+    .await;
+
     match result {
         Ok(v) => ok_json(v),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -1641,7 +1852,7 @@ mod tests {
         cfg.security
             .api_tokens
             .insert("budget_limited".into(), vec!["run".into()]);
-        
+
         let budget = crate::config::TokenBudget {
             daily_spend_limit_usd: 0.01, // extremely low limit
             ..Default::default()
@@ -1650,7 +1861,7 @@ mod tests {
             .api_token_budgets
             .insert("budget_limited".into(), budget);
         cfg.providers.get_mut("mock").unwrap().disabled = false;
-        
+
         let arms: Vec<String> = cfg.providers.keys().cloned().collect();
         let engine = Arc::new(Engine {
             cfg,
@@ -1694,9 +1905,11 @@ mod tests {
         };
 
         // Run execution within CURRENT_TOKEN_HASH context
-        crate::store::CURRENT_TOKEN_HASH.scope(hash.clone(), async {
-            engine.store.record_execution(&execution).unwrap();
-        }).await;
+        crate::store::CURRENT_TOKEN_HASH
+            .scope(hash.clone(), async {
+                engine.store.record_execution(&execution).unwrap();
+            })
+            .await;
 
         let app = router(engine);
 
@@ -1713,5 +1926,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn eval_endpoint_performs_evaluation() {
+        let app = router(test_engine());
+        let body_str = r#"{
+            "items": [
+                {"task": "adjust memory allocation bounds in the server config", "constraints": [], "expected_route": "PATCH"},
+                {"task": "maybe somehow do something with the thing", "constraints": [], "expected_route": "ASK"}
+            ],
+            "sweep": false
+        }"#;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/eval")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_str))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Also test sweep
+        let body_sweep = r#"{
+            "items": [
+                {"task": "adjust memory allocation bounds in the server config", "constraints": [], "expected_route": "PATCH"}
+            ],
+            "sweep": true
+        }"#;
+        let resp_sweep = app
+            .oneshot(
+                Request::post("/api/eval")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_sweep))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_sweep.status(), StatusCode::OK);
     }
 }

@@ -24,6 +24,7 @@
       <button class="nav-item" data-view="tasks" title="Tasks (3)">☰ Tasks</button>
       <button class="nav-item" data-view="executions" title="Executions (4)">↯ Executions</button>
       <button class="nav-item" data-view="config" title="Configuration (5)">⚙ Configuration</button>
+      <button class="nav-item" data-view="eval" title="Calibration & Eval (6)">⚖ Calibration &amp; Eval</button>
     </nav>
     <div class="sidebar-foot">
       <div class="meta-rule">“Never spend more resources deciding than the decision can save.”</div>
@@ -225,6 +226,74 @@
       <header class="view-head"><h1>Configuration</h1><p class="subtitle">Providers · filter matrix · routing rules · policy</p></header>
       <div id="configBody"></div>
     </section>
+
+    <!-- EVAL -->
+    <section class="view" id="view-eval">
+      <header class="view-head">
+        <div class="view-head-text">
+          <h1>Calibration &amp; Evaluation</h1>
+          <p class="subtitle">Run routing-accuracy evaluation over a labeled dataset and sweep confidence thresholds</p>
+        </div>
+      </header>
+      
+      <div class="panel-grid" style="grid-template-columns: 1fr;">
+        <div class="panel">
+          <div class="panel-head"><h2>Evaluation Setup</h2></div>
+          <div class="panel-body" style="padding: 16px; display: flex; flex-direction: column; gap: 14px;">
+            <div>
+              <label class="lbl" style="display: block; margin-bottom: 6px;">Evaluation Dataset (YAML or JSON format)</label>
+              <textarea id="evalDatasetInput" style="width: 100%; height: 160px; font-family: var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 10px; resize: vertical;" placeholder="Paste YAML/JSON dataset or use the sample dataset below..."></textarea>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+              <button class="btn ghost" id="btnLoadSampleEval">Load Built-in Sample Dataset</button>
+              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                <input type="checkbox" id="evalSweepCheck"> Sweep Confidence Thresholds (Calibration Frontier)
+              </label>
+              <button class="btn primary" id="btnRunEval" style="margin-left: auto;">Run Router Evaluation</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="evalResultArea" style="display: none; margin-top: 20px;">
+        <!-- KPI summary -->
+        <div class="kpi-grid" id="evalKpiGrid" style="margin-bottom: 20px;"></div>
+
+        <!-- Sweep table and chart -->
+        <div class="panel-grid" id="evalSweepPanel" style="display: none; grid-template-columns: 1fr;">
+          <div class="panel">
+            <div class="panel-head"><h2>Calibration Sweep Frontier</h2><span class="hint">sweeping ask_threshold from 0.0 to 1.0</span></div>
+            
+            <!-- Simple SVG Chart -->
+            <div style="padding: 16px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.1); display: flex; flex-direction: column; align-items: center; width: 100%;">
+              <div style="font-weight: 600; font-size: 13px; color: var(--muted); margin-bottom: 10px;">Cost-Accuracy / APGR Sweep Frontier</div>
+              <svg id="evalSweepChart" width="600" height="220" style="background: var(--bg); border: 1px solid var(--border); border-radius: 8px; max-width: 100%;"></svg>
+              <div style="display: flex; gap: 16px; margin-top: 10px; font-size: 11px;">
+                <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 3px; background: var(--accent); display: inline-block;"></span> Accuracy (%)</span>
+                <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 3px; background: var(--accent2); display: inline-block;"></span> APGR (%)</span>
+                <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 3px; background: var(--good); display: inline-block;"></span> Est. USD Savings (%)</span>
+              </div>
+            </div>
+
+            <div class="table-wrap"><table id="evalSweepTable">
+              <thead><tr><th>Threshold</th><th>Accuracy</th><th>Router Est Cost</th><th>USD Savings</th><th>APGR</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+
+        <!-- Mismatches table -->
+        <div class="panel-grid" id="evalMismatchesPanel" style="display: none; grid-template-columns: 1fr;">
+          <div class="panel">
+            <div class="panel-head"><h2>Evaluation Details &amp; Mismatches <span class="badge" id="evalMismatchCount" style="background: var(--bad); color: #0b0e14;">0</span></h2><span class="hint">predicted route vs expected route</span></div>
+            <div class="table-wrap"><table id="evalMismatchesTable">
+              <thead><tr><th>#</th><th>Task</th><th>Expected</th><th>Predicted</th><th>Reason / Signal</th></tr></thead>
+              <tbody></tbody>
+            </table></div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
@@ -262,7 +331,7 @@
 
       <h3>Keyboard shortcuts</h3>
       <table class="help-table">
-        <tr><td><kbd>1</kbd>–<kbd>5</kbd></td><td>Switch views (Dashboard / Console / Tasks / Executions / Config)</td></tr>
+        <tr><td><kbd>1</kbd>–<kbd>6</kbd></td><td>Switch views (Dashboard / Console / Tasks / Executions / Config / Eval)</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Execute the task in the Run Console</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>Free route preview (zero tokens)</td></tr>
         <tr><td><kbd>?</kbd></td><td>Open this help panel</td></tr>

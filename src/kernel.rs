@@ -98,6 +98,19 @@ impl Route {
             Route::EscalateExternal => "ESCALATE-EXTERNAL",
         }
     }
+
+    pub fn cost(self) -> f64 {
+        match self {
+            Route::Ask
+            | Route::Verify
+            | Route::EscalateConflict
+            | Route::EscalateSafety
+            | Route::EscalateExternal => 0.0005,
+            Route::Direct => 0.001,
+            Route::Reuse | Route::Patch => 0.005,
+            Route::Implement | Route::Partial | Route::Delegate => 0.02,
+        }
+    }
 }
 
 impl std::fmt::Display for Route {

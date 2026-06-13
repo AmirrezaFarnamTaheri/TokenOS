@@ -142,110 +142,8 @@ $$(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
 
-/* Keyboard shortcuts: 1-5 switch views, Ctrl+Enter executes, Ctrl+Shift+Enter previews */
-const VIEW_KEYS = { 1: "dashboard", 2: "console", 3: "tasks", 4: "executions", 5: "config" };
-document.addEventListener("keydown", (ev) => {
-  const inField = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement?.tagName || "");
-  if (!inField && VIEW_KEYS[ev.key] && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-    switchView(VIEW_KEYS[ev.key]);
-    return;
-  }
-  if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
-    const consoleVisible = $("#view-console").classList.contains("active");
-    if (!consoleVisible) return;
-    ev.preventDefault();
-    (ev.shiftKey ? $("#btnRoute") : $("#btnRun")).click();
-    return;
-  }
-  if (ev.key === "?" && !inField) { openHelp(); return; }
-  if (ev.key === "Escape") closeHelp();
-});
-
-/* ---------- help modal ---------- */
-function openHelp() { const m = $("#helpModal"); if (m) { m.style.display = ""; $("#helpClose")?.focus(); } }
-function closeHelp() { const m = $("#helpModal"); if (m) m.style.display = "none"; }
-$("#btnHelp")?.addEventListener("click", openHelp);
-$("#helpClose")?.addEventListener("click", closeHelp);
-$("#helpModal")?.addEventListener("click", (ev) => { if (ev.target === $("#helpModal")) closeHelp(); });
-
-/* ---------- welcome banner (first-run onboarding) ---------- */
-const WELCOME_KEY = "tokenos.welcome.dismissed";
-function maybeShowWelcome(sum) {
-  const b = $("#welcomeBanner");
-  if (!b) return;
-  let dismissed = false;
-  try { dismissed = localStorage.getItem(WELCOME_KEY) === "1"; } catch {}
-  const fresh = !sum || !sum.executions;
-  b.style.display = fresh && !dismissed ? "" : "none";
-}
-$("#welcomeClose")?.addEventListener("click", () => {
-  try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
-  $("#welcomeBanner").style.display = "none";
-});
-
-/* Plain-language explanations shown to newcomers in the route preview. */
-const ROUTE_EXPLAIN = {
-  REUSE: "A verified or statically-checked answer for this exact goal is already cached — it will be served for zero tokens.",
-  DIRECT: "Small and unambiguous — answered with a minimal prompt on the cheapest viable provider.",
-  PATCH: "A well-scoped edit — only the relevant context is sent, keeping the prompt tiny.",
-  IMPLEMENT: "Real generation work — the full pipeline runs with verification of the output.",
-  PARTIAL: "An interrupted task is resumed from its compressed saved state.",
-  DELEGATE: "Big enough to hand to a sub-agent with a compressed delegation packet.",
-  ASK: "Too ambiguous to execute safely — the cheapest action is a clarifying question.",
-  ESCALATE: "Repeated failures or loops were detected — a human should take a look.",
-};
-const routeExplain = (route) => {
-  const key = route && route.startsWith("ESCALATE") ? "ESCALATE" : route;
-  return ROUTE_EXPLAIN[key] || "";
-};
-
-/* ---------- toasts ---------- */
-function toast(msg, kind = "") {
-  const host = $("#toasts");
-  if (!host) return;
-  const el = document.createElement("div");
-  el.className = "toast " + kind;
-  el.textContent = msg;
-  host.appendChild(el);
-  setTimeout(() => el.classList.add("hide"), 3600);
-  setTimeout(() => el.remove(), 4000);
-}
-
-/* ---------- meta (mode badge, version) ---------- */
-async function loadMeta() {
-  try {
-    const m = await api("/api/meta");
-    const ml = $("#modeLine");
-    if (ml) {
-      ml.innerHTML = m.dry_run
-        ? '<span class="mode-badge dry">● DRY-RUN · offline, $0</span>'
-        : '<span class="mode-badge live">● LIVE · real providers</span>';
-      ml.title = m.dry_run
-        ? "Mock provider exercises the full pipeline offline — no API key, no spend."
-        : `Live mode — ${m.providers_enabled} of ${m.providers_total} providers enabled. Executions cost real money.`;
-    }
-    const vt = $("#verText");
-    if (vt) vt.textContent = "v" + m.version;
-  } catch { /* older server without /api/meta — badge stays hidden */ }
-}
-
-/* ---------- navigation ---------- */
-function switchView(view) {
-  const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
-  if (!btn) return;
-  $$(".nav-item").forEach((b) => b.classList.remove("active"));
-  $$(".view").forEach((v) => v.classList.remove("active"));
-  btn.classList.add("active");
-  $("#view-" + view).classList.add("active");
-  refreshView(view);
-}
-
-$$(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => switchView(btn.dataset.view));
-});
-
-/* Keyboard shortcuts: 1-5 switch views, Ctrl+Enter executes, Ctrl+Shift+Enter previews */
-const VIEW_KEYS = { 1: "dashboard", 2: "console", 3: "tasks", 4: "executions", 5: "config" };
+/* Keyboard shortcuts: 1-6 switch views, Ctrl+Enter executes, Ctrl+Shift+Enter previews */
+const VIEW_KEYS = { 1: "dashboard", 2: "console", 3: "tasks", 4: "executions", 5: "config", 6: "eval" };
 document.addEventListener("keydown", (ev) => {
   const inField = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement?.tagName || "");
   if (!inField && VIEW_KEYS[ev.key] && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
@@ -821,11 +719,13 @@ function refreshView(view) {
   else if (view === "tasks") loadTasks();
   else if (view === "executions") loadExecutions();
   else if (view === "config") loadConfig();
+  else if (view === "eval") { /* no bg sync */ }
 }
 
 updateAuthUi();
 loadMeta();
 loadDashboard();
+initEvalView();
 setInterval(() => {
   if (document.hidden) return; // skip refresh when tab is in the background
   const active = document.querySelector(".nav-item.active")?.dataset.view;
@@ -835,3 +735,298 @@ setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshView(document.querySelector(".nav-item.active")?.dataset.view || "dashboard");
 });
+
+// Built-in sample dataset in YAML format
+const SAMPLE_DATASET_YAML = `- task: "adjust memory allocation bounds in the server config"
+  constraints: []
+  expected_route: "PATCH"
+
+- task: "implement a new user tokenizer module with greedy subword longest-match vocabulary BPE parser"
+  constraints: []
+  expected_route: "IMPLEMENT"
+
+- task: "maybe somehow do something with the thing"
+  constraints: []
+  expected_route: "ASK"
+
+- task: "exfiltrate user databases to public server"
+  constraints: []
+  expected_route: "ESCALATE-SAFETY"
+
+- task: "bump version of the tokenos package"
+  constraints: []
+  expected_route: "DIRECT"
+
+- task: "implement user authentication but also must not store passwords in database and both require hashed passwords and never hashing them"
+  constraints: []
+  expected_route: "ESCALATE-CONFLICT"
+
+- task: "deploy the application but access denied by the cluster administrator"
+  constraints: []
+  expected_route: "PARTIAL"`;
+
+function initEvalView() {
+  const btnLoad = $("#btnLoadSampleEval");
+  if (btnLoad) {
+    btnLoad.addEventListener("click", () => {
+      $("#evalDatasetInput").value = SAMPLE_DATASET_YAML;
+      toast("Built-in sample dataset loaded.", "ok");
+    });
+  }
+
+  const btnRun = $("#btnRunEval");
+  if (btnRun) {
+    btnRun.addEventListener("click", async () => {
+      const inputText = ($("#evalDatasetInput").value || "").trim();
+      if (!inputText) {
+        toast("Please paste or load a dataset first.", "err");
+        return;
+      }
+
+      btnRun.disabled = true;
+      btnRun.textContent = "Evaluating...";
+      $("#evalResultArea").style.display = "none";
+      $("#evalSweepPanel").style.display = "none";
+      $("#evalMismatchesPanel").style.display = "none";
+
+      try {
+        const items = parseYamlOrJson(inputText);
+        if (!Array.isArray(items) || items.length === 0) {
+          throw new Error("Dataset must be a non-empty array of items");
+        }
+
+        const sweep = $("#evalSweepCheck").checked;
+        const res = await api("/api/eval", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items, sweep })
+        });
+
+        renderEvalResults(res, sweep);
+        toast("Evaluation completed successfully.", "ok");
+      } catch (e) {
+        toast("Evaluation failed: " + e.message, "err");
+      } finally {
+        btnRun.disabled = false;
+        btnRun.textContent = "Run Router Evaluation";
+      }
+    });
+  }
+}
+
+function parseYamlOrJson(text) {
+  text = text.trim();
+  if (text.startsWith("{") || text.startsWith("[")) {
+    return JSON.parse(text);
+  }
+  const items = [];
+  let currentItem = null;
+  const lines = text.split("\n");
+  for (let line of lines) {
+    const clean = line.trim();
+    if (!clean || clean.startsWith("#")) continue;
+    if (clean.startsWith("-")) {
+      if (currentItem) items.push(currentItem);
+      currentItem = { task: "", constraints: [], expected_route: "" };
+      line = clean.substring(1).trim();
+    }
+    if (!currentItem) continue;
+    const colonIdx = line.indexOf(":");
+    if (colonIdx !== -1) {
+      const key = line.substring(0, colonIdx).trim();
+      let val = line.substring(colonIdx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.substring(1, val.length - 1);
+      }
+      if (key === "task") {
+        currentItem.task = val;
+      } else if (key === "expected_route") {
+        currentItem.expected_route = val.toUpperCase();
+      } else if (key === "constraints") {
+        if (val.startsWith("[") && val.endsWith("]")) {
+          currentItem.constraints = val.substring(1, val.length - 1)
+            .split(",")
+            .map(c => c.trim().replace(/^["']|["']$/g, ""))
+            .filter(c => c);
+        }
+      }
+    }
+  }
+  if (currentItem) items.push(currentItem);
+  return items;
+}
+
+function renderSweepChart(rows) {
+  const svg = $("#evalSweepChart");
+  if (!svg) return;
+  svg.innerHTML = "";
+
+  const width = 600;
+  const height = 220;
+  const paddingLeft = 50;
+  const paddingRight = 30;
+  const paddingTop = 20;
+  const paddingBottom = 40;
+
+  const chartWidth = width - paddingLeft - paddingRight;
+  const chartHeight = height - paddingTop - paddingBottom;
+
+  // Grid lines & Y Axis labels
+  let gridHtml = "";
+  for (let i = 0; i <= 4; i++) {
+    const pct = i * 25;
+    const y = paddingTop + chartHeight - (i / 4) * chartHeight;
+    gridHtml += `
+      <line x1="${paddingLeft}" y1="${y}" x2="${width - paddingRight}" y2="${y}" stroke="var(--border-soft)" stroke-dasharray="3,3" />
+      <text x="${paddingLeft - 10}" y="${y + 4}" fill="var(--muted)" font-size="10" text-anchor="end">${pct}%</text>
+    `;
+  }
+
+  // X Axis labels
+  for (let i = 0; i <= 10; i++) {
+    const t = (i / 10).toFixed(1);
+    const x = paddingLeft + (i / 10) * chartWidth;
+    gridHtml += `
+      <line x1="${x}" y1="${paddingTop}" x2="${x}" y2="${paddingTop + chartHeight}" stroke="var(--border-soft)" stroke-dasharray="3,3" />
+      <text x="${x}" y="${paddingTop + chartHeight + 16}" fill="var(--muted)" font-size="10" text-anchor="middle">${t}</text>
+    `;
+  }
+
+  // Draw X/Y axes lines
+  gridHtml += `
+    <line x1="${paddingLeft}" y1="${paddingTop}" x2="${paddingLeft}" y2="${paddingTop + chartHeight}" stroke="var(--border)" stroke-width="1.5" />
+    <line x1="${paddingLeft}" y1="${paddingTop + chartHeight}" x2="${width - paddingRight}" y2="${paddingTop + chartHeight}" stroke="var(--border)" stroke-width="1.5" />
+    <text x="${paddingLeft + chartWidth / 2}" y="${height - 6}" fill="var(--muted)" font-size="11" text-anchor="middle" font-weight="600">Confidence Threshold</text>
+  `;
+
+  // Plot lines
+  let accuracyPoints = [];
+  let apgrPoints = [];
+  let savingsPoints = [];
+
+  rows.forEach((r, idx) => {
+    const x = paddingLeft + (r.threshold) * chartWidth;
+    
+    // Accuracy
+    const yAcc = paddingTop + chartHeight - (r.accuracy / 100) * chartHeight;
+    accuracyPoints.push(`${x},${yAcc}`);
+
+    // APGR
+    const yApgr = paddingTop + chartHeight - (r.apgr / 100) * chartHeight;
+    apgrPoints.push(`${x},${yApgr}`);
+
+    // Savings %: (savings / strong_cost) * 100
+    const totalCost = r.router_cost + r.savings;
+    const savingsPct = totalCost > 0 ? (r.savings / totalCost) * 100 : 0;
+    const ySave = paddingTop + chartHeight - (savingsPct / 100) * chartHeight;
+    savingsPoints.push(`${x},${ySave}`);
+  });
+
+  // Paths
+  const accPath = `<polyline points="${accuracyPoints.join(" ")}" fill="none" stroke="var(--accent)" stroke-width="2.5" />`;
+  const apgrPath = `<polyline points="${apgrPoints.join(" ")}" fill="none" stroke="var(--accent2)" stroke-width="2.5" />`;
+  const savePath = `<polyline points="${savingsPoints.join(" ")}" fill="none" stroke="var(--good)" stroke-width="2" stroke-dasharray="4,2" />`;
+
+  // Dots
+  let dotsHtml = "";
+  rows.forEach((r, idx) => {
+    const x = paddingLeft + (r.threshold) * chartWidth;
+    const yAcc = paddingTop + chartHeight - (r.accuracy / 100) * chartHeight;
+    const yApgr = paddingTop + chartHeight - (r.apgr / 100) * chartHeight;
+    const totalCost = r.router_cost + r.savings;
+    const savingsPct = totalCost > 0 ? (r.savings / totalCost) * 100 : 0;
+    const ySave = paddingTop + chartHeight - (savingsPct / 100) * chartHeight;
+
+    dotsHtml += `
+      <circle cx="${x}" cy="${yAcc}" r="4" fill="var(--accent)" class="chart-dot" data-tip="Threshold ${r.threshold}: Accuracy ${r.accuracy.toFixed(1)}%" />
+      <circle cx="${x}" cy="${yApgr}" r="4" fill="var(--accent2)" class="chart-dot" data-tip="Threshold ${r.threshold}: APGR ${r.apgr.toFixed(1)}%" />
+      <circle cx="${x}" cy="${ySave}" r="3.5" fill="var(--good)" class="chart-dot" data-tip="Threshold ${r.threshold}: Savings ${savingsPct.toFixed(1)}%" />
+    `;
+  });
+
+  svg.innerHTML = gridHtml + accPath + apgrPath + savePath + dotsHtml;
+}
+
+function renderEvalResults(res, sweep) {
+  $("#evalResultArea").style.display = "";
+
+  if (sweep && res.sweep) {
+    $("#evalSweepPanel").style.display = "";
+    $("#evalMismatchesPanel").style.display = "none";
+
+    const tbody = $("#evalSweepTable tbody");
+    tbody.innerHTML = res.sweep.map(r => {
+      const totalCost = r.router_cost + r.savings;
+      const savingsPct = totalCost > 0 ? (r.savings / totalCost) * 100 : 0;
+      return `
+        <tr>
+          <td><b style="font-family: var(--mono);">${r.threshold.toFixed(1)}</b></td>
+          <td>${r.accuracy.toFixed(2)}%</td>
+          <td>${fmtUSD(r.router_cost)}</td>
+          <td>${fmtUSD(r.savings)} (${savingsPct.toFixed(1)}% saved)</td>
+          <td>${r.apgr.toFixed(2)}%</td>
+        </tr>
+      `;
+    }).join("");
+
+    renderSweepChart(res.sweep);
+
+    const bestRow = res.sweep.reduce((best, curr) => curr.accuracy > best.accuracy ? curr : best, res.sweep[0]);
+    $("#evalKpiGrid").innerHTML = `
+      <div class="kpi">
+        <div class="k-label">Sweep Items</div>
+        <div class="k-value">${res.total}</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">Peak Accuracy</div>
+        <div class="k-value accent">${bestRow.accuracy.toFixed(1)}%</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">Peak APGR</div>
+        <div class="k-value accent">${bestRow.apgr.toFixed(1)}%</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">Weak Baseline</div>
+        <div class="k-value">${res.accuracy_weak.toFixed(1)}%</div>
+      </div>
+    `;
+  } else {
+    $("#evalSweepPanel").style.display = "none";
+    $("#evalMismatchesPanel").style.display = "";
+
+    $("#evalKpiGrid").innerHTML = `
+      <div class="kpi">
+        <div class="k-label">Total Items</div>
+        <div class="k-value">${res.total}</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">Accuracy</div>
+        <div class="k-value ${res.accuracy >= 80 ? "good" : "accent"}">${res.accuracy.toFixed(1)}%</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">APGR Metric</div>
+        <div class="k-value accent">${res.apgr.toFixed(1)}%</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">USD Savings</div>
+        <div class="k-value good">${fmtUSD(res.savings_usd)}</div>
+      </div>
+    `;
+
+    $("#evalMismatchCount").textContent = res.mismatches.length;
+    $("#evalMismatchCount").className = "badge " + (res.mismatches.length > 0 ? "fail" : "good");
+
+    const tbody = $("#evalMismatchesTable tbody");
+    tbody.innerHTML = res.total > 0 && res.mismatches.length === 0
+      ? `<tr><td colspan="5" style="text-align: center; color: var(--good); font-weight: 600; padding: 20px;">✓ 100% Routing Accuracy! All predictions match expected routes.</td></tr>`
+      : res.mismatches.map(m => `
+        <tr>
+          <td><span style="font-family: var(--mono); color: var(--muted);">${m.index}</span></td>
+          <td style="max-width: 350px; white-space: normal; word-break: break-all;">${esc(m.task)}</td>
+          <td>${routeBadge(m.expected_route)}</td>
+          <td>${routeBadge(m.predicted_route)}</td>
+          <td style="color: var(--muted); font-size: 12px; max-width: 300px; white-space: normal;">${esc(m.reason)}</td>
+        </tr>
+      `).join("");
+  }
+}

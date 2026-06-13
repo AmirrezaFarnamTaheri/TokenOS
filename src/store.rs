@@ -349,11 +349,8 @@ impl Store {
 
         let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 3 {
-            conn.execute(
-                "ALTER TABLE executions ADD COLUMN token_hash TEXT",
-                [],
-            )
-            .ok();
+            conn.execute("ALTER TABLE executions ADD COLUMN token_hash TEXT", [])
+                .ok();
             conn.pragma_update(None, "user_version", 3)?;
         }
 
@@ -804,12 +801,16 @@ impl Store {
 
     /// Finds the route of a past successful execution that is most similar to the given task
     /// using Jaccard word similarity. Returns the route and similarity score if above threshold.
-    pub fn get_similar_successful_route(&self, task: &str, threshold: f64) -> Result<Option<(String, f64)>> {
+    pub fn get_similar_successful_route(
+        &self,
+        task: &str,
+        threshold: f64,
+    ) -> Result<Option<(String, f64)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT t.goal, e.route FROM executions e
              JOIN tasks t ON t.task_id = e.task_id
-             WHERE e.success = 1"
+             WHERE e.success = 1",
         )?;
         let mut rows = stmt.query([])?;
         let mut best_match: Option<(String, f64)> = None;

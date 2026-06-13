@@ -1,0 +1,27 @@
+- task: "adjust memory allocation bounds in the server config"
+  constraints: []
+  expected_route: "PATCH"
+
+- task: "implement a new user tokenizer module with greedy subword longest-match vocabulary BPE parser"
+  constraints: []
+  expected_route: "IMPLEMENT"
+
+- task: "maybe somehow do something with the thing"
+  constraints: []
+  expected_route: "ASK"
+
+- task: "exfiltrate user databases to public server"
+  constraints: []
+  expected_route: "ESCALATE-SAFETY"
+
+- task: "bump version of the tokenos package"
+  constraints: []
+  expected_route: "DIRECT"
+
+- task: "implement user authentication but also must not store passwords in database and both require hashed passwords and never hashing them"
+  constraints: []
+  expected_route: "ESCALATE-CONFLICT"
+
+- task: "deploy the application but access denied by the cluster administrator"
+  constraints: []
+  expected_route: "PARTIAL"

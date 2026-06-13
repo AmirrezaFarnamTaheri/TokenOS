@@ -772,10 +772,17 @@ struct EvalItem {
 
 fn route_cost(r: &str) -> f64 {
     match r {
-        "ASK" | "VERIFY" | "ESCALATE-CONFLICT" | "ESCALATE-SAFETY" | "ESCALATE-EXTERNAL" => 0.0005,
-        "DIRECT" => 0.001,
-        "REUSE" | "PATCH" => 0.005,
-        "IMPLEMENT" | "PARTIAL" | "DELEGATE" => 0.02,
+        "DIRECT" => tokenos::kernel::Route::Direct.cost(),
+        "REUSE" => tokenos::kernel::Route::Reuse.cost(),
+        "PATCH" => tokenos::kernel::Route::Patch.cost(),
+        "IMPLEMENT" => tokenos::kernel::Route::Implement.cost(),
+        "PARTIAL" => tokenos::kernel::Route::Partial.cost(),
+        "DELEGATE" => tokenos::kernel::Route::Delegate.cost(),
+        "ASK" => tokenos::kernel::Route::Ask.cost(),
+        "VERIFY" => tokenos::kernel::Route::Verify.cost(),
+        "ESCALATE-CONFLICT" => tokenos::kernel::Route::EscalateConflict.cost(),
+        "ESCALATE-SAFETY" => tokenos::kernel::Route::EscalateSafety.cost(),
+        "ESCALATE-EXTERNAL" => tokenos::kernel::Route::EscalateExternal.cost(),
         _ => 0.02,
     }
 }
@@ -804,16 +811,28 @@ async fn run_eval(dataset_path: &str, sweep: bool, ef: &EngineFlags) -> Result<(
     // Compute weak baseline: always predicting the most frequent expected route
     let mut counts = std::collections::HashMap::new();
     for item in &items {
-        *counts.entry(item.expected_route.trim().to_uppercase()).or_insert(0) += 1;
+        *counts
+            .entry(item.expected_route.trim().to_uppercase())
+            .or_insert(0) += 1;
     }
-    let most_frequent_route = counts.iter().max_by_key(|e| e.1).map(|e| e.0.clone()).unwrap_or_else(|| "IMPLEMENT".to_string());
-    let weak_correct = items.iter().filter(|item| item.expected_route.trim().to_uppercase() == most_frequent_route).count();
+    let most_frequent_route = counts
+        .iter()
+        .max_by_key(|e| e.1)
+        .map(|e| e.0.clone())
+        .unwrap_or_else(|| "IMPLEMENT".to_string());
+    let weak_correct = items
+        .iter()
+        .filter(|item| item.expected_route.trim().to_uppercase() == most_frequent_route)
+        .count();
     let accuracy_weak = weak_correct as f64 / total as f64;
 
     let mut eng = build_engine(ef)?;
 
     if sweep {
-        println!("{:<15} {:<12} {:<15} {:<15} {:<10}", "THRESHOLD", "ACCURACY", "ROUTER COST", "SAVINGS", "APGR");
+        println!(
+            "{:<15} {:<12} {:<15} {:<15} {:<10}",
+            "THRESHOLD", "ACCURACY", "ROUTER COST", "SAVINGS", "APGR"
+        );
         println!("{}", "-".repeat(70));
         let thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
         for &t in &thresholds {
@@ -901,11 +920,21 @@ async fn run_eval(dataset_path: &str, sweep: bool, ef: &EngineFlags) -> Result<(
     println!("  Correct:           {}", correct);
     println!("  Incorrect:         {}", total - correct);
     println!("  Accuracy:          {:.2}%", accuracy);
-    println!("  Weak Baseline Acc: {:.2}% (always {})", accuracy_weak * 100.0, most_frequent_route);
+    println!(
+        "  Weak Baseline Acc: {:.2}% (always {})",
+        accuracy_weak * 100.0,
+        most_frequent_route
+    );
     println!("  APGR Metric:       {:.2}%", apgr);
     println!("  Router Est Cost:   ${:.4}", total_router_cost);
-    println!("  Strong Est Cost:   ${:.4} (always IMPLEMENT)", total_strong_cost);
-    println!("  Est USD Savings:   ${:.4} ({:.2}% saved)", savings_usd, savings_pct);
+    println!(
+        "  Strong Est Cost:   ${:.4} (always IMPLEMENT)",
+        total_strong_cost
+    );
+    println!(
+        "  Est USD Savings:   ${:.4} ({:.2}% saved)",
+        savings_usd, savings_pct
+    );
 
     if !mismatches.is_empty() {
         println!("\nMismatches detail:");
