@@ -554,7 +554,16 @@ impl Store {
                 avg_latency_ms: r.get(4)?,
                 success_rate: r.get(5)?,
                 total_cost_usd: total_cost,
-                cost_per_success: if successes > 0.0 { total_cost / successes } else { 0.0 },
+                // Effective Cost Per Successful Task. With zero successes the
+                // metric is UNDEFINED, not zero: a route that only ever failed
+                // (yet still spent tokens) must never rank as the cheapest.
+                // Non-finite serializes to JSON `null`, which the dashboard
+                // renders as "—". (Review finding: metric integrity / M-A.)
+                cost_per_success: if successes > 0.0 {
+                    total_cost / successes
+                } else {
+                    f64::INFINITY
+                },
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -600,7 +609,13 @@ impl Store {
             successes: successes as usize,
             total_tokens,
             total_cost_usd: total_cost,
-            cost_per_success: if successes > 0 { total_cost / successes as f64 } else { 0.0 },
+            // Undefined (not zero) when no task has yet succeeded — see
+            // stats_by_route for the rationale. Renders as "—" in the UI.
+            cost_per_success: if successes > 0 {
+                total_cost / successes as f64
+            } else {
+                f64::INFINITY
+            },
             avg_latency_ms: avg_latency,
             overall_success_pct: if executions > 0 {
                 successes as f64 / executions as f64
@@ -860,5 +875,31 @@ mod tests {
         assert!((sum.cost_per_success - 0.006).abs() < 1e-9);
         let routes = s.stats_by_route().unwrap();
         assert_eq!(routes[0].runs, 2);
+    }
+
+    #[test]
+    fn cost_per_success_is_undefined_without_a_success() {
+        // A route that spent tokens but never succeeded must NOT report a
+        // finite (and therefore deceptively cheap) cost-per-success.
+        let s = mem();
+        s.record_execution(&Execution {
+            task_id: "t1".into(),
+            route: "IMPLEMENT".into(),
+            provider: "openai".into(),
+            est_cost_usd: 0.05,
+            success: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sum = s.get_summary().unwrap();
+        assert_eq!(sum.successes, 0);
+        assert!(!sum.cost_per_success.is_finite());
+        // Non-finite must serialize to JSON null so the dashboard renders "—".
+        let j = serde_json::to_value(&sum).unwrap();
+        assert!(j["cost_per_success"].is_null());
+
+        let routes = s.stats_by_route().unwrap();
+        assert!(!routes[0].cost_per_success.is_finite());
     }
 }

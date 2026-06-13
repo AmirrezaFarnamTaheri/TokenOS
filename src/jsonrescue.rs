@@ -221,9 +221,13 @@ impl<'a> Parser<'a> {
                     }
                 }
                 _ => {
-                    // Consume one UTF-8 scalar (input is &str so boundaries
-                    // are valid).
+                    // Consume one UTF-8 scalar.
                     let rest = &self.b[self.i..];
+                    // SAFETY: `self.b` is the byte view of the original `&str`
+                    // input, and `self.i` is only ever advanced by whole
+                    // `char` widths (`ch.len_utf8()` here and matched ASCII
+                    // bytes elsewhere). It therefore always lands on a UTF-8
+                    // boundary, so `rest` is guaranteed to be valid UTF-8.
                     let s = unsafe { std::str::from_utf8_unchecked(rest) };
                     let ch = s.chars().next().unwrap();
                     out.push(ch);

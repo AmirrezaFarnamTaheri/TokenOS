@@ -20,6 +20,17 @@ git push
 
 | Job | Trigger | Purpose |
 |---|---|---|
-| `test` | every push / PR | fmt + clippy (informative), `cargo build --release --locked`, full test suite (headless, no GUI deps) |
+| `test` | every push / PR | fmt check (advisory), **clippy `-D warnings` (blocking)**, `cargo build --release --locked`, full test suite (headless, no GUI deps) |
+| `security-audit` | every push / PR | **blocking** `cargo audit` (RUSTSEC advisories) + `cargo deny check` (licenses, bans, sources) driven by `deny.toml` |
 | `native` | after `test` | 3-OS matrix (Ubuntu / macOS / Windows) building `--features native` — installs WebKitGTK on Linux, smoke-tests the binary, uploads per-platform artifacts |
 | `release` | tags `v*` | packages all platform artifacts as tarballs and attaches them to the GitHub release |
+
+### Notes on the quality gates
+
+- **Clippy is blocking.** Warnings fail the build; this enforces the
+  "zero warnings" claim in the README instead of leaving it aspirational.
+- **`fmt --check` is advisory** for now because of pre-existing formatting
+  drift. Once `cargo fmt --all` has been run and committed, drop the
+  `continue-on-error: true` line on that step to make it blocking too.
+- **Supply-chain audit is blocking.** A new RUSTSEC advisory or a
+  disallowed license will fail CI; tune the policy in `deny.toml`.

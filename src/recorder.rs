@@ -115,7 +115,10 @@ impl Recorder {
 
     /// Fetch a stored payload by SHA.
     pub fn blob(&self, sha: &str) -> Result<Vec<u8>> {
-        if sha.len() < 3 {
+        // Reject anything that is not a lowercase-hex digest. The path is built
+        // from `sha[..2]/sha[2..]`, so a value containing '/', '.', or '\' from
+        // a tampered journal could otherwise traverse outside `objects/`.
+        if sha.len() < 3 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(anyhow!("invalid sha"));
         }
         Ok(fs::read(self.base.join("objects").join(&sha[..2]).join(&sha[2..]))?)
@@ -181,6 +184,16 @@ mod tests {
         assert_eq!(evs[1].kind, "response");
         let blob = r.blob(&sha).unwrap();
         assert_eq!(blob, b"PAYLOAD BYTES");
+    }
+
+    #[test]
+    fn blob_rejects_non_hex_sha() {
+        let (r, _g) = temp_recorder();
+        // Path-traversal and non-hex inputs must be rejected before touching fs.
+        assert!(r.blob("../../etc/passwd").is_err());
+        assert!(r.blob("..").is_err()); // too short
+        assert!(r.blob("g0ffff").is_err()); // 'g' is not hex
+        assert!(r.blob("ab/cd").is_err()); // separator
     }
 
     #[test]

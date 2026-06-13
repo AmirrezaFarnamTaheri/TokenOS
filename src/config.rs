@@ -326,6 +326,19 @@ impl Config {
             if p.adapter.is_empty() {
                 bail!("config: provider {name:?} missing adapter");
             }
+            // Catch adapter typos at load time instead of failing lazily deep
+            // inside a failover loop (e.g. `openi` instead of `openai`).
+            if !KNOWN_ADAPTERS.contains(&p.adapter.as_str()) {
+                bail!(
+                    "config: provider {name:?} has unknown adapter {:?} (expected one of {KNOWN_ADAPTERS:?})",
+                    p.adapter
+                );
+            }
+        }
+        // A config where every provider is disabled can never execute a single
+        // route; surface it now rather than at the first `run`.
+        if !self.providers.values().any(|p| !p.disabled) {
+            bail!("config: every provider is disabled — enable at least one");
         }
         for (i, r) in self.routing.iter().enumerate() {
             if !self.providers.contains_key(&r.provider) {
@@ -411,6 +424,10 @@ fn matches_route(types: &[String], route: &str) -> bool {
     types.iter().any(|t| t == "*" || t == route)
 }
 
+/// Adapter identifiers understood by `provider::Adapter::new`. Kept in sync
+/// with that match arm so config validation rejects typos up front.
+const KNOWN_ADAPTERS: &[&str] = &["mock", "openai", "anthropic", "gemini", "proxy", "proxy_ide"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +477,22 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn unknown_adapter_rejected() {
+        let mut cfg = Config::default();
+        cfg.providers.get_mut("mock").unwrap().adapter = "openi".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn all_disabled_providers_rejected() {
+        let mut cfg = Config::default();
+        for p in cfg.providers.values_mut() {
+            p.disabled = true;
+        }
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

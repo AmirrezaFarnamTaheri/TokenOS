@@ -585,6 +585,26 @@ impl Engine {
                 resp.tokens_out
             };
 
+            // Correctness guard (review finding "mock fallback"): a configured
+            // `mock` provider serving a LIVE run means every real provider was
+            // exhausted or filtered out. Its output is synthetic and only
+            // passes static verification by construction — admitting it to the
+            // durable solution cache would let a fabricated answer be replayed
+            // later as a verified real one. In dry-run mode the mock is the
+            // intended preview adapter, so this only fires outside dry-run.
+            let served_by_live_mock = !self.dry_run && adapter.is_mock();
+            if served_by_live_mock {
+                let msg = format!(
+                    "served by mock adapter {prov_name:?} in a LIVE run — output is SYNTHETIC \
+                     (all real providers were exhausted or filtered); not cached"
+                );
+                eprintln!("tokenos: WARNING: {msg}");
+                warn_persist(
+                    "flight-recorder mock-fallback",
+                    self.recorder.record(&task_id, "mock-fallback", &msg, &[]),
+                );
+            }
+
             // Unmask ONCE, at the boundary back to the caller. The unmasked
             // form is moved into the result and never written to disk.
             let out_unmasked = mask_codec.unmask(&out_masked);
@@ -614,7 +634,7 @@ impl Engine {
             // are questions, not solutions — never cached. MASKED form only:
             // the cache is durable SQLite state. (A future replay returns
             // placeholders rather than secrets — fail-safe by construction.)
-            if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
+            if self.cfg.policy.reuse_cache && dec.route != Route::Ask && !served_by_live_mock {
                 warn_persist(
                     "solution cache",
                     self.store.cache_solution(&cache_key, dec.route.as_str(), &out_masked),
@@ -837,6 +857,40 @@ mod tests {
         assert!(r.success);
         assert!(!r.output.is_empty());
         assert!(!r.task_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_mock_output_is_not_cached() {
+        // A LIVE (non-dry-run) engine on the default config — where only the
+        // mock provider is enabled — still produces output, but because mock
+        // served a live run its SYNTHETIC result must never be admitted to the
+        // durable solution cache (review finding: mock-fallback landmine).
+        let cfg = Config::default();
+        let arms: Vec<String> = cfg.providers.keys().cloned().collect();
+        let e = Engine {
+            cfg,
+            store: Store::open(Some(Path::new(":memory:"))).unwrap(),
+            recorder: Recorder::new(Some(Path::new(&format!(
+                "{}/tokenos-eng-livemock-{}-{}",
+                std::env::temp_dir().display(),
+                std::process::id(),
+                rand::thread_rng().gen::<u32>()
+            ))))
+            .unwrap(),
+            tracker: Tracker::new(),
+            bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
+            indexer: None,
+            dry_run: false,
+            adapters: RwLock::new(HashMap::new()),
+        };
+        let task = "rename variable x to y in main.rs";
+        let r = e.run(task, &[]).await.unwrap();
+        assert!(r.success);
+        assert_eq!(r.provider, "mock");
+        // The synthetic answer must not be replayable as a verified solution.
+        let key = solution_cache_key(task, &[]);
+        assert!(e.store.cached_solution(&key).unwrap().is_none());
     }
 
     #[tokio::test]

@@ -11,6 +11,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ---------------------------------------------------------------
   # Core kernel: format, lint, test (headless — no GUI deps needed)
@@ -25,15 +30,35 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format check
+        # Advisory only: surfaces formatting drift without failing the gate.
+        # Run `cargo fmt --all` locally to clear it, then flip to blocking.
         run: cargo fmt --all -- --check
-        continue-on-error: true # legacy formatting drift; informative only
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-        continue-on-error: true # informative until the lint debt is cleared
+        continue-on-error: true
+      - name: Clippy (blocking — warnings are errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Build
         run: cargo build --release --locked
       - name: Test
         run: cargo test --release --locked
+
+  # ---------------------------------------------------------------
+  # Supply-chain security: advisory DB audit + license/ban policy
+  # ---------------------------------------------------------------
+  security-audit:
+    name: Supply-chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install cargo-audit cargo-deny --locked
+      - name: cargo audit (RUSTSEC advisories)
+        run: cargo audit --deny warnings
+      - name: cargo deny (licenses, bans, sources, advisories)
+        run: cargo deny check
 
   # ---------------------------------------------------------------
   # Native desktop shell: build per-OS with the system webview deps

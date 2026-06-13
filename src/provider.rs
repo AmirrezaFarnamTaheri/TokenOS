@@ -128,6 +128,14 @@ impl Adapter {
         }
     }
 
+    /// True when this adapter is the offline mock. The engine uses this to
+    /// refuse caching synthetic output during a LIVE (non-dry-run) execution:
+    /// reaching mock outside dry-run means every real provider was exhausted
+    /// or filtered, so its output must never be replayed as a verified answer.
+    pub fn is_mock(&self) -> bool {
+        matches!(self, Adapter::Mock(_))
+    }
+
     /// Model IDs the adapter exposes (pre-filter; static manifest).
     pub fn models(&self) -> Vec<String> {
         match self {
@@ -350,12 +358,18 @@ async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, P
         "max_tokens": max_out,
         "messages": [OaMessage { role: "user", content: &req.prompt }],
     });
-    let resp = SHARED_CLIENT
+    let mut rb = SHARED_CLIENT
         .post(format!("{}/messages", h.endpoint))
         .timeout(req.timeout)
-        .header("x-api-key", &h.api_key)
         .header("anthropic-version", "2023-06-01")
-        .json(&body)
+        .json(&body);
+    // Only attach the credential when present (mirrors the OpenAI adapter):
+    // sending an empty `x-api-key` produces a confusing malformed request
+    // instead of a clean upstream 401.
+    if !h.api_key.is_empty() {
+        rb = rb.header("x-api-key", &h.api_key);
+    }
+    let resp = rb
         .send()
         .await
         .map_err(|e| ProviderError::Unavailable(Some(e.into())))?;
@@ -502,6 +516,16 @@ mod tests {
             Err(ProviderError::RateLimited)
         )); // call 2
         assert!(m.execute(&req("DIRECT", "GOAL: c")).await.is_ok()); // call 3
+    }
+
+    #[test]
+    fn is_mock_discriminates_adapters() {
+        assert!(Adapter::Mock(Mock::new("m")).is_mock());
+        let p = config::Provider {
+            adapter: "openai".into(),
+            ..Default::default()
+        };
+        assert!(!Adapter::new("openai", &p).unwrap().is_mock());
     }
 
     #[test]
