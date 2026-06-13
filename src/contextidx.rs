@@ -333,8 +333,9 @@ impl Indexer {
     /// Walk root and (re)index every recognized source file.
     /// Returns the number of symbols indexed.
     pub fn index_workspace(&self, root: &Path) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM symbols", [])?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM symbols", [])?;
         let mut count = 0usize;
         let walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
             !(e.file_type().is_dir()
@@ -343,45 +344,48 @@ impl Indexer {
                     .map(|n| SKIP_DIRS.contains(&n))
                     .unwrap_or(false))
         });
-        let mut stmt = conn.prepare(
-            "INSERT INTO symbols (file, name, kind, lang, start_line, end_line, body)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        )?;
-        for entry in walker.flatten() {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            let lang = lang_for(path);
-            if lang.is_empty() {
-                continue;
-            }
-            match entry.metadata() {
-                Ok(md) if md.len() <= 1 << 20 => {}
-                _ => continue, // skip >1MB files and unreadable entries
-            }
-            let data = match std::fs::read_to_string(path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-            for sym in extract_symbols(&rel, lang, &data) {
-                stmt.execute(rusqlite::params![
-                    sym.file,
-                    sym.name,
-                    sym.kind,
-                    sym.lang,
-                    sym.start_line,
-                    sym.end_line,
-                    sym.body
-                ])?;
-                count += 1;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO symbols (file, name, kind, lang, start_line, end_line, body)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            )?;
+            for entry in walker.flatten() {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let lang = lang_for(path);
+                if lang.is_empty() {
+                    continue;
+                }
+                match entry.metadata() {
+                    Ok(md) if md.len() <= 1 << 20 => {}
+                    _ => continue, // skip >1MB files and unreadable entries
+                }
+                let data = match std::fs::read_to_string(path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+                for sym in extract_symbols(&rel, lang, &data) {
+                    stmt.execute(rusqlite::params![
+                        sym.file,
+                        sym.name,
+                        sym.kind,
+                        sym.lang,
+                        sym.start_line,
+                        sym.end_line,
+                        sym.body
+                    ])?;
+                    count += 1;
+                }
             }
         }
+        tx.commit()?;
         Ok(count)
     }
 

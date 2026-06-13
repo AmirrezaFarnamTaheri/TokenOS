@@ -388,14 +388,28 @@ impl Store {
     pub fn list_tasks(&self, limit: usize) -> Result<Vec<State>> {
         let limit = if limit == 0 { 50 } else { limit };
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT state_json FROM tasks ORDER BY updated_at DESC LIMIT ?1")?;
-        let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id, goal, state_json FROM tasks ORDER BY updated_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
         let mut out = Vec::new();
-        for blob in rows {
-            let blob = blob?;
-            let st = serde_json::from_str::<State>(&blob)
-                .context("invalid state_json row in tasks table")?;
+        for row in rows {
+            let (task_id, goal, blob) = row?;
+            let st = match serde_json::from_str::<State>(&blob) {
+                Ok(st) => st,
+                Err(e) => {
+                    let mut bad = State::new(task_id, goal);
+                    bad.status = crate::kernel::Status::Failed;
+                    bad.next_action = format!("invalid state_json row in tasks table: {e}");
+                    bad
+                }
+            };
             out.push(st);
         }
         Ok(out)
@@ -1357,10 +1371,14 @@ mod tests {
             .unwrap();
         }
 
-        let err = s.list_tasks(10).unwrap_err();
+        let tasks = s.list_tasks(10).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "bad-task");
+        assert_eq!(tasks[0].status, crate::kernel::Status::Failed);
         assert!(
-            err.to_string().contains("invalid state_json"),
-            "corrupt task state must not be silently skipped: {err:#}"
+            tasks[0].next_action.contains("invalid state_json"),
+            "corrupt task state must not be silently skipped: {:?}",
+            tasks[0].next_action
         );
     }
 

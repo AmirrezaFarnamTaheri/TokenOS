@@ -293,19 +293,50 @@ struct ApiError {
     message: String,
 }
 
+async fn read_response_limit(mut resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| anyhow!("read error: {}", e))?
+    {
+        if body.len() + chunk.len() > max_bytes {
+            return Err(anyhow!(
+                "response body size exceeded limit of {} bytes",
+                max_bytes
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[derive(Serialize)]
+struct OaRequest<'a> {
+    model: &'a str,
+    messages: Vec<OaMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<i64>,
+}
+
 async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
     let model = if req.model.is_empty() {
         h.model.clone()
     } else {
         req.model.clone()
     };
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": [OaMessage { role: "user", content: &req.prompt }],
-    });
-    if req.max_out > 0 {
-        body["max_tokens"] = serde_json::json!(req.max_out);
-    }
+    let body = OaRequest {
+        model: &model,
+        messages: vec![OaMessage {
+            role: "user",
+            content: &req.prompt,
+        }],
+        max_tokens: if req.max_out > 0 {
+            Some(req.max_out)
+        } else {
+            None
+        },
+    };
     let mut rb = SHARED_CLIENT
         .post(format!("{}/chat/completions", h.endpoint))
         .timeout(req.timeout)
@@ -321,9 +352,10 @@ async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     if status != 200 {
         return Err(classify_http(status));
     }
-    let out: OaResponse = resp
-        .json()
+    let body_bytes = read_response_limit(resp, 10 * 1024 * 1024)
         .await
+        .map_err(|e| ProviderError::Other(anyhow!("read response: {}", e)))?;
+    let out: OaResponse = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProviderError::Other(anyhow!("decode response: {}", e)))?;
     if let Some(e) = out.error {
         return Err(ProviderError::Other(anyhow!("api error: {}", e.message)));
@@ -371,6 +403,13 @@ struct AnUsage {
     output_tokens: i64,
 }
 
+#[derive(Serialize)]
+struct AnRequest<'a> {
+    model: &'a str,
+    max_tokens: i64,
+    messages: Vec<OaMessage<'a>>,
+}
+
 async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
     let model = if req.model.is_empty() {
         h.model.clone()
@@ -378,11 +417,14 @@ async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, P
         req.model.clone()
     };
     let max_out = if req.max_out > 0 { req.max_out } else { 4096 };
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": max_out,
-        "messages": [OaMessage { role: "user", content: &req.prompt }],
-    });
+    let body = AnRequest {
+        model: &model,
+        max_tokens: max_out,
+        messages: vec![OaMessage {
+            role: "user",
+            content: &req.prompt,
+        }],
+    };
     let resp = SHARED_CLIENT
         .post(format!("{}/messages", h.endpoint))
         .timeout(req.timeout)
@@ -396,9 +438,10 @@ async fn execute_anthropic(h: &HttpAdapter, req: &Request) -> Result<Response, P
     if status != 200 {
         return Err(classify_http(status));
     }
-    let out: AnResponse = resp
-        .json()
+    let body_bytes = read_response_limit(resp, 10 * 1024 * 1024)
         .await
+        .map_err(|e| ProviderError::Other(anyhow!("read response: {}", e)))?;
+    let out: AnResponse = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProviderError::Other(anyhow!("decode response: {}", e)))?;
     if let Some(e) = out.error {
         return Err(ProviderError::Other(anyhow!("api error: {}", e.message)));
@@ -459,18 +502,49 @@ struct GmUsage {
     candidates_token_count: i64,
 }
 
+#[derive(Serialize)]
+struct GmRequest<'a> {
+    contents: Vec<GmRequestContent<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "generationConfig")]
+    generation_config: Option<GmGenerationConfig>,
+}
+
+#[derive(Serialize)]
+struct GmRequestContent<'a> {
+    role: &'a str,
+    parts: Vec<GmRequestPart<'a>>,
+}
+
+#[derive(Serialize)]
+struct GmRequestPart<'a> {
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct GmGenerationConfig {
+    #[serde(rename = "maxOutputTokens")]
+    max_output_tokens: i64,
+}
+
 async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
     let model = if req.model.is_empty() {
         h.model.clone()
     } else {
         req.model.clone()
     };
-    let mut body = serde_json::json!({
-        "contents": [{"role": "user", "parts": [{"text": req.prompt}]}],
-    });
-    if req.max_out > 0 {
-        body["generationConfig"] = serde_json::json!({"maxOutputTokens": req.max_out});
-    }
+    let body = GmRequest {
+        contents: vec![GmRequestContent {
+            role: "user",
+            parts: vec![GmRequestPart { text: &req.prompt }],
+        }],
+        generation_config: if req.max_out > 0 {
+            Some(GmGenerationConfig {
+                max_output_tokens: req.max_out,
+            })
+        } else {
+            None
+        },
+    };
     // Security: API key travels in the X-Goog-Api-Key header,
     // NOT the URL query string. URLs are routinely captured by access logs,
     // proxies and tracing systems; headers are not.
@@ -486,9 +560,10 @@ async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     if status != 200 {
         return Err(classify_http(status));
     }
-    let out: GmResponse = resp
-        .json()
+    let body_bytes = read_response_limit(resp, 10 * 1024 * 1024)
         .await
+        .map_err(|e| ProviderError::Other(anyhow!("read response: {}", e)))?;
+    let out: GmResponse = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProviderError::Other(anyhow!("decode response: {}", e)))?;
     if let Some(e) = out.error {
         return Err(ProviderError::Other(anyhow!("api error: {}", e.message)));
