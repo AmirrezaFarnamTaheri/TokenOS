@@ -210,13 +210,16 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
     };
     let api = Router::new()
         .route("/api/meta", get(handle_meta))
+        .route("/api/health", get(handle_health))
         .route("/api/summary", get(handle_summary))
         .route("/api/stats/routes", get(handle_route_stats))
         .route("/api/stats/providers", get(handle_provider_stats))
         .route("/api/stats/api", get(handle_api_stats))
+        .route("/api/stats/attempts", get(handle_attempt_stats))
         .route("/api/stats/bandit", get(handle_bandit_stats))
         .route("/api/stats/drift", get(handle_drift_stats))
         .route("/api/executions", get(handle_executions))
+        .route("/api/attempts", get(handle_attempts))
         .route("/api/tasks", get(handle_tasks))
         .route("/api/config", get(handle_config))
         .route("/api/traces/:task_id", get(handle_traces))
@@ -425,6 +428,23 @@ async fn handle_summary(State(state): State<WebState>) -> Response {
     }
 }
 
+async fn handle_health(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
+    let enabled = eng.cfg.providers.values().filter(|p| !p.disabled).count();
+    match eng.store.health_snapshot() {
+        Ok(store) => ok_json(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "dry_run": eng.dry_run,
+            "traces_enabled": !eng.cfg.security.disable_traces,
+            "providers_total": eng.cfg.providers.len(),
+            "providers_enabled": enabled,
+            "workspace_index_enabled": eng.indexer.is_some(),
+            "store": store,
+        })),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 async fn handle_route_stats(State(state): State<WebState>) -> Response {
     let eng = state.engine;
     match eng.store.stats_by_route() {
@@ -444,6 +464,14 @@ async fn handle_provider_stats(State(state): State<WebState>) -> Response {
 async fn handle_api_stats(State(state): State<WebState>) -> Response {
     let eng = state.engine;
     match eng.store.stats_by_api_route(100) {
+        Ok(s) => ok_json(s),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_attempt_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
+    match eng.store.stats_by_attempts(100) {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -491,6 +519,14 @@ async fn handle_drift_stats(State(state): State<WebState>) -> Response {
 async fn handle_executions(State(state): State<WebState>) -> Response {
     let eng = state.engine;
     match eng.store.list_executions(200) {
+        Ok(s) => ok_json(s),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_attempts(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
+    match eng.store.list_attempts(300) {
         Ok(s) => ok_json(s),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -804,6 +840,98 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| r["method"] == "GET" && r["path"] == "/api/summary"));
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_reports_local_store_and_mode() {
+        let app = router(test_engine());
+        let resp = app
+            .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["store"]["quick_check"], "ok");
+        assert!(v["providers_total"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn attempts_endpoint_reports_provider_legs() {
+        let app = router(test_engine());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task":"rename variable alpha to beta"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(Request::get("/api/attempts").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = v.as_array().unwrap();
+        assert!(rows.iter().any(|r| {
+            r["provider"] == "mock"
+                && r["success"] == true
+                && r["route"]
+                    .as_str()
+                    .map(|route| !route.is_empty())
+                    .unwrap_or(false)
+        }));
+    }
+
+    #[tokio::test]
+    async fn attempt_stats_endpoint_reports_provider_route_aggregates() {
+        let app = router(test_engine());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task":"rename variable alpha to beta"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/stats/attempts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = v.as_array().unwrap();
+        assert!(rows.iter().any(|r| {
+            r["provider"] == "mock"
+                && r["route"]
+                    .as_str()
+                    .map(|route| !route.is_empty())
+                    .unwrap_or(false)
+                && r["attempts"].as_u64().unwrap_or(0) >= 1
+                && r["success_rate"].as_f64().unwrap_or(0.0) > 0.0
+        }));
     }
 
     #[tokio::test]

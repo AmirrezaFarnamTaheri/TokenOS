@@ -241,7 +241,7 @@ security:
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `disable_traces` | bool | `false` | If true, trace files are not written to disk. |
-| `retention_days` | int | `30` | Auto-pruning window for loop history, telemetry records, and traces on startup. |
+| `retention_days` | int | `30` | Auto-pruning window for loop history, final execution telemetry, provider attempts, API aggregates, verified cache entries, and traces on startup. |
 | `owner_only_permissions` | bool | `true` | Enforces owner-only file permissions on traces and state files. |
 | `daily_spend_limit_usd` | float | `0.0` | Saturated daily spend blocks further execution; 0 disables. |
 | `monthly_spend_limit_usd` | float | `0.0` | Saturated monthly spend blocks further execution; 0 disables. |

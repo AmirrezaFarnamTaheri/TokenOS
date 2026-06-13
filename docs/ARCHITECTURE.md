@@ -213,11 +213,20 @@ After a provider responds, in order:
 3. **Loop detection** — normalized Myers bit-parallel Levenshtein distance
    over a sliding window of the last 5 outputs (persisted in SQLite).
    Distance < 3% ⇒ semantic loop ⇒ `ESCALATE-EXTERNAL`.
-4. **Recording** — telemetry row in SQLite; trace metadata in SQLite; full
-   payloads as SHA-256 content-addressed blobs in the flight recorder.
-5. **Unmask for caller only** — placeholder echoes are restored from the
+4. **Attempt recording** — every provider leg is written to SQLite before the
+   engine decides whether to fail over, retry, escalate, or finalize.
+5. **Final recording** — the final execution row is written to SQLite; trace
+   metadata is indexed; full payloads land as SHA-256 content-addressed blobs
+   in the flight recorder.
+6. **Unmask for caller only** — placeholder echoes are restored from the
    request-scoped vault after durable writes complete. The unmasked form is
    returned to the caller and is not written to SQLite or recorder blobs.
+
+On startup, provider health and UCB1 evidence are hydrated from the attempt
+ledger first so failed failover legs continue to influence routing after a
+restart. Older databases without attempt rows fall back to final execution
+history; unreadable telemetry rows are surfaced as errors or startup warnings
+instead of being silently skipped.
 
 ## 7. Persistence model
 
@@ -225,7 +234,7 @@ Two stores, deliberately separate:
 
 | Store | Contents | Why separate |
 |---|---|---|
-| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, execution telemetry, HTTP/API request aggregates, trace metadata, verified solution cache | Queryable, transactional, survives restarts |
+| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, final execution telemetry, provider attempt ledger and aggregates, HTTP/API request aggregates, trace metadata, verified solution cache | Queryable, transactional, survives restarts |
 | **Flight recorder** (`recorder.rs`) | Decision/prompt/response/rescue/error events (NDJSON journal) + full payload blobs (SHA-256 CAS) | Diagnostics must never compete with state for context tokens |
 
 State is stored as **compressed state objects** (goal, status, blockers,

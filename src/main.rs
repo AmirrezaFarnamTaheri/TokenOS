@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use std::sync::Arc;
 use tokenos::engine::{Engine, Options};
-use tokenos::{config, contextidx, provider, webui};
+use tokenos::{config, contextidx, provider, recorder, store, webui};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -86,6 +86,22 @@ enum Command {
     },
     /// Route/provider effectiveness; cost per successful task
     Telemetry {
+        #[command(flatten)]
+        engine: EngineFlags,
+    },
+    /// Validate local config, store integrity, traces, and telemetry surfaces
+    Doctor {
+        /// Emit diagnostic report as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        engine: EngineFlags,
+    },
+    /// List provider attempts, including failed failover legs
+    Attempts {
+        /// Max attempts to show
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
         #[command(flatten)]
         engine: EngineFlags,
     },
@@ -356,6 +372,43 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     );
                 }
             }
+            let providers = eng.store.stats_by_provider()?;
+            if !providers.is_empty() {
+                println!(
+                    "\n{:<14} {:>6} {:>9} {:>12} {:>12} {:>12}",
+                    "PROVIDER", "RUNS", "SUCCESS", "AVG_LAT_MS", "TOKENS", "COST"
+                );
+                for p in providers {
+                    println!(
+                        "{:<14} {:>6} {:>8.1}% {:>12.0} {:>12} {:>12.6}",
+                        p.provider,
+                        p.runs,
+                        p.success_rate * 100.0,
+                        p.avg_latency_ms,
+                        p.total_tokens,
+                        p.total_cost_usd
+                    );
+                }
+            }
+            let attempts = eng.store.stats_by_attempts(20)?;
+            if !attempts.is_empty() {
+                println!(
+                    "\n{:<14} {:<12} {:>8} {:>9} {:>12} {:>12} {:>12}",
+                    "ATTEMPT ARM", "ROUTE", "ATTEMPTS", "SUCCESS", "AVG_LAT_MS", "TOKENS", "COST"
+                );
+                for a in attempts {
+                    println!(
+                        "{:<14} {:<12} {:>8} {:>8.1}% {:>12.0} {:>12} {:>12.6}",
+                        a.provider,
+                        a.route,
+                        a.attempts,
+                        a.success_rate * 100.0,
+                        a.avg_latency_ms,
+                        a.total_tokens,
+                        a.total_cost_usd
+                    );
+                }
+            }
             // Live UCB1 bandit standings: process-local evidence.
             // Always printed when arms exist: a fresh process legitimately
             // shows every arm as unexplored (the evidence lives and dies
@@ -412,6 +465,133 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         if d.drifting { "DRIFTING" } else { "ok" }
                     );
                 }
+            }
+            Ok(())
+        }
+        Command::Doctor { json, engine: ef } => {
+            let eng = build_engine(&ef)?;
+            let health = eng.store.health_snapshot()?;
+            let store_ok = health.quick_check == "ok";
+            let enabled = eng.cfg.providers.values().filter(|p| !p.disabled).count();
+            let db_path = ef
+                .db
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(store::default_path);
+            let trace_path = ef
+                .traces
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(recorder::default_dir);
+            let provider_verdicts: Vec<serde_json::Value> = eng
+                .cfg
+                .providers
+                .iter()
+                .map(|(name, p)| {
+                    let model_allowed = p.model.is_empty() || p.models.is_model_allowed(&p.model);
+                    serde_json::json!({
+                        "provider": name,
+                        "adapter": p.adapter,
+                        "enabled": !p.disabled,
+                        "model": p.model,
+                        "model_allowed": model_allowed,
+                    })
+                })
+                .collect();
+            let report = serde_json::json!({
+                "version": VERSION,
+                "mode": if eng.dry_run { "dry-run" } else { "live-capable" },
+                "database": db_path.display().to_string(),
+                "trace_dir": trace_path.display().to_string(),
+                "traces_enabled": !eng.cfg.security.disable_traces,
+                "providers_total": eng.cfg.providers.len(),
+                "providers_enabled": enabled,
+                "workspace_index_enabled": eng.indexer.is_some(),
+                "store": health,
+                "providers": provider_verdicts,
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let store_health = report
+                    .get("store")
+                    .and_then(|v| v.as_object())
+                    .expect("doctor report store object");
+                println!("TokenOS doctor");
+                println!("version       {}", VERSION);
+                println!(
+                    "mode          {}",
+                    report["mode"].as_str().unwrap_or("unknown")
+                );
+                println!("database      {}", db_path.display());
+                println!(
+                    "traces        {} ({})",
+                    trace_path.display(),
+                    if eng.cfg.security.disable_traces {
+                        "disabled"
+                    } else {
+                        "enabled"
+                    }
+                );
+                println!(
+                    "providers     {}/{} enabled",
+                    enabled,
+                    eng.cfg.providers.len()
+                );
+                println!(
+                    "store         quick_check={}",
+                    store_health["quick_check"].as_str().unwrap_or("unknown")
+                );
+                println!(
+                    "rows          tasks={} executions={} attempts={} traces={} api_stats={}",
+                    store_health["tasks"],
+                    store_health["executions"],
+                    store_health["execution_attempts"],
+                    store_health["traces"],
+                    store_health["api_request_stats"]
+                );
+                println!(
+                    "cache         entries={} hits={}",
+                    store_health["solution_cache"], store_health["solution_cache_hits"]
+                );
+                println!("status        {}", if store_ok { "OK" } else { "CHECK" });
+            }
+            if store_ok {
+                Ok(())
+            } else {
+                Err(anyhow!("doctor found SQLite integrity problems"))
+            }
+        }
+        Command::Attempts { limit, engine: ef } => {
+            let eng = build_engine(&ef)?;
+            let attempts = eng.store.list_attempts(limit)?;
+            if attempts.is_empty() {
+                println!("no provider attempts recorded");
+                return Ok(());
+            }
+            println!(
+                "{:<6} {:<18} {:<10} {:<12} {:<18} {:>8} {:>9} {:>10} {:>10}  ERROR",
+                "ID", "TASK", "ROUTE", "PROVIDER", "MODEL", "TOKENS", "LAT_MS", "COST", "OK"
+            );
+            for a in attempts {
+                let tokens = a.tokens_in + a.tokens_out;
+                let mut err = a.error_message.clone();
+                if err.chars().count() > 80 {
+                    err = format!("{}...", err.chars().take(77).collect::<String>());
+                }
+                println!(
+                    "{:<6} {:<18} {:<10} {:<12} {:<18} {:>8} {:>9} {:>10.6} {:>10}  {}",
+                    a.id,
+                    a.task_id,
+                    a.route,
+                    a.provider,
+                    a.model,
+                    tokens,
+                    a.latency_ms,
+                    a.cost_usd,
+                    if a.success { "yes" } else { "no" },
+                    err
+                );
             }
             Ok(())
         }

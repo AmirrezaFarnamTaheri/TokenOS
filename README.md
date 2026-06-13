@@ -68,7 +68,7 @@ src/
   maskcodec.rs         Edge secret-masking codec (mask outbound, unmask echoes)
   loopdetect.rs        Semantic loop detection: Myers bit-parallel Levenshtein, 3% ceiling
   contextidx.rs        Surgical context: structural symbol index (FTS5, LIKE fallback)
-  store.rs             SQLite state store: tasks, failures, loops, telemetry, trace index, cache
+  store.rs             SQLite state store: tasks, failures, loops, executions, attempts, API stats, traces, cache
   recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON journals)
   webui.rs             Lock-free axum control panel (dashboard, run console, traces, bandit, config)
 static/                Embedded dashboard assets (index.html, app.js, style.css)
@@ -113,6 +113,12 @@ Escalations and ASK terminate locally at **zero LLM cost**.
 - **Flight recorder** — every decision, prompt, and response is content-addressed
   (SHA-256) outside the conversation and indexed in SQLite, so debugging never
   consumes context tokens and trace events remain queryable.
+- **Provider attempt ledger** — every provider leg is queryable and aggregated,
+  including failed failover attempts, verification failures, loop-escalation
+  attempts, and successful final legs. Surfaced through `tokenos attempts`,
+  `tokenos telemetry`, `/api/attempts`, `/api/stats/attempts`, and the
+  dashboard. Startup health hydration replays attempts first, then falls back
+  to final execution rows for older databases.
 - **Tiered verification** — free static checks (diff shape for PATCH, single-question
   contract for ASK, brace balance, truncation detection) run before anything costs.
 - **UCB1 bandit failover** — a lock-free multi-armed bandit over the provider
@@ -173,7 +179,7 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos
-cargo test                   # 202 unit tests across all subsystems, fully offline
+cargo test                   # 211 unit tests across all subsystems, fully offline
 cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
@@ -202,6 +208,8 @@ tokenos run "task" --dry-run              # full pipeline against the offline mo
 tokenos run "task" --workspace .          # surgical context from your codebase
 tokenos providers                         # filter-matrix verdicts per provider
 tokenos telemetry                         # cost-per-success + per-route stats
+tokenos doctor                            # local config/store/trace health
+tokenos attempts                          # failed/successful provider legs
 tokenos tasks                             # persisted task states
 tokenos trace <task-id> --blobs           # flight-recorder timeline + payloads
 tokenos index . --query "auth token"      # build & probe the symbol index
@@ -260,11 +268,11 @@ recorder directory).
 `tokenos serve` embeds a zero-dependency GUI:
 
 - **Dashboard** — cost-per-success KPI, route distribution, per-provider stats,
-  live UCB1 bandit standings (`/api/stats/bandit`)
+  system health, attempt health, live UCB1 bandit standings (`/api/stats/bandit`)
 - **Run console** — free route preview (signals + provider chain + token estimates)
   before committing to a paid execution
 - **Tasks** — persisted state with flight-recorder trace timeline per task
-- **Executions** — full telemetry ledger
+- **Executions** — final execution rows plus the provider-attempt ledger
 - **Configuration** — read-only view (keys stay in env)
 
 Keyboard-first: views on keys `1`–`5`, `Ctrl+Enter` executes,

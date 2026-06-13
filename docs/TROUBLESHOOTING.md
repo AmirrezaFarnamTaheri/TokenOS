@@ -80,8 +80,18 @@ the approach or constraints rather than retrying the same prompt.
 
 ### `all providers failed`
 
-Check the trace: `tokenos trace <task-id>` shows each attempt's classified
-error (timeout, auth, quota, server). Common causes:
+Check the attempt ledger first:
+
+```sh
+tokenos attempts --limit 20
+tokenos telemetry
+```
+
+`tokenos attempts` shows each provider leg, including failed failover attempts,
+latency, cost estimate, and classified error. `tokenos telemetry` shows whether
+the failures are isolated to one provider-route pair or systemic. Then inspect
+the trace: `tokenos trace <task-id>` shows the detailed flight-recorder events.
+Common causes:
 
 - Expired/missing API key (auth errors are terminal, not retried)
 - Quota exhaustion — if `quota_limit_per_min` is set, pressure discounts the

@@ -52,6 +52,36 @@ Runtime metadata used by the dashboard header and client-side capacity hints.
 }
 ```
 
+## GET `/api/health`
+
+Local diagnostic snapshot. This endpoint performs no provider calls; it reads
+config-derived mode/provider metadata plus SQLite integrity and table counts.
+
+```json
+{
+  "version": "2.0.0",
+  "dry_run": true,
+  "traces_enabled": true,
+  "providers_total": 4,
+  "providers_enabled": 1,
+  "workspace_index_enabled": false,
+  "store": {
+    "quick_check": "ok",
+    "tasks": 12,
+    "executions": 34,
+    "execution_attempts": 40,
+    "failure_memory": 0,
+    "loop_history": 0,
+    "traces": 120,
+    "solution_cache": 3,
+    "solution_cache_hits": 7,
+    "api_request_stats": 9,
+    "api_token_usage": 4,
+    "drift_ratios": 2
+  }
+}
+```
+
 ## GET `/api/summary`
 
 Headline KPIs.
@@ -99,6 +129,26 @@ Per-provider health:
     "avg_latency_ms": 980.0,
     "total_tokens": 30000,
     "total_cost_usd": 0.011
+  }
+]
+```
+
+## GET `/api/stats/attempts`
+
+Per-provider/per-route attempt health. This is the aggregate view of the
+attempt ledger, so failed failover legs and verification failures are counted
+instead of hidden behind the final execution row.
+
+```json
+[
+  {
+    "provider": "anthropic",
+    "route": "IMPLEMENT",
+    "attempts": 21,
+    "success_rate": 0.9,
+    "avg_latency_ms": 1040.0,
+    "total_tokens": 35490,
+    "total_cost_usd": 0.112
   }
 ]
 ```
@@ -186,6 +236,31 @@ Most recent 200 telemetry rows (newest first):
     "est_cost_usd": 0.0112,
     "success": true,
     "created_at": "2026-06-11T10:00:00Z"
+  }
+]
+```
+
+## GET `/api/attempts`
+
+Most recent 300 provider attempts (newest first). Unlike `/api/executions`,
+this includes failed failover legs, verification failures, loop-escalation
+attempts, and the final successful provider leg when one exists.
+
+```json
+[
+  {
+    "id": 52,
+    "task_id": "t-9f2c",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "route": "IMPLEMENT",
+    "tokens_in": 1180,
+    "tokens_out": 510,
+    "latency_ms": 1042,
+    "success": true,
+    "error_message": "",
+    "cost_usd": 0.0112,
+    "created_at": "2026-06-13T12:00:00Z"
   }
 ]
 ```

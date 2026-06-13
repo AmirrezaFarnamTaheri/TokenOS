@@ -95,6 +95,20 @@
             <tbody></tbody>
           </table></div>
         </div>
+        <div class="panel">
+          <div class="panel-head"><h2>System Health</h2><span class="hint">local integrity snapshot</span></div>
+          <div class="table-wrap"><table id="healthTable">
+            <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Attempt Health</h2><span class="hint">failed failover legs included</span></div>
+          <div class="table-wrap"><table id="attemptStatsTable">
+            <thead><tr><th>Provider</th><th>Route</th><th>Attempts</th><th>Success</th><th>Avg Latency</th><th>Tokens</th><th>Cost</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
       </div>
       <div class="panel">
         <div class="panel-head"><h2>Route Distribution</h2></div>
@@ -171,6 +185,20 @@
       <div class="panel">
         <div class="table-wrap"><table id="execTable">
           <thead><tr><th>#</th><th>Task</th><th>Route</th><th>Provider</th><th>Tok In</th><th>Tok Out</th><th>Latency</th><th>Retries</th><th>Cost</th><th>OK</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Attempt Health</h2><span class="hint">provider-route aggregate</span></div>
+        <div class="table-wrap"><table id="attemptStatsExecTable">
+          <thead><tr><th>Provider</th><th>Route</th><th>Attempts</th><th>Success</th><th>Avg Latency</th><th>Tokens</th><th>Cost</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Provider Attempts</h2><span class="hint">failed failover legs included</span></div>
+        <div class="table-wrap"><table id="attemptTable">
+          <thead><tr><th>#</th><th>Task</th><th>Route</th><th>Provider</th><th>Model</th><th>Tokens</th><th>Latency</th><th>Cost</th><th>OK</th><th>Error</th></tr></thead>
           <tbody></tbody>
         </table></div>
       </div>

@@ -87,7 +87,31 @@ Prints:
 - **Cost per successful task** (the headline metric)
 - Per-route effectiveness (runs, success rate, tokens, latency, cost/success)
 - Per-provider health
+- Per-provider/per-route attempt health, including failed failover legs
 - **UCB1 bandit standings** (arm, pulls, mean reward, mean latency, score)
+
+## `tokenos doctor` — local health diagnostics
+
+```sh
+tokenos doctor
+tokenos doctor --json
+```
+
+Validates the local configuration and reads the SQLite health snapshot without
+calling any provider. It reports database integrity (`PRAGMA quick_check`),
+table counts, provider enablement, trace policy, solution-cache counters, and
+workspace-index status. Non-`ok` SQLite integrity exits non-zero.
+
+## `tokenos attempts` — provider attempt ledger
+
+```sh
+tokenos attempts --limit 50
+```
+
+Lists recent provider attempts, including failed failover legs, verification
+failures, loop-escalation attempts, and final successful provider legs. Use it
+when `telemetry` shows retries or failures and you need the exact provider,
+model, route, latency, cost, and error reason for each leg.
 
 ## `tokenos tasks` — persisted task states
 

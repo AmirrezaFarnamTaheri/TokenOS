@@ -31,7 +31,7 @@ must add the controls listed in [RISK_ACCEPTANCE.md](RISK_ACCEPTANCE.md).
 | Cost control | Conservative token budgeting, shadow pricing, per-task budget sentinel, daily/monthly spend limits, and process-local `/api/run` backpressure are implemented. |
 | API protection | Non-loopback bind requires `--public` and a non-empty bearer token. API token comparison is constant-time; scoped tokens and a shared SQLite per-token request ledger are available. |
 | Transport | Native HTTPS is available with `--tls-cert` and `--tls-key`; reverse proxies remain supported for managed deployments. |
-| Traceability | Recorder events are indexed in SQLite, provider attempts are first-class rows, and API request telemetry is aggregate-only. |
+| Traceability | Recorder events are indexed in SQLite, provider attempts are first-class rows and aggregates exposed by CLI/API/dashboard, startup provider health replays attempt rows, corrupt telemetry reads fail visibly, and API request telemetry is aggregate-only. |
 | Data minimization | Prompts are masked before provider calls; unmasked output is returned only at the caller boundary. Placeholder-bearing outputs are not replayed from the solution cache. |
 | Storage hygiene | Trace disablement, retention pruning, and Unix owner-only permissions are implemented for state and recorder artifacts. |
 | Supply chain | The native launcher avoids the prior GTK/webview dependency path; `cargo audit` is part of the required gate. |
@@ -51,7 +51,7 @@ cargo build --release --locked --features native
 ```
 
 Expected current local result: all gates pass; the unit test suite contains
-202 tests. If the count changes, update the README and this document in the
+211 tests. If the count changes, update the README and this document in the
 same change as the tests.
 
 ## Smoke Gates
@@ -63,6 +63,7 @@ tokenos route "fix typo in README" --dry-run
 tokenos run "maybe somehow do something with the thing" --dry-run --json
 tokenos run "say hello" --dry-run --json
 tokenos providers
+tokenos doctor
 ```
 
 Expected behavior:
@@ -73,6 +74,7 @@ Expected behavior:
 - Dry-run execution succeeds against the mock provider.
 - Live providers are disabled unless explicitly configured with valid env-var
   names and keys.
+- Doctor reports SQLite `quick_check=ok` and does not call providers.
 
 ## Component Readiness Matrix
 

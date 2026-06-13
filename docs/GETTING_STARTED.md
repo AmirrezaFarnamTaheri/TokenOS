@@ -50,6 +50,8 @@ Nothing is spent until you `run` without `--dry-run` against a live provider.
 ./target/release/tokenos tasks                 # persisted task states
 ./target/release/tokenos trace <task-id>       # flight-recorder timeline
 ./target/release/tokenos telemetry             # cost-per-success + bandit standings
+./target/release/tokenos attempts              # provider legs, including failed failovers
+./target/release/tokenos doctor                # local config/store/trace health
 ```
 
 Every decision, prompt, and response was recorded out-of-band — debugging
@@ -65,11 +67,12 @@ never consumes context tokens.
 The control panel gives you:
 
 - **Dashboard** — cost-per-success KPI, route distribution, provider health,
-  live UCB1 bandit standings
+  system health, attempt aggregates, live UCB1 bandit standings
 - **Run Console** — free route preview, then execute
   (keyboard: `Ctrl+Enter` to execute, `Ctrl+Shift+Enter` to preview,
   keys `1`–`5` switch views)
-- **Tasks / Executions** — persisted state and the full telemetry ledger
+- **Tasks / Executions** — persisted state, final execution rows, and provider
+  attempt legs
 - **Configuration** — read-only effective config
 
 If you start the dashboard with `--auth-token` or expose it with `--public`,

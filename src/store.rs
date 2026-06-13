@@ -161,6 +161,9 @@ CREATE TABLE IF NOT EXISTS execution_attempts (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_exec_att_task ON execution_attempts(task_id);
+CREATE INDEX IF NOT EXISTS idx_exec_att_created ON execution_attempts(id DESC);
+CREATE INDEX IF NOT EXISTS idx_exec_att_provider ON execution_attempts(provider, id DESC);
+CREATE INDEX IF NOT EXISTS idx_exec_att_route ON execution_attempts(route, id DESC);
 
 CREATE TABLE IF NOT EXISTS drift_ratios (
     provider    TEXT PRIMARY KEY,
@@ -273,6 +276,18 @@ impl Store {
         )
         .ok();
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_exec_att_created ON execution_attempts(id DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_exec_att_provider ON execution_attempts(provider, id DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_exec_att_route ON execution_attempts(route, id DESC)",
+            [],
+        )?;
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS api_request_stats (
                 method           TEXT NOT NULL,
                 path             TEXT NOT NULL,
@@ -378,9 +393,10 @@ impl Store {
         let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for blob in rows {
-            if let Ok(st) = serde_json::from_str::<State>(&blob?) {
-                out.push(st);
-            }
+            let blob = blob?;
+            let st = serde_json::from_str::<State>(&blob)
+                .context("invalid state_json row in tasks table")?;
+            out.push(st);
         }
         Ok(out)
     }
@@ -725,7 +741,7 @@ impl Store {
                 verification_tier: r.get(14)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Records one specific provider attempt.
@@ -763,6 +779,33 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn list_attempts(&self, limit: usize) -> Result<Vec<ExecutionAttempt>> {
+        let limit = if limit == 0 { 200 } else { limit.min(1000) };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT id, task_id, provider, model, route, tokens_in, tokens_out,
+                      latency_ms, success, error_message, cost_usd, created_at
+               FROM execution_attempts ORDER BY id DESC LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(ExecutionAttempt {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                provider: r.get(2)?,
+                model: r.get(3)?,
+                route: r.get(4)?,
+                tokens_in: r.get::<_, i64>(5)?.max(0) as usize,
+                tokens_out: r.get::<_, i64>(6)?.max(0) as usize,
+                latency_ms: r.get(7)?,
+                success: r.get::<_, i64>(8)? == 1,
+                error_message: r.get(9)?,
+                cost_usd: r.get(10)?,
+                created_at: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Queries the aggregate spend over the last N days.
@@ -910,7 +953,7 @@ impl Store {
                 },
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn stats_by_provider(&self) -> Result<Vec<ProviderStats>> {
@@ -931,7 +974,7 @@ impl Store {
                 total_tokens: r.get(5)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn stats_by_api_route(&self, limit: usize) -> Result<Vec<ApiRequestStats>> {
@@ -961,7 +1004,80 @@ impl Store {
                 last_seen_at: r.get(6)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn stats_by_attempts(&self, limit: usize) -> Result<Vec<AttemptStats>> {
+        let limit = if limit == 0 { 50 } else { limit.min(500) };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT provider, route, COUNT(1),
+                      COALESCE(AVG(CAST(success AS REAL)),0),
+                      COALESCE(AVG(latency_ms),0),
+                      COALESCE(SUM(tokens_in + tokens_out),0),
+                      COALESCE(SUM(cost_usd),0)
+               FROM execution_attempts
+               GROUP BY provider, route
+               ORDER BY COUNT(1) DESC, provider ASC, route ASC
+               LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(AttemptStats {
+                provider: r.get(0)?,
+                route: r.get(1)?,
+                attempts: r.get::<_, i64>(2)?.max(0) as usize,
+                success_rate: r.get(3)?,
+                avg_latency_ms: r.get(4)?,
+                total_tokens: r.get(5)?,
+                total_cost_usd: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Local store integrity and table cardinalities for doctor/health
+    /// diagnostics. This performs no provider calls and reads only local
+    /// SQLite metadata.
+    pub fn health_snapshot(&self) -> Result<StoreHealth> {
+        let conn = self.conn.lock().unwrap();
+        let quick_check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        let tasks: i64 = conn.query_row("SELECT COUNT(1) FROM tasks", [], |r| r.get(0))?;
+        let executions: i64 =
+            conn.query_row("SELECT COUNT(1) FROM executions", [], |r| r.get(0))?;
+        let execution_attempts: i64 =
+            conn.query_row("SELECT COUNT(1) FROM execution_attempts", [], |r| r.get(0))?;
+        let failure_memory: i64 =
+            conn.query_row("SELECT COUNT(1) FROM failure_memory", [], |r| r.get(0))?;
+        let loop_history: i64 =
+            conn.query_row("SELECT COUNT(1) FROM loop_history", [], |r| r.get(0))?;
+        let traces: i64 = conn.query_row("SELECT COUNT(1) FROM traces", [], |r| r.get(0))?;
+        let solution_cache: i64 =
+            conn.query_row("SELECT COUNT(1) FROM solution_cache", [], |r| r.get(0))?;
+        let solution_cache_hits: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(hits),0) FROM solution_cache",
+            [],
+            |r| r.get(0),
+        )?;
+        let api_request_stats: i64 =
+            conn.query_row("SELECT COUNT(1) FROM api_request_stats", [], |r| r.get(0))?;
+        let api_token_usage: i64 =
+            conn.query_row("SELECT COUNT(1) FROM api_token_usage", [], |r| r.get(0))?;
+        let drift_ratios: i64 =
+            conn.query_row("SELECT COUNT(1) FROM drift_ratios", [], |r| r.get(0))?;
+        Ok(StoreHealth {
+            quick_check,
+            tasks,
+            executions,
+            execution_attempts,
+            failure_memory,
+            loop_history,
+            traces,
+            solution_cache,
+            solution_cache_hits,
+            api_request_stats,
+            api_token_usage,
+            drift_ratios,
+        })
     }
 
     /// Global headline metrics. The headline metric is Effective Cost Per
@@ -1077,6 +1193,23 @@ pub struct Execution {
     pub created_at: String,
 }
 
+/// One provider attempt inside an execution, including failed failover legs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionAttempt {
+    pub id: i64,
+    pub task_id: String,
+    pub provider: String,
+    pub model: String,
+    pub route: String,
+    pub tokens_in: usize,
+    pub tokens_out: usize,
+    pub latency_ms: i64,
+    pub success: bool,
+    pub error_message: String,
+    pub cost_usd: f64,
+    pub created_at: String,
+}
+
 /// Per-route telemetry aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteStats {
@@ -1112,6 +1245,35 @@ pub struct ApiRequestStats {
     pub avg_latency_ms: f64,
     pub max_latency_ms: f64,
     pub last_seen_at: String,
+}
+
+/// Provider-attempt aggregate, including failed failover legs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptStats {
+    pub provider: String,
+    pub route: String,
+    pub attempts: usize,
+    pub success_rate: f64,
+    pub avg_latency_ms: f64,
+    pub total_tokens: i64,
+    pub total_cost_usd: f64,
+}
+
+/// Local store integrity and cardinalities for diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreHealth {
+    pub quick_check: String,
+    pub tasks: i64,
+    pub executions: i64,
+    pub execution_attempts: i64,
+    pub failure_memory: i64,
+    pub loop_history: i64,
+    pub traces: i64,
+    pub solution_cache: i64,
+    pub solution_cache_hits: i64,
+    pub api_request_stats: i64,
+    pub api_token_usage: i64,
+    pub drift_ratios: i64,
 }
 
 /// Global telemetry headline.
@@ -1171,6 +1333,35 @@ mod tests {
         s.save_task(&mut st).unwrap();
         let back = s.get_task("t1").unwrap();
         assert_eq!(back.goal, "goal text");
+    }
+
+    #[test]
+    fn list_tasks_surfaces_corrupt_state_rows() {
+        let s = mem();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                r#"INSERT INTO tasks
+                   (task_id, goal, status, blocked, state_json, created_at, updated_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                params![
+                    "bad-task",
+                    "bad goal",
+                    "done",
+                    0_i64,
+                    "{not json",
+                    Utc::now().to_rfc3339(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        }
+
+        let err = s.list_tasks(10).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid state_json"),
+            "corrupt task state must not be silently skipped: {err:#}"
+        );
     }
 
     #[test]
@@ -1327,6 +1518,101 @@ mod tests {
     }
 
     #[test]
+    fn execution_attempts_are_listed_newest_first() {
+        let s = mem();
+        s.record_attempt(
+            "t1",
+            "mock",
+            "mock-1",
+            "IMPLEMENT",
+            10,
+            4,
+            15,
+            false,
+            "verification failed",
+            0.001,
+        )
+        .unwrap();
+        s.record_attempt(
+            "t1",
+            "openai",
+            "gpt-4o-mini",
+            "IMPLEMENT",
+            11,
+            5,
+            20,
+            true,
+            "",
+            0.002,
+        )
+        .unwrap();
+
+        let rows = s.list_attempts(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].id > rows[1].id);
+        assert_eq!(rows[0].provider, "openai");
+        assert!(rows[0].success);
+        assert_eq!(rows[1].error_message, "verification failed");
+    }
+
+    #[test]
+    fn execution_attempt_reads_surface_corrupt_rows() {
+        let s = mem();
+        s.record_attempt("t1", "mock", "mock-1", "PATCH", 10, 4, 15, true, "", 0.001)
+            .unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE execution_attempts SET success = ?1",
+                params!["oops"],
+            )
+            .unwrap();
+        }
+
+        let err = s.list_attempts(10).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid column type")
+                || err.to_string().contains("invalid column type"),
+            "malformed attempt rows must not be silently skipped: {err:#}"
+        );
+    }
+
+    #[test]
+    fn execution_attempt_stats_group_by_provider_and_route() {
+        let s = mem();
+        s.record_attempt("t1", "mock", "mock-1", "PATCH", 10, 5, 20, true, "", 0.1)
+            .unwrap();
+        s.record_attempt(
+            "t2", "mock", "mock-1", "PATCH", 8, 4, 40, false, "bad diff", 0.2,
+        )
+        .unwrap();
+        s.record_attempt(
+            "t3",
+            "openai",
+            "gpt-4o-mini",
+            "IMPLEMENT",
+            20,
+            10,
+            60,
+            true,
+            "",
+            0.3,
+        )
+        .unwrap();
+
+        let stats = s.stats_by_attempts(10).unwrap();
+        let mock_patch = stats
+            .iter()
+            .find(|r| r.provider == "mock" && r.route == "PATCH")
+            .unwrap();
+        assert_eq!(mock_patch.attempts, 2);
+        assert!((mock_patch.success_rate - 0.5).abs() < 1e-9);
+        assert!((mock_patch.avg_latency_ms - 30.0).abs() < 1e-9);
+        assert_eq!(mock_patch.total_tokens, 27);
+        assert!((mock_patch.total_cost_usd - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
     fn api_request_stats_aggregate() {
         let s = mem();
         s.record_api_request("GET", "/api/summary", 200, 1_000)
@@ -1350,6 +1636,37 @@ mod tests {
             .find(|r| r.method == "POST" && r.path == "/api/run" && r.status == 429)
             .unwrap();
         assert_eq!(run.count, 1);
+    }
+
+    #[test]
+    fn health_snapshot_reports_integrity_and_counts() {
+        let s = mem();
+        let mut st = State::new("t1", "goal text");
+        s.save_task(&mut st).unwrap();
+        s.record_execution(&Execution {
+            task_id: "t1".into(),
+            route: "DIRECT".into(),
+            provider: "mock".into(),
+            success: true,
+            ..Default::default()
+        })
+        .unwrap();
+        s.record_attempt("t1", "mock", "mock-1", "DIRECT", 1, 1, 2, true, "", 0.0)
+            .unwrap();
+        s.record_api_request("GET", "/api/summary", 200, 1_000)
+            .unwrap();
+        s.cache_solution("k1", "DIRECT", "answer", "static")
+            .unwrap();
+        let _ = s.cached_solution("k1").unwrap();
+
+        let health = s.health_snapshot().unwrap();
+        assert_eq!(health.quick_check, "ok");
+        assert_eq!(health.tasks, 1);
+        assert_eq!(health.executions, 1);
+        assert_eq!(health.execution_attempts, 1);
+        assert_eq!(health.api_request_stats, 1);
+        assert_eq!(health.solution_cache, 1);
+        assert_eq!(health.solution_cache_hits, 1);
     }
 
     #[test]

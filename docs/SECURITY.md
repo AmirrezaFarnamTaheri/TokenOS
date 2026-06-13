@@ -122,7 +122,7 @@ parameters — no string-built SQL anywhere in the codebase.
 
 | Artifact | Location | Contents |
 |---|---|---|
-| State DB | `~/.local/share/tokenos/tokenos.db` | Task states, telemetry, failure memory, loop windows, trace metadata, verified solution cache |
+| State DB | `~/.local/share/tokenos/tokenos.db` | Task states, final execution telemetry, provider attempt ledger and aggregates, API request aggregates, failure memory, loop windows, trace metadata, verified solution cache |
 | Flight recorder | `~/.local/state/tokenos/traces` | NDJSON event journals + SHA-256 content-addressed payload blobs |
 | Config | `~/.config/tokenos/config.yaml` | Profiles and policy — **never keys** |
 

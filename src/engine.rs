@@ -174,20 +174,53 @@ impl Engine {
                 .prune_old_traces(engine.cfg.security.retention_days);
         }
 
-        // Backfill bandit routing observations and provider health tracker from execution history to make decisions durable
-        if let Ok(execs) = engine.store.list_executions(1000) {
-            // Replay from oldest to newest so EWMA latency/failure updates correctly.
-            // Note that list_executions returns executions ordered DESC by id (newest first),
-            // so we should reverse them to replay them chronologically (oldest first).
-            let mut execs_chronological = execs;
-            execs_chronological.reverse();
-            for exec in &execs_chronological {
-                engine
-                    .bandit
-                    .record(&exec.provider, exec.success, exec.latency_ms as f64);
-                engine
-                    .tracker
-                    .record(&exec.provider, exec.latency_ms as f64, exec.success);
+        // Backfill routing observations and provider health from the most
+        // granular durable evidence available. Attempt rows include failed
+        // failover legs; older databases may only have final execution rows.
+        let hydrated_from_attempts = match engine.store.list_attempts(1000) {
+            Ok(mut attempts) => {
+                if attempts.is_empty() {
+                    false
+                } else {
+                    attempts.reverse();
+                    for attempt in &attempts {
+                        engine.bandit.record(
+                            &attempt.provider,
+                            attempt.success,
+                            attempt.latency_ms as f64,
+                        );
+                        engine.tracker.record(
+                            &attempt.provider,
+                            attempt.latency_ms as f64,
+                            attempt.success,
+                        );
+                    }
+                    true
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "tokenos: WARNING: provider attempt hydration failed; falling back to final executions: {e:#}"
+                );
+                false
+            }
+        };
+        if !hydrated_from_attempts {
+            match engine.store.list_executions(1000) {
+                Ok(mut execs_chronological) => {
+                    execs_chronological.reverse();
+                    for exec in &execs_chronological {
+                        engine
+                            .bandit
+                            .record(&exec.provider, exec.success, exec.latency_ms as f64);
+                        engine
+                            .tracker
+                            .record(&exec.provider, exec.latency_ms as f64, exec.success);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("tokenos: WARNING: final execution hydration failed: {e:#}");
+                }
             }
         }
 
@@ -644,17 +677,20 @@ impl Engine {
                         "flight-recorder error",
                         self.record_event(&task_id, "error", &format!("{}: {}", prov_name, e), &[]),
                     );
-                    let _ = self.store.record_attempt(
-                        &task_id,
-                        &prov_name,
-                        &model,
-                        dec.route.as_str(),
-                        0,
-                        0,
-                        lat,
-                        false,
-                        &e.to_string(),
-                        0.0,
+                    warn_persist(
+                        "provider attempt",
+                        self.store.record_attempt(
+                            &task_id,
+                            &prov_name,
+                            &model,
+                            dec.route.as_str(),
+                            0,
+                            0,
+                            lat,
+                            false,
+                            &e.to_string(),
+                            0.0,
+                        ),
                     );
                     warn_persist(
                         "failure memory",
@@ -735,17 +771,20 @@ impl Engine {
                 let cost_usd = (resp.tokens_in as f64 * p_cfg.cost_per_mtok_in
                     + resp.tokens_out as f64 * p_cfg.cost_per_mtok_out)
                     / 1e6;
-                let _ = self.store.record_attempt(
-                    &task_id,
-                    &prov_name,
-                    &resp.model,
-                    dec.route.as_str(),
-                    resp.tokens_in as usize,
-                    resp.tokens_out as usize,
-                    lat,
-                    false,
-                    &reason,
-                    cost_usd,
+                warn_persist(
+                    "provider attempt",
+                    self.store.record_attempt(
+                        &task_id,
+                        &prov_name,
+                        &resp.model,
+                        dec.route.as_str(),
+                        resp.tokens_in as usize,
+                        resp.tokens_out as usize,
+                        lat,
+                        false,
+                        &reason,
+                        cost_usd,
+                    ),
                 );
                 st.remember_failure(&format!("output from {}", prov_name), &reason);
                 warn_persist(
@@ -785,17 +824,20 @@ impl Engine {
                     let cost_usd = (resp.tokens_in as f64 * p_cfg.cost_per_mtok_in
                         + resp.tokens_out as f64 * p_cfg.cost_per_mtok_out)
                         / 1e6;
-                    let _ = self.store.record_attempt(
-                        &task_id,
-                        &prov_name,
-                        &resp.model,
-                        dec.route.as_str(),
-                        resp.tokens_in as usize,
-                        resp.tokens_out as usize,
-                        lat,
-                        false,
-                        loop_msg,
-                        cost_usd,
+                    warn_persist(
+                        "provider attempt",
+                        self.store.record_attempt(
+                            &task_id,
+                            &prov_name,
+                            &resp.model,
+                            dec.route.as_str(),
+                            resp.tokens_in as usize,
+                            resp.tokens_out as usize,
+                            lat,
+                            false,
+                            loop_msg,
+                            cost_usd,
+                        ),
                     );
                     last_err = Some(anyhow!(loop_msg));
                     break;
@@ -854,17 +896,20 @@ impl Engine {
             res.success = true;
 
             // Record successful provider attempt.
-            let _ = self.store.record_attempt(
-                &task_id,
-                &prov_name,
-                &resp.model,
-                dec.route.as_str(),
-                tokens_in as usize,
-                tokens_out as usize,
-                lat,
-                true,
-                "",
-                res.cost_usd,
+            warn_persist(
+                "provider attempt",
+                self.store.record_attempt(
+                    &task_id,
+                    &prov_name,
+                    &resp.model,
+                    dec.route.as_str(),
+                    tokens_in as usize,
+                    tokens_out as usize,
+                    lat,
+                    true,
+                    "",
+                    res.cost_usd,
+                ),
             );
 
             // Verified success credits the bandit arm.
@@ -1342,6 +1387,64 @@ mod tests {
         let (pulls, reward, _) = e.bandit.arm_stats(&r.provider);
         assert!(pulls >= 1, "successful run must credit the bandit arm");
         assert!(reward > 0.0);
+    }
+
+    #[test]
+    fn startup_hydrates_provider_health_from_attempts() {
+        let dir = std::env::temp_dir().join(format!(
+            "tokenos-attempt-hydrate-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("tokenos.db");
+        let traces = dir.join("traces");
+        {
+            let store = Store::open(Some(&db)).unwrap();
+            store
+                .record_attempt(
+                    "t1",
+                    "mock",
+                    "mock-1",
+                    "IMPLEMENT",
+                    10,
+                    3,
+                    100,
+                    false,
+                    "verification failed",
+                    0.001,
+                )
+                .unwrap();
+            store
+                .record_attempt(
+                    "t2",
+                    "mock",
+                    "mock-1",
+                    "IMPLEMENT",
+                    12,
+                    4,
+                    80,
+                    true,
+                    "",
+                    0.002,
+                )
+                .unwrap();
+        }
+
+        let e = Engine::new(Options {
+            config_path: None,
+            db_path: Some(db.to_string_lossy().to_string()),
+            trace_dir: Some(traces.to_string_lossy().to_string()),
+            dry_run: true,
+        })
+        .unwrap();
+        let (pulls, reward, _) = e.bandit.arm_stats("mock");
+        assert_eq!(pulls, 2);
+        assert!(reward > 0.0, "successful attempt must hydrate reward");
+        let (_, fail_rate, calls) = e.tracker.snapshot("mock");
+        assert_eq!(calls, 2);
+        assert!(fail_rate > 0.0, "failed attempt must hydrate health");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// An identical goal+constraints re-request is served

@@ -193,11 +193,13 @@ $("#welcomeTry")?.addEventListener("click", () => {
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
   try {
-    const [sum, routes, providers, bandit, drift, apiStats] = await Promise.all([
+    const [sum, routes, providers, bandit, drift, apiStats, attemptStats, health] = await Promise.all([
       api("/api/summary"), api("/api/stats/routes"), api("/api/stats/providers"),
       api("/api/stats/bandit").catch(() => null),
       api("/api/stats/drift").catch(() => null),
       api("/api/stats/api").catch(() => null),
+      api("/api/stats/attempts").catch(() => null),
+      api("/api/health").catch(() => null),
     ]);
     setConn(true);
     const lu = $("#lastUpdated");
@@ -290,6 +292,46 @@ async function loadDashboard() {
             <td>${fmtMS(r.max_latency_ms)}</td>
           </tr>`).join("")
         : emptyRow(6, "No API requests recorded yet.");
+    }
+
+    const ast = $("#attemptStatsTable tbody");
+    if (ast) {
+      const rows = attemptStats || [];
+      ast.innerHTML = rows.length
+        ? rows.slice(0, 10).map((r) => `<tr>
+            <td>${esc(r.provider)}</td>
+            <td>${routeBadge(r.route)}</td>
+            <td>${fmtNum(r.attempts)}</td>
+            <td>${fmtPct(r.success_rate)}</td>
+            <td>${fmtMS(r.avg_latency_ms)}</td>
+            <td>${fmtNum(r.total_tokens)}</td>
+            <td>${fmtUSD(r.total_cost_usd)}</td>
+          </tr>`).join("")
+        : emptyRow(7, "No provider attempts recorded yet.");
+    }
+
+    const ht = $("#healthTable tbody");
+    if (ht) {
+      if (health && health.store) {
+        const s = health.store;
+        const ok = s.quick_check === "ok";
+        const rows = [
+          ["SQLite", ok, `quick_check=${s.quick_check || "unknown"}`],
+          ["Mode", true, health.dry_run ? "dry-run / no live spend" : "live-capable"],
+          ["Providers", health.providers_enabled > 0, `${health.providers_enabled}/${health.providers_total} enabled`],
+          ["Telemetry Rows", true, `tasks=${s.tasks} executions=${s.executions} attempts=${s.execution_attempts}`],
+          ["API Aggregates", true, `${s.api_request_stats} route/status rows`],
+          ["Traces", true, health.traces_enabled ? `${s.traces} indexed events` : "disabled by policy"],
+          ["Solution Cache", true, `${s.solution_cache} entries · ${s.solution_cache_hits} hits`],
+        ];
+        ht.innerHTML = rows.map(([label, pass, detail]) => `<tr>
+          <td>${esc(label)}</td>
+          <td>${pass ? '<span class="badge ok">ok</span>' : '<span class="badge fail">check</span>'}</td>
+          <td>${esc(detail)}</td>
+        </tr>`).join("");
+      } else {
+        ht.innerHTML = emptyRow(3, "Health snapshot unavailable.");
+      }
     }
 
     const max = Math.max(1, ...(routes || []).map((r) => r.runs));
@@ -469,6 +511,8 @@ async function loadTrace(taskID) {
 
 /* ---------- executions ---------- */
 let execCache = [];
+let attemptCache = [];
+let attemptStatsCache = [];
 function renderExecutions() {
   const q = ($("#execFilter")?.value || "").trim().toLowerCase();
   const st = $("#execStatusFilter")?.value || "";
@@ -493,13 +537,63 @@ function renderExecutions() {
         <td>${e.success ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
       </tr>`).join("")
     : emptyRow(10, execCache.length ? "No executions match the filter." : "No executions recorded — run a task from the console.");
+
+  const attemptRows = attemptCache.filter((a) => {
+    if (st === "ok" && !a.success) return false;
+    if (st === "fail" && a.success) return false;
+    if (q && !((a.task_id + " " + a.route + " " + (a.provider || "") + " " + (a.model || "") + " " + (a.error_message || "")).toLowerCase().includes(q))) return false;
+    return true;
+  });
+  const at = $("#attemptTable tbody");
+  if (at) {
+    at.innerHTML = attemptRows.length
+      ? attemptRows.map((a) => `<tr>
+          <td>${a.id}</td>
+          <td>${esc(a.task_id)}</td>
+          <td>${routeBadge(a.route)}</td>
+          <td>${esc(a.provider || "—")}</td>
+          <td>${esc(a.model || "—")}</td>
+          <td>${fmtNum((a.tokens_in || 0) + (a.tokens_out || 0))}</td>
+          <td>${fmtMS(a.latency_ms)}</td>
+          <td>${fmtUSD(a.cost_usd)}</td>
+          <td>${a.success ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
+          <td class="goal-cell">${esc(a.error_message || "")}</td>
+        </tr>`).join("")
+      : emptyRow(10, attemptCache.length ? "No attempts match the filter." : "No provider attempts recorded — run a task from the console.");
+  }
+
+  const statRows = attemptStatsCache.filter((a) => {
+    if (q && !((a.provider || "") + " " + (a.route || "")).toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const ast = $("#attemptStatsExecTable tbody");
+  if (ast) {
+    ast.innerHTML = statRows.length
+      ? statRows.map((a) => `<tr>
+          <td>${esc(a.provider || "—")}</td>
+          <td>${routeBadge(a.route)}</td>
+          <td>${fmtNum(a.attempts)}</td>
+          <td>${fmtPct(a.success_rate)}</td>
+          <td>${fmtMS(a.avg_latency_ms)}</td>
+          <td>${fmtNum(a.total_tokens)}</td>
+          <td>${fmtUSD(a.total_cost_usd)}</td>
+        </tr>`).join("")
+      : emptyRow(7, attemptStatsCache.length ? "No attempt aggregates match the filter." : "No provider attempt aggregates recorded.");
+  }
 }
 $("#execFilter")?.addEventListener("input", renderExecutions);
 $("#execStatusFilter")?.addEventListener("change", renderExecutions);
 
 async function loadExecutions() {
   try {
-    execCache = (await api("/api/executions")) || [];
+    const [executions, attempts, attemptStats] = await Promise.all([
+      api("/api/executions"),
+      api("/api/attempts").catch(() => []),
+      api("/api/stats/attempts").catch(() => []),
+    ]);
+    execCache = executions || [];
+    attemptCache = attempts || [];
+    attemptStatsCache = attemptStats || [];
     renderExecutions();
   } catch (e) { setConn(false, e.message); }
 }
