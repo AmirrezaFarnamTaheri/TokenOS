@@ -125,13 +125,51 @@ async fn require_bearer(State(state): State<WebState>, req: Request, next: Next)
             .into_response();
     };
 
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let token_hash = hex::encode(hasher.finalize());
+
+    // Check budget limits for this token
+    if let Some(budget) = state.engine.cfg.security.api_token_budgets.get(token) {
+        if budget.daily_spend_limit_usd > 0.0 {
+            let day_ago = chrono::Utc::now() - chrono::Duration::try_days(1).unwrap();
+            if let Ok(spend) = state.engine.store.get_api_token_spend_since(&token_hash, day_ago) {
+                if spend >= budget.daily_spend_limit_usd {
+                    return (
+                        StatusCode::PAYMENT_REQUIRED,
+                        Json(json!({ "error": "API token daily spend budget exceeded" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        if budget.monthly_spend_limit_usd > 0.0 {
+            let month_ago = chrono::Utc::now() - chrono::Duration::try_days(30).unwrap();
+            if let Ok(spend) = state.engine.store.get_api_token_spend_since(&token_hash, month_ago) {
+                if spend >= budget.monthly_spend_limit_usd {
+                    return (
+                        StatusCode::PAYMENT_REQUIRED,
+                        Json(json!({ "error": "API token monthly spend budget exceeded" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
     let limit = state.engine.cfg.security.api_token_rate_limit_per_min;
     match state
         .engine
         .store
         .record_api_token_use(token, required_scope, limit)
     {
-        Ok(true) => next.run(req).await,
+        Ok(true) => {
+            let token_hash_str = token_hash.clone();
+            crate::store::CURRENT_TOKEN_HASH.scope(token_hash_str, async move {
+                next.run(req).await
+            }).await
+        }
         Ok(false) => (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": "API token rate limit exceeded" })),
@@ -1595,5 +1633,85 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("tokenos_tasks_total"));
         assert!(text.contains("tokenos_provider_runs"));
+    }
+
+    #[tokio::test]
+    async fn api_token_spend_limit_blocks_requests() {
+        let mut cfg = Config::default();
+        cfg.security
+            .api_tokens
+            .insert("budget_limited".into(), vec!["run".into()]);
+        
+        let budget = crate::config::TokenBudget {
+            daily_spend_limit_usd: 0.01, // extremely low limit
+            ..Default::default()
+        };
+        cfg.security
+            .api_token_budgets
+            .insert("budget_limited".into(), budget);
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        
+        let arms: Vec<String> = cfg.providers.keys().cloned().collect();
+        let engine = Arc::new(Engine {
+            cfg,
+            store: Store::open(Some(std::path::Path::new(":memory:"))).unwrap(),
+            recorder: Recorder::new(Some(std::path::Path::new(&format!(
+                "{}/tokenos-web-budget-test-{}",
+                std::env::temp_dir().display(),
+                std::process::id()
+            ))))
+            .unwrap(),
+            tracker: Tracker::new(),
+            bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
+            indexer: None,
+            dry_run: true,
+            adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
+        });
+
+        // First, record a successful execution under the token_hash of "budget_limited"
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"budget_limited");
+        let hash = hex::encode(hasher.finalize());
+
+        let execution = crate::store::Execution {
+            task_id: "test-task-1".into(),
+            route: "PATCH".into(),
+            provider: "openai".into(),
+            model: "gpt-4".into(),
+            tokens_in: 100,
+            tokens_out: 200,
+            latency_ms: 150,
+            retries: 0,
+            verification_cost: 0,
+            delegation_count: 0,
+            est_cost_usd: 0.02, // exceeds daily budget of 0.01
+            success: true,
+            verification_tier: "static".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            id: 0,
+        };
+
+        // Run execution within CURRENT_TOKEN_HASH context
+        crate::store::CURRENT_TOKEN_HASH.scope(hash.clone(), async {
+            engine.store.record_execution(&execution).unwrap();
+        }).await;
+
+        let app = router(engine);
+
+        // Making a request using the budget_limited token should fail with PAYMENT_REQUIRED
+        let resp = app
+            .oneshot(
+                Request::post("/api/run")
+                    .header("authorization", "Bearer budget_limited")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task":"implement a feature"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
     }
 }

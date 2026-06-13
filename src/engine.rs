@@ -324,7 +324,32 @@ impl Engine {
             .unwrap_or(false);
         let sig =
             kernel::extract_signals(task, est, has_existing_solution, repeated, loop_detected);
-        (kernel::decide(sig, &self.cfg.policy), ctx_block)
+        let mut dec = kernel::decide(sig.clone(), &self.cfg.policy);
+
+        // P10: Opt-in learned routing classifier fallback
+        if self.cfg.policy.opt_in_learned_routing && sig.confidence >= 0.2 && sig.confidence < 0.5 {
+            if let Ok(Some((route_str, sim))) = self.store.get_similar_successful_route(task, 0.3) {
+                let matched_route = match route_str.as_str() {
+                    "DIRECT" => Some(kernel::Route::Direct),
+                    "REUSE" => Some(kernel::Route::Reuse),
+                    "PATCH" => Some(kernel::Route::Patch),
+                    "IMPLEMENT" => Some(kernel::Route::Implement),
+                    "PARTIAL" => Some(kernel::Route::Partial),
+                    "DELEGATE" => Some(kernel::Route::Delegate),
+                    "ASK" => Some(kernel::Route::Ask),
+                    _ => None,
+                };
+                if let Some(r) = matched_route {
+                    dec.route = r;
+                    dec.reason = format!(
+                        "learned classifier override: matches past successful task with similarity {:.2}",
+                        sim
+                    );
+                }
+            }
+        }
+
+        (dec, ctx_block)
     }
 
     /// Queries the surgical index when available; budget-capped hard.
@@ -2503,5 +2528,42 @@ mod tests {
         let err_msg = r.unwrap_err().to_string();
         assert!(err_msg.contains("verification failed"));
         assert!(err_msg.contains("Code is not elegant"));
+    }
+
+    #[tokio::test]
+    async fn test_opt_in_learned_routing() {
+        let mut e = test_engine();
+        e.cfg.policy.opt_in_learned_routing = true;
+
+        // 1. Insert a task and successful execution into the store
+        let mut st = State::new("task-456", "implement user tokenizer module");
+        st.status = crate::kernel::Status::Done;
+        e.store.save_task(&mut st).unwrap();
+
+        let exec = crate::store::Execution {
+            task_id: "task-456".into(),
+            route: "PATCH".into(), // route used is PATCH
+            provider: "openai".into(),
+            model: "gpt-4".into(),
+            tokens_in: 100,
+            tokens_out: 200,
+            latency_ms: 150,
+            retries: 0,
+            verification_cost: 0,
+            delegation_count: 0,
+            est_cost_usd: 0.005,
+            success: true,
+            verification_tier: "static".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            id: 0,
+        };
+        e.store.record_execution(&exec).unwrap();
+
+        // 2. Evaluate a similar task. The confidence for "implement maybe user tokenizer somehow" is mid-band (0.3),
+        // and with opt_in_learned_routing enabled it should match "implement user tokenizer module"
+        // and override the route to PATCH!
+        let (dec, _) = e.route_only_with_constraints("implement maybe user tokenizer somehow", &[]);
+        assert_eq!(dec.route, Route::Patch);
+        assert!(dec.reason.contains("learned classifier override"));
     }
 }

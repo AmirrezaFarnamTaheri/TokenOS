@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+tokio::task_local! {
+    pub static CURRENT_TOKEN_HASH: String;
+}
+
 /// Wraps the SQLite handle. A fine-grained internal mutex serializes writes
 /// (SQLite requirement) without ever being held across network I/O.
 pub struct Store {
@@ -107,7 +111,8 @@ CREATE TABLE IF NOT EXISTS executions (
     est_cost_usd  REAL NOT NULL DEFAULT 0,
     success       INTEGER NOT NULL DEFAULT 0,
     verification_tier TEXT NOT NULL DEFAULT 'static',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    token_hash    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_exec_route ON executions(route);
 CREATE INDEX IF NOT EXISTS idx_exec_provider ON executions(provider);
@@ -340,6 +345,16 @@ impl Store {
                 [],
             )?;
             conn.pragma_update(None, "user_version", 2)?;
+        }
+
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 3 {
+            conn.execute(
+                "ALTER TABLE executions ADD COLUMN token_hash TEXT",
+                [],
+            )
+            .ok();
+            conn.pragma_update(None, "user_version", 3)?;
         }
 
         // Backfill: rows recorded before the goal_hash column existed carry
@@ -787,6 +802,30 @@ impl Store {
         }
     }
 
+    /// Finds the route of a past successful execution that is most similar to the given task
+    /// using Jaccard word similarity. Returns the route and similarity score if above threshold.
+    pub fn get_similar_successful_route(&self, task: &str, threshold: f64) -> Result<Option<(String, f64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT t.goal, e.route FROM executions e
+             JOIN tasks t ON t.task_id = e.task_id
+             WHERE e.success = 1"
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut best_match: Option<(String, f64)> = None;
+
+        while let Some(row) = rows.next()? {
+            let goal: String = row.get(0)?;
+            let route: String = row.get(1)?;
+
+            let sim = Self::jaccard_similarity(task, &goal);
+            if sim >= threshold && (best_match.is_none() || sim > best_match.as_ref().unwrap().1) {
+                best_match = Some((route, sim));
+            }
+        }
+        Ok(best_match)
+    }
+
     fn jaccard_similarity(s1: &str, s2: &str) -> f64 {
         let set1: std::collections::HashSet<String> = s1
             .to_lowercase()
@@ -933,11 +972,12 @@ impl Store {
     // -----------------------------------------------------------------
 
     pub fn record_execution(&self, e: &Execution) -> Result<()> {
+        let token_hash = CURRENT_TOKEN_HASH.try_with(|h| h.clone()).ok();
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"INSERT INTO executions (task_id, route, provider, model, tokens_in, tokens_out,
-                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, verification_tier, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"#,
+                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, verification_tier, created_at, token_hash)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"#,
             params![
                 e.task_id,
                 e.route,
@@ -953,9 +993,24 @@ impl Store {
                 e.success as i64,
                 e.verification_tier,
                 Utc::now().to_rfc3339(),
+                token_hash,
             ],
         )?;
         Ok(())
+    }
+
+    /// Sums the estimated USD cost of executions associated with a specific token hash
+    /// since the given UTC timestamp.
+    pub fn get_api_token_spend_since(&self, token_hash: &str, since: DateTime<Utc>) -> Result<f64> {
+        let conn = self.conn.lock().unwrap();
+        let since_str = since.to_rfc3339();
+        let spend: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(est_cost_usd), 0.0) FROM executions
+             WHERE token_hash = ?1 AND created_at >= ?2",
+            params![token_hash, since_str],
+            |r| r.get(0),
+        )?;
+        Ok(spend)
     }
 
     pub fn list_executions(&self, limit: usize) -> Result<Vec<Execution>> {

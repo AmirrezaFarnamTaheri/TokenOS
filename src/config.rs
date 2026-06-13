@@ -142,6 +142,17 @@ impl Default for PricingWeights {
     }
 }
 
+/// Spend budget for an API token.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TokenBudget {
+    /// Daily spend limit in USD (0.0 = no limit)
+    #[serde(default)]
+    pub daily_spend_limit_usd: f64,
+    /// Monthly spend limit in USD (0.0 = no limit)
+    #[serde(default)]
+    pub monthly_spend_limit_usd: f64,
+}
+
 /// Security and retention settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityPolicy {
@@ -163,6 +174,9 @@ pub struct SecurityPolicy {
     /// Map of scoped API tokens (token -> list of scopes)
     #[serde(default)]
     pub api_tokens: std::collections::HashMap<String, Vec<String>>,
+    /// Map of API tokens to budgets (daily and monthly limits)
+    #[serde(default)]
+    pub api_token_budgets: std::collections::HashMap<String, TokenBudget>,
     /// Shared SQLite-backed per-token request limit per minute (0 = disabled)
     #[serde(default)]
     pub api_token_rate_limit_per_min: u32,
@@ -185,6 +199,7 @@ impl Default for SecurityPolicy {
             daily_spend_limit_usd: 0.0,
             monthly_spend_limit_usd: 0.0,
             api_tokens: std::collections::HashMap::new(),
+            api_token_budgets: std::collections::HashMap::new(),
             api_token_rate_limit_per_min: 0,
         }
     }

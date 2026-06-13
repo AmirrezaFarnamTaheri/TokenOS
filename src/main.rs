@@ -166,6 +166,9 @@ enum Command {
         /// Labeled dataset path
         #[arg(long)]
         dataset: String,
+        /// Sweep the confidence threshold to find the cost-accuracy frontier
+        #[arg(long)]
+        sweep: bool,
         #[command(flatten)]
         engine: EngineFlags,
     },
@@ -751,8 +754,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Eval {
             dataset,
+            sweep,
             engine: ef,
-        } => run_eval(&dataset, &ef).await,
+        } => run_eval(&dataset, sweep, &ef).await,
     }
 }
 
@@ -766,7 +770,17 @@ struct EvalItem {
     expected_route: String,
 }
 
-async fn run_eval(dataset_path: &str, ef: &EngineFlags) -> Result<()> {
+fn route_cost(r: &str) -> f64 {
+    match r {
+        "ASK" | "VERIFY" | "ESCALATE-CONFLICT" | "ESCALATE-SAFETY" | "ESCALATE-EXTERNAL" => 0.0005,
+        "DIRECT" => 0.001,
+        "REUSE" | "PATCH" => 0.005,
+        "IMPLEMENT" | "PARTIAL" | "DELEGATE" => 0.02,
+        _ => 0.02,
+    }
+}
+
+async fn run_eval(dataset_path: &str, sweep: bool, ef: &EngineFlags) -> Result<()> {
     let content = std::fs::read_to_string(dataset_path)
         .with_context(|| format!("failed to read dataset file at {}", dataset_path))?;
 
@@ -785,10 +799,56 @@ async fn run_eval(dataset_path: &str, ef: &EngineFlags) -> Result<()> {
         return Err(anyhow!("evaluation dataset is empty"));
     }
 
-    let eng = build_engine(ef)?;
     let total = items.len();
+
+    // Compute weak baseline: always predicting the most frequent expected route
+    let mut counts = std::collections::HashMap::new();
+    for item in &items {
+        *counts.entry(item.expected_route.trim().to_uppercase()).or_insert(0) += 1;
+    }
+    let most_frequent_route = counts.iter().max_by_key(|e| e.1).map(|e| e.0.clone()).unwrap_or_else(|| "IMPLEMENT".to_string());
+    let weak_correct = items.iter().filter(|item| item.expected_route.trim().to_uppercase() == most_frequent_route).count();
+    let accuracy_weak = weak_correct as f64 / total as f64;
+
+    let mut eng = build_engine(ef)?;
+
+    if sweep {
+        println!("{:<15} {:<12} {:<15} {:<15} {:<10}", "THRESHOLD", "ACCURACY", "ROUTER COST", "SAVINGS", "APGR");
+        println!("{}", "-".repeat(70));
+        let thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        for &t in &thresholds {
+            eng.cfg.policy.ask_threshold = t;
+            let mut correct = 0;
+            let mut cost_router = 0.0;
+            for item in &items {
+                let (dec, _) = eng.route_only_with_constraints(&item.task, &item.constraints);
+                let predicted = dec.route.as_str();
+                let expected = item.expected_route.trim().to_uppercase();
+                if predicted == expected {
+                    correct += 1;
+                }
+                cost_router += route_cost(predicted);
+            }
+            let accuracy = (correct as f64 / total as f64) * 100.0;
+            let cost_strong = total as f64 * route_cost("IMPLEMENT");
+            let savings = cost_strong - cost_router;
+            let apgr = if accuracy_weak < 1.0 {
+                (((accuracy / 100.0) - accuracy_weak) / (1.0 - accuracy_weak)).max(0.0) * 100.0
+            } else {
+                100.0
+            };
+            println!(
+                "{:<15.2} {:<12.2}% ${:<14.4} ${:<14.4} {:<9.2}%",
+                t, accuracy, cost_router, savings, apgr
+            );
+        }
+        return Ok(());
+    }
+
     let mut correct = 0;
     let mut mismatches = Vec::new();
+    let mut total_router_cost = 0.0;
+    let mut total_strong_cost = 0.0;
 
     println!("{:<4} {:<15} {:<15} TASK", "NUM", "EXPECTED", "PREDICTED");
     println!("{}", "-".repeat(80));
@@ -798,6 +858,9 @@ async fn run_eval(dataset_path: &str, ef: &EngineFlags) -> Result<()> {
         let predicted = dec.route.as_str();
         let expected = item.expected_route.trim().to_uppercase();
         let is_ok = predicted == expected;
+
+        total_router_cost += route_cost(predicted);
+        total_strong_cost += route_cost("IMPLEMENT");
 
         let status_mark = if is_ok {
             correct += 1;
@@ -825,11 +888,24 @@ async fn run_eval(dataset_path: &str, ef: &EngineFlags) -> Result<()> {
 
     println!("{}", "-".repeat(80));
     let accuracy = (correct as f64 / total as f64) * 100.0;
+    let savings_usd = total_strong_cost - total_router_cost;
+    let savings_pct = (savings_usd / total_strong_cost) * 100.0;
+    let apgr = if accuracy_weak < 1.0 {
+        (((accuracy / 100.0) - accuracy_weak) / (1.0 - accuracy_weak)).max(0.0) * 100.0
+    } else {
+        100.0
+    };
+
     println!("Evaluation results:");
-    println!("  Total items: {}", total);
-    println!("  Correct:     {}", correct);
-    println!("  Incorrect:   {}", total - correct);
-    println!("  Accuracy:    {:.2}%", accuracy);
+    println!("  Total items:       {}", total);
+    println!("  Correct:           {}", correct);
+    println!("  Incorrect:         {}", total - correct);
+    println!("  Accuracy:          {:.2}%", accuracy);
+    println!("  Weak Baseline Acc: {:.2}% (always {})", accuracy_weak * 100.0, most_frequent_route);
+    println!("  APGR Metric:       {:.2}%", apgr);
+    println!("  Router Est Cost:   ${:.4}", total_router_cost);
+    println!("  Strong Est Cost:   ${:.4} (always IMPLEMENT)", total_strong_cost);
+    println!("  Est USD Savings:   ${:.4} ({:.2}% saved)", savings_usd, savings_pct);
 
     if !mismatches.is_empty() {
         println!("\nMismatches detail:");

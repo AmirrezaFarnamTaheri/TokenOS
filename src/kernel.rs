@@ -271,6 +271,10 @@ pub struct RouterPolicy {
     /// Maximum re-ask attempts on validator failure (default = 0).
     #[serde(default)]
     pub re_ask_limit: usize,
+    /// Whether to enable opt-in learned routing using local nearest-neighbor
+    /// similarity over past successful executions.
+    #[serde(default)]
+    pub opt_in_learned_routing: bool,
 }
 
 fn default_true() -> bool {
@@ -297,6 +301,7 @@ impl Default for RouterPolicy {
             semantic_cache_threshold: 0.0,
             llm_verification_rubric: String::new(),
             re_ask_limit: 0,
+            opt_in_learned_routing: false,
         }
     }
 }
