@@ -67,6 +67,7 @@ struct Health {
     cooldown_until: Option<Instant>,
     /// Consecutive 429s drive exponential backoff.
     consecutive_429s: u32,
+    half_open_in_flight: bool,
 }
 
 /// Accumulates live per-provider health metrics. Interior mutability via a
@@ -76,6 +77,7 @@ struct Health {
 pub struct Tracker {
     state: Mutex<HashMap<String, Health>>,
     window: Duration,
+    retry_tokens: Mutex<f64>,
 }
 
 impl Default for Tracker {
@@ -90,11 +92,16 @@ impl Tracker {
         Tracker {
             state: Mutex::new(HashMap::new()),
             window: Duration::from_secs(60),
+            retry_tokens: Mutex::new(100.0),
         }
     }
 
     /// Registers an execution outcome for a provider.
     pub fn record(&self, provider: &str, latency_ms: f64, success: bool) {
+        if success {
+            let mut tokens = self.retry_tokens.lock().unwrap();
+            *tokens = (*tokens + 1.0).min(100.0);
+        }
         let mut state = self.state.lock().unwrap();
         let h = state.entry(provider.to_string()).or_insert_with(|| Health {
             ewma_latency_ms: latency_ms,
@@ -118,6 +125,34 @@ impl Tracker {
         }
     }
 
+    pub fn claim_retry_token(&self) -> bool {
+        let mut tokens = self.retry_tokens.lock().unwrap();
+        if *tokens >= 10.0 {
+            *tokens -= 10.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn claim_half_open(&self, provider: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if let Some(h) = state.get_mut(provider) {
+            if let Some(t) = h.cooldown_until {
+                let now = Instant::now();
+                if now >= t && h.consecutive_429s > 0 {
+                    if h.half_open_in_flight {
+                        return false;
+                    } else {
+                        h.half_open_in_flight = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     // -----------------------------------------------------------------
     // Rate-limit circuit breaker
     // -----------------------------------------------------------------
@@ -132,6 +167,7 @@ impl Tracker {
     pub fn open_cooldown(&self, provider: &str) {
         let mut state = self.state.lock().unwrap();
         let h = state.entry(provider.to_string()).or_default();
+        h.half_open_in_flight = false;
         // A streak only counts while the breaker window is still open: an
         // isolated 429 long after the previous cooldown expired is a fresh
         // incident, not an escalation — without this reset, sporadic rate
@@ -157,6 +193,7 @@ impl Tracker {
     pub fn open_cooldown_with_duration(&self, provider: &str, dur: Duration) {
         let mut state = self.state.lock().unwrap();
         let h = state.entry(provider.to_string()).or_default();
+        h.half_open_in_flight = false;
         let now = Instant::now();
         if matches!(h.cooldown_until, Some(until) if until <= now) {
             h.consecutive_429s = 0;
@@ -171,14 +208,28 @@ impl Tracker {
         if let Some(h) = state.get_mut(provider) {
             h.cooldown_until = None;
             h.consecutive_429s = 0;
+            h.half_open_in_flight = false;
         }
     }
 
     /// True while the provider's breaker is open. Failover skips it.
     pub fn in_cooldown(&self, provider: &str) -> bool {
         let state = self.state.lock().unwrap();
-        match state.get(provider).and_then(|h| h.cooldown_until) {
-            Some(t) => Instant::now() < t,
+        match state.get(provider) {
+            Some(h) => {
+                if let Some(t) = h.cooldown_until {
+                    let now = Instant::now();
+                    if now < t {
+                        true
+                    } else if h.consecutive_429s > 0 {
+                        h.half_open_in_flight
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
             None => false,
         }
     }
@@ -194,6 +245,27 @@ impl Tracker {
                     .cooldown_until
                     .and_then(|t| if t > now { Some(t - now) } else { None });
                 (k.clone(), rem)
+            })
+            .collect()
+    }
+
+    /// Returns detailed circuit-breaker and EWMA health details for all tracked providers.
+    pub fn health_snapshots(&self) -> Vec<(String, f64, f64, usize, bool, u32, bool)> {
+        let state = self.state.lock().unwrap();
+        let now = Instant::now();
+        state
+            .iter()
+            .map(|(k, h)| {
+                let in_cooldown = h.cooldown_until.map(|t| t > now).unwrap_or(false);
+                (
+                    k.clone(),
+                    h.ewma_latency_ms,
+                    h.fail_ewma,
+                    h.calls.len(),
+                    in_cooldown,
+                    h.consecutive_429s,
+                    h.half_open_in_flight,
+                )
             })
             .collect()
     }
@@ -808,5 +880,60 @@ mod ucb1_tests {
     fn empty_router_selects_none() {
         let r = Ucb1Router::new(&[]);
         assert!(r.select().is_none());
+    }
+
+    #[test]
+    fn test_half_open_in_flight() {
+        let t = Tracker::new();
+        t.open_cooldown("p");
+        // Ensure it's in cooldown
+        assert!(t.in_cooldown("p"));
+
+        // Fast-forward cooldown by modifying cooldown_until
+        {
+            let mut state = t.state.lock().unwrap();
+            let h = state.get_mut("p").unwrap();
+            h.cooldown_until = Some(Instant::now() - Duration::from_secs(1));
+        }
+
+        // Now it's half-open because consecutive_429s > 0 and time is elapsed.
+        // First claim should succeed.
+        assert!(t.claim_half_open("p"));
+
+        // While half_open is in flight, in_cooldown should still be true.
+        assert!(t.in_cooldown("p"));
+
+        // A second claim should fail.
+        assert!(!t.claim_half_open("p"));
+
+        // If we record a success (which clears cooldown), half_open is reset.
+        t.clear_cooldown("p");
+        assert!(!t.in_cooldown("p"));
+        assert!(t.claim_half_open("p"));
+    }
+
+    #[test]
+    fn test_retry_token_budget() {
+        let t = Tracker::new();
+        // Starts with 100.0 tokens. We can claim 10 tokens at a time, up to 10 times.
+        for _ in 0..10 {
+            assert!(t.claim_retry_token());
+        }
+        // Now it should be 0.0 tokens. Next claim should fail.
+        assert!(!t.claim_retry_token());
+
+        // A success record adds 1 token.
+        t.record("p", 10.0, true);
+        // Tokens should now be 1.0. Still not enough to claim 10.
+        assert!(!t.claim_retry_token());
+
+        // Add 9 more successes to get to 10.0 tokens.
+        for _ in 0..9 {
+            t.record("p", 10.0, true);
+        }
+        // Now we should be able to claim 1 token (which costs 10.0 tokens).
+        assert!(t.claim_retry_token());
+        // And now it should fail again.
+        assert!(!t.claim_retry_token());
     }
 }

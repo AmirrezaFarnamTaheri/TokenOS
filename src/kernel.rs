@@ -255,10 +255,30 @@ pub struct RouterPolicy {
     /// Route-specific verification commands.
     #[serde(default)]
     pub verification_commands: std::collections::HashMap<String, String>,
+    /// Quality cascade threshold (0.0 = disabled). If a verifier's confidence
+    /// score is below this threshold, escalate to the next provider.
+    #[serde(default)]
+    pub cascade_threshold: f64,
+    /// Maximum number of escalations allowed in a single quality cascade.
+    #[serde(default = "default_max_escalations")]
+    pub cascade_max_escalations: usize,
+    /// Semantic L2 similarity threshold (0.0 = disabled).
+    #[serde(default)]
+    pub semantic_cache_threshold: f64,
+    /// Rubric for LLM-based verification (empty = disabled).
+    #[serde(default)]
+    pub llm_verification_rubric: String,
+    /// Maximum re-ask attempts on validator failure (default = 0).
+    #[serde(default)]
+    pub re_ask_limit: usize,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_escalations() -> usize {
+    3
 }
 
 impl Default for RouterPolicy {
@@ -266,12 +286,17 @@ impl Default for RouterPolicy {
         RouterPolicy {
             ask_threshold: 0.35,
             direct_max_tokens: 600,
-            delegation_penalty: 1500.0, // tokens-equivalent fixed cost
-            delegation_min_scale: 1.5,  // savings must exceed 1.5x the penalty
-            max_cost_per_task_usd: 0.0, // 0 = sentinel disabled
+            delegation_penalty: 1500.0,
+            delegation_min_scale: 1.5,
+            max_cost_per_task_usd: 0.0,
             reuse_cache: true,
             verification_command: String::new(),
             verification_commands: std::collections::HashMap::new(),
+            cascade_threshold: 0.0,
+            cascade_max_escalations: 3,
+            semantic_cache_threshold: 0.0,
+            llm_verification_rubric: String::new(),
+            re_ask_limit: 0,
         }
     }
 }

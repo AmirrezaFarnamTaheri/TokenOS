@@ -316,7 +316,7 @@ impl Engine {
             + tokenizer::count_conservative(&ctx_block)
             + tokenizer::count_conservative(payload::KERNEL_CONTRACT);
         let has_existing_solution =
-            self.replayable_cache_hit(&self.solution_cache_key(task, constraints));
+            self.replayable_cache_hit(&self.solution_cache_key(task, constraints), task);
         let loop_detected = self.persisted_loop_detected(task).0;
         let repeated = self
             .store
@@ -331,24 +331,42 @@ impl Engine {
     fn minimum_viable_context(&self, task: &str) -> String {
         match &self.indexer {
             None => String::new(),
-            Some(ix) => match ix.minimum_viable_context(task, 6) {
-                Ok(ctx) => tokenizer::truncate(&ctx, 2000),
-                Err(_) => String::new(),
+            Some(ix) => match ix.minimum_viable_context(task, 2000) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    warn_persist::<String>("index context err", Err(e));
+                    String::new()
+                }
             },
         }
     }
 
-    fn replayable_cache_hit(&self, cache_key: &str) -> bool {
+    fn replayable_cache_hit(&self, cache_key: &str, task: &str) -> bool {
         if !self.cfg.policy.reuse_cache {
             return false;
         }
-        self.store
+        let exact = self
+            .store
             .peek_cached_solution(cache_key)
             .map(|hit| {
                 hit.map(|(_, out, _)| !crate::maskcodec::contains_placeholder(&out))
                     .unwrap_or(false)
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+
+        if exact {
+            true
+        } else if self.cfg.policy.semantic_cache_threshold > 0.0 {
+            self.store
+                .peek_semantic_cached_solution(task, self.cfg.policy.semantic_cache_threshold)
+                .map(|hit| {
+                    hit.map(|(_, out, _)| !crate::maskcodec::contains_placeholder(&out))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        }
     }
 
     fn record_event(
@@ -442,7 +460,7 @@ impl Engine {
         // invocations is caught deterministically.
         let (loop_detected, mut detector, loop_key) = self.persisted_loop_detected(task);
         let cache_key = self.solution_cache_key(task, constraints);
-        let has_existing_solution = self.replayable_cache_hit(&cache_key);
+        let has_existing_solution = self.replayable_cache_hit(&cache_key, task);
 
         // Step 4: deterministic routing (zero token cost). Budgeting uses
         // the conservative counter so routes never trigger
@@ -533,6 +551,7 @@ impl Engine {
         // (below), so a cache hit is by construction a verified answer.
         // ASK is excluded: a question is a request for input, not a solution.
         if self.cfg.policy.reuse_cache && dec.route != Route::Ask {
+            let mut cache_hit = None;
             if let Ok(Some((cached_route, cached_out, cached_tier))) =
                 self.store.cached_solution(&cache_key)
             {
@@ -542,31 +561,45 @@ impl Engine {
                         self.store.evict_solution(&cache_key),
                     );
                 } else {
-                    warn_persist(
+                    cache_hit = Some((cached_route, cached_out, cached_tier, "solution-cache"));
+                }
+            } else if self.cfg.policy.semantic_cache_threshold > 0.0 {
+                if let Ok(Some((cached_route, cached_out, cached_tier))) = self
+                    .store
+                    .semantic_cached_solution(task, self.cfg.policy.semantic_cache_threshold)
+                {
+                    if !crate::maskcodec::contains_placeholder(&cached_out) {
+                        cache_hit = Some((cached_route, cached_out, cached_tier, "semantic-cache"));
+                    }
+                }
+            }
+
+            if let Some((cached_route, cached_out, cached_tier, source)) = cache_hit {
+                warn_persist(
                     "flight-recorder cache",
                     self.record_event(
                         &task_id,
                         "cache",
-                        &format!("verified solution served from cache (route {cached_route}, zero tokens)"),
+                        &format!("verified solution served from {source} (route {cached_route}, zero tokens)"),
                         cached_out.as_bytes(),
                     ),
                 );
-                    st.status = Status::Done;
-                    st.next_action = String::new();
-                    self.store.save_task(&mut st)?;
-                    res.provider = "cache".into();
-                    res.model = "solution-cache".into();
-                    res.output = cached_out;
-                    res.verified = Some(VerifyResult {
-                        pass: true,
-                        tier: cached_tier,
-                        issues: vec![],
-                        cost_tokens: 0,
-                    });
-                    res.success = true;
-                    self.record(&res, 0);
-                    return Ok(res);
-                }
+                st.status = Status::Done;
+                st.next_action = String::new();
+                self.store.save_task(&mut st)?;
+                res.provider = "cache".into();
+                res.model = source.into();
+                res.output = cached_out;
+                res.verified = Some(VerifyResult {
+                    pass: true,
+                    tier: cached_tier,
+                    issues: vec![],
+                    cost_tokens: 0,
+                    score: 1.0,
+                });
+                res.success = true;
+                self.record(&res, 0);
+                return Ok(res);
             }
         }
 
@@ -632,6 +665,8 @@ impl Engine {
 
         let timeout = self.cfg.timeout_for(dec.route.as_str());
         let mut last_err: Option<anyhow::Error> = None;
+        let mut cascade_escalations = 0;
+        let mut first_attempt_executed = false;
 
         for prov_name in ordered_providers_banditized(&quotes, &chain, &self.bandit) {
             // Skip candidates priced over the task budget.
@@ -650,6 +685,12 @@ impl Engine {
                 ));
                 continue;
             }
+            if !self.tracker.claim_half_open(&prov_name) {
+                last_err = Some(anyhow!(
+                    "provider {prov_name} skipped: rate-limit breaker half-open probe in progress"
+                ));
+                continue;
+            }
             let adapter = match self.adapter(&prov_name) {
                 Ok(a) => a,
                 Err(e) => {
@@ -665,58 +706,228 @@ impl Engine {
                 ));
                 continue;
             }
+            if first_attempt_executed && !self.tracker.claim_retry_token() {
+                let msg = "RETRY-BUDGET-SENTINEL: global retry budget exhausted under high failure rate — failover aborted";
+                warn_persist(
+                    "flight-recorder retry-budget",
+                    self.record_event(&task_id, "retry-budget", msg, &[]),
+                );
+                last_err = Some(anyhow!(msg));
+                break;
+            }
+            first_attempt_executed = true;
 
-            warn_persist(
-                "flight-recorder prompt",
-                self.record_event(
-                    &task_id,
-                    "prompt",
-                    &format!("→ {}/{}", prov_name, model),
-                    prompt.as_bytes(),
-                ),
-            );
+            let mut re_asks_left = self.cfg.policy.re_ask_limit;
+            let mut current_prompt = prompt.clone();
 
-            let start = Instant::now();
-            let resp = adapter
-                .execute(&Request {
-                    route: dec.route.as_str().to_string(),
-                    prompt: prompt.clone(),
-                    model: model.clone(),
-                    // Route-scoped output budget: an ASK is
-                    // one question, a PATCH is a minimal diff; only full
-                    // builds get the wide ceiling.
-                    max_out: dec.route.max_output_tokens(),
-                    timeout,
-                })
-                .await;
-            let lat = start.elapsed().as_millis() as i64;
-            self.tracker.record(&prov_name, lat as f64, resp.is_ok());
-            // A 429 opens the provider's circuit breaker with
-            // exponential backoff; any non-429 outcome closes it.
-            match &resp {
-                Err(crate::provider::ProviderError::RateLimited { retry_after }) => {
-                    if let Some(dur) = retry_after {
-                        self.tracker.open_cooldown_with_duration(&prov_name, *dur);
+            #[allow(unused_assignments)]
+            let mut final_resp = None;
+            let mut final_out_masked = String::new();
+            let mut final_rescued = false;
+            #[allow(unused_assignments)]
+            let mut final_lat = 0;
+            let mut final_v = None;
+
+            loop {
+                warn_persist(
+                    "flight-recorder prompt",
+                    self.record_event(
+                        &task_id,
+                        "prompt",
+                        &format!("→ {}/{}", prov_name, model),
+                        current_prompt.as_bytes(),
+                    ),
+                );
+
+                let start = Instant::now();
+                let (fmt_val, grammar_val) = if expects_json {
+                    if let Some(schema) = extract_json_schema(task, constraints) {
+                        (
+                            Some(serde_json::json!({
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "structured_output",
+                                    "strict": true,
+                                    "schema": schema
+                                }
+                            })),
+                            Some(crate::provider::GENERIC_JSON_GBNF.to_string()),
+                        )
                     } else {
-                        self.tracker.open_cooldown(&prov_name);
+                        (
+                            Some(serde_json::json!({ "type": "json_object" })),
+                            Some(crate::provider::GENERIC_JSON_GBNF.to_string()),
+                        )
+                    }
+                } else {
+                    (None, None)
+                };
+
+                let resp = adapter
+                    .execute(&Request {
+                        route: dec.route.as_str().to_string(),
+                        prompt: current_prompt.clone(),
+                        model: model.clone(),
+                        max_out: dec.route.max_output_tokens(),
+                        timeout,
+                        response_format: fmt_val,
+                        grammar: grammar_val,
+                    })
+                    .await;
+
+                let lat = start.elapsed().as_millis() as i64;
+                self.tracker.record(&prov_name, lat as f64, resp.is_ok());
+                match &resp {
+                    Err(crate::provider::ProviderError::RateLimited { retry_after }) => {
+                        if let Some(dur) = retry_after {
+                            self.tracker.open_cooldown_with_duration(&prov_name, *dur);
+                        } else {
+                            self.tracker.open_cooldown(&prov_name);
+                        }
+                    }
+                    _ => self.tracker.clear_cooldown(&prov_name),
+                }
+
+                if resp.is_err() {
+                    self.bandit.record(&prov_name, false, lat as f64);
+                    let (pulls, reward_sum, latency_sum_ms) = self.bandit.arm_sums(&prov_name);
+                    warn_persist(
+                        "save bandit state",
+                        self.store
+                            .save_bandit_state(&prov_name, pulls, reward_sum, latency_sum_ms),
+                    );
+                    final_resp = Some(resp);
+                    final_lat = lat;
+                    break;
+                }
+
+                let r_ok = resp.unwrap();
+                let mut out_masked = payload::extract_solution(&r_ok.text);
+                let mut rescued = false;
+
+                if expects_json {
+                    if let crate::jsonrescue::Rescue::Repaired(fixed) =
+                        crate::jsonrescue::rescue(&out_masked)
+                    {
+                        warn_persist(
+                            "flight-recorder json-rescue",
+                            self.record_event(
+                                &task_id,
+                                "rescue",
+                                "truncated JSON repaired in-process (zero extra tokens)",
+                                out_masked.as_bytes(),
+                            ),
+                        );
+                        out_masked = fixed;
+                        rescued = true;
                     }
                 }
-                _ => self.tracker.clear_cooldown(&prov_name),
-            }
-            // Feed the bandit: transport failures earn zero reward
-            // immediately; verified successes are credited after the static
-            // check below so reward reflects useful output, not just bytes.
-            if resp.is_err() {
-                self.bandit.record(&prov_name, false, lat as f64);
-                let (pulls, reward_sum, latency_sum_ms) = self.bandit.arm_sums(&prov_name);
+
                 warn_persist(
-                    "save bandit state",
-                    self.store
-                        .save_bandit_state(&prov_name, pulls, reward_sum, latency_sum_ms),
+                    "flight-recorder response",
+                    self.record_event(
+                        &task_id,
+                        "response",
+                        &format!("← {}", prov_name),
+                        r_ok.text.as_bytes(),
+                    ),
                 );
+
+                let mut v = verify::verify_output(
+                    dec.route.as_str(),
+                    &out_masked,
+                    &self.cfg.policy.verification_command,
+                    &self.cfg.policy.verification_commands,
+                );
+
+                if v.pass && !self.cfg.policy.llm_verification_rubric.is_empty() {
+                    let verifier_prompt = format!(
+                        "You are an independent validator.\n\
+                         TASK GOAL:\n{}\n\n\
+                         RUBRIC:\n{}\n\n\
+                         CANDIDATE OUTPUT:\n{}\n\n\
+                         Determine if the output satisfies the goal and rubric. You MUST respond with a JSON object in this format:\n\
+                         {{\n  \"pass\": <bool>,\n  \"score\": <float 0.0 to 1.0>,\n  \"issues\": [<array of strings>]\n}}",
+                        task,
+                        self.cfg.policy.llm_verification_rubric,
+                        out_masked
+                    );
+
+                    let verifier_resp = adapter
+                        .execute(&Request {
+                            route: "VERIFY".to_string(),
+                            prompt: verifier_prompt,
+                            model: model.clone(),
+                            max_out: 500,
+                            timeout: std::time::Duration::from_secs(15),
+                            response_format: Some(serde_json::json!({
+                                "type": "json_object"
+                            })),
+                            grammar: Some(crate::provider::GENERIC_JSON_GBNF.to_string()),
+                        })
+                        .await;
+
+                    if let Ok(v_resp) = verifier_resp {
+                        if let Some(val) = crate::jsonrescue::parse_lenient(&v_resp.text) {
+                            let pass = val.get("pass").and_then(|x| x.as_bool()).unwrap_or(false);
+                            let score = val.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                            let issues = val
+                                .get("issues")
+                                .and_then(|x| x.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                                        .collect::<Vec<String>>()
+                                })
+                                .unwrap_or_default();
+
+                            v.pass = pass;
+                            v.score = score;
+                            v.issues = issues;
+                            v.tier = "llm".to_string();
+                        } else {
+                            v.pass = false;
+                            v.issues.push(
+                                "LLM verifier response was not parseable as JSON".to_string(),
+                            );
+                            v.tier = "llm".to_string();
+                        }
+                    } else {
+                        v.pass = false;
+                        v.issues.push("LLM verifier call failed".to_string());
+                        v.tier = "llm".to_string();
+                    }
+                }
+
+                if v.pass {
+                    final_resp = Some(Ok(r_ok));
+                    final_out_masked = out_masked;
+                    final_rescued = rescued;
+                    final_lat = lat;
+                    final_v = Some(v);
+                    break;
+                } else {
+                    if re_asks_left > 0 {
+                        re_asks_left -= 1;
+                        let issues_str = v.issues.join(", ");
+                        current_prompt = format!(
+                            "{}\n\n[SYSTEM WARNING: Your previous output failed verification with these issues: {}. Please fix them and output the corrected version.]",
+                            prompt,
+                            issues_str
+                        );
+                        continue;
+                    } else {
+                        final_resp = Some(Ok(r_ok));
+                        final_out_masked = out_masked;
+                        final_rescued = rescued;
+                        final_lat = lat;
+                        final_v = Some(v);
+                        break;
+                    }
+                }
             }
 
-            let resp = match resp {
+            let resp = match final_resp.unwrap() {
                 Ok(r) => r,
                 Err(e) => {
                     res.retries += 1;
@@ -733,7 +944,7 @@ impl Engine {
                             dec.route.as_str(),
                             0,
                             0,
-                            lat,
+                            final_lat,
                             false,
                             &e.to_string(),
                             0.0,
@@ -749,60 +960,13 @@ impl Engine {
                         ),
                     );
                     last_err = Some(e.into());
-                    continue; // deterministic failover to next quote
+                    continue;
                 }
             };
-
-            // Security invariant: the masked form —
-            // placeholders intact — is the ONLY form that touches durable
-            // sinks (flight-recorder blobs, loop history, failure reasons,
-            // solution cache). Unmasking happens exactly once, at the very
-            // end, into the caller-facing result. Rescue + verification run
-            // on the masked form so persisted artifacts never need secrets.
-            let mut out_masked = payload::extract_solution(&resp.text);
-
-            // When the goal demands JSON, rescue a truncated
-            // generation instead of failing verification and burning a
-            // failover attempt. The rescuer never invents data — it only
-            // closes what the model opened.
-            if expects_json {
-                if let crate::jsonrescue::Rescue::Repaired(fixed) =
-                    crate::jsonrescue::rescue(&out_masked)
-                {
-                    warn_persist(
-                        "flight-recorder json-rescue",
-                        self.record_event(
-                            &task_id,
-                            "rescue",
-                            "truncated JSON repaired in-process (zero extra tokens)",
-                            out_masked.as_bytes(),
-                        ),
-                    );
-                    out_masked = fixed;
-                }
-            }
-            // resp.text is the raw wire response: the provider only ever saw
-            // placeholders, so this blob is masked by construction.
-            warn_persist(
-                "flight-recorder response",
-                self.record_event(
-                    &task_id,
-                    "response",
-                    &format!("← {}", prov_name),
-                    resp.text.as_bytes(),
-                ),
-            );
-
-            // Step 7: tiered verification — static first, zero token cost.
-            // Runs on the MASKED form: placeholders are inert text and never
-            // change structural validity, while the unmasked form must not
-            // exist before the persistence block below completes.
-            let v = verify::verify_output(
-                dec.route.as_str(),
-                &out_masked,
-                &self.cfg.policy.verification_command,
-                &self.cfg.policy.verification_commands,
-            );
+            let out_masked = final_out_masked;
+            let rescued = final_rescued;
+            let lat = final_lat;
+            let v = final_v.unwrap();
             res.verified = Some(v.clone());
             if !v.pass {
                 // Unverifiable output earns the arm zero reward.
@@ -901,7 +1065,65 @@ impl Engine {
                 continue;
             }
 
+            // FrugalGPT quality cascade: if verifier passed but the score is below the threshold,
+            // escalate to the next provider.
+            if self.cfg.policy.cascade_threshold > 0.0
+                && v.score < self.cfg.policy.cascade_threshold
+                && cascade_escalations < self.cfg.policy.cascade_max_escalations
+            {
+                cascade_escalations += 1;
+
+                let reason = format!(
+                    "quality-cascade: verifier passed but score {:.2} < {:.2} (threshold) — escalating",
+                    v.score, self.cfg.policy.cascade_threshold
+                );
+                warn_persist(
+                    "flight-recorder verify-cascade",
+                    self.record_event(&task_id, "verify", &reason, out_masked.as_bytes()),
+                );
+
+                let p_cfg = self
+                    .cfg
+                    .providers
+                    .get(&prov_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let cost_usd = (resp.tokens_in as f64 * p_cfg.cost_per_mtok_in
+                    + resp.tokens_out as f64 * p_cfg.cost_per_mtok_out)
+                    / 1e6;
+                warn_persist(
+                    "provider attempt",
+                    self.store.record_attempt(
+                        &task_id,
+                        &prov_name,
+                        &resp.model,
+                        dec.route.as_str(),
+                        resp.tokens_in as usize,
+                        resp.tokens_out as usize,
+                        lat,
+                        false,
+                        &reason,
+                        cost_usd,
+                    ),
+                );
+                st.remember_failure(&format!("cascade from {}", prov_name), &reason);
+                warn_persist(
+                    "failure memory",
+                    self.store.record_failure(
+                        &task_id,
+                        &goal_key,
+                        &format!("cascade from {}", prov_name),
+                        &reason,
+                    ),
+                );
+
+                res.retries += 1;
+                last_err = Some(anyhow!(reason));
+                continue; // failover to next provider
+            }
+
             // Feed the estimator drift watchdog with the
+
             // (estimate, actual) pair whenever the provider reports real
             // usage. Drift outside the trusted band is surfaced in telemetry.
             if resp.tokens_in > 0 {
@@ -995,6 +1217,7 @@ impl Engine {
             if self.cfg.policy.reuse_cache
                 && dec.route != Route::Ask
                 && !crate::maskcodec::contains_placeholder(&out_masked)
+                && !rescued
             {
                 // Prevent caching mock provider outputs in live runs (unless dry_run is true)
                 let is_mock = p_cfg.adapter == "mock";
@@ -1006,6 +1229,7 @@ impl Engine {
                             dec.route.as_str(),
                             &out_masked,
                             &v.tier,
+                            task,
                         ),
                     );
                 }
@@ -1213,6 +1437,24 @@ fn task_expects_json(task: &str, constraints: &[String]) -> bool {
     hit(task) || constraints.iter().any(|c| hit(c))
 }
 
+fn extract_json_schema(task: &str, constraints: &[String]) -> Option<serde_json::Value> {
+    for c in constraints {
+        if c.starts_with("schema:") {
+            let schema_str = c.trim_start_matches("schema:").trim();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(schema_str) {
+                return Some(val);
+            }
+        }
+    }
+    if let Some(pos) = task.find("schema:") {
+        let schema_part = &task[pos + 7..];
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(schema_part.trim()) {
+            return Some(val);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1339,13 +1581,49 @@ mod tests {
         let constraints = vec!["keep API stable".to_string()];
         let key = e.solution_cache_key(task, &constraints);
         e.store
-            .cache_solution(&key, "IMPLEMENT", "cached answer", "static")
+            .cache_solution(&key, "IMPLEMENT", "cached answer", "static", task)
             .unwrap();
 
         let (dec, _) = e.route_only_with_constraints(task, &constraints);
         assert_eq!(dec.route, Route::Reuse);
         let (_entries, _, hits) = e.store.solution_cache_stats().unwrap();
         assert_eq!(hits, 0, "route preview must not count as a cache replay");
+    }
+
+    #[test]
+    fn semantic_solution_cache_hit_routes_reuse() {
+        let mut e = test_engine();
+        e.cfg.policy.reuse_cache = true;
+        e.cfg.policy.semantic_cache_threshold = 0.5;
+
+        let task = "implement cached route preview behavior";
+        let constraints = vec!["keep API stable".to_string()];
+        let key = e.solution_cache_key(task, &constraints);
+        e.store
+            .cache_solution(&key, "IMPLEMENT", "cached answer", "static", task)
+            .unwrap();
+
+        // Exact match works
+        let (dec_exact, _) = e.route_only_with_constraints(task, &constraints);
+        assert_eq!(dec_exact.route, Route::Reuse);
+
+        // Slightly different wording with Jaccard similarity > 0.5 should hit L2 semantic cache
+        // task: "implement cached route preview behavior"
+        // new_task: "implement cached route behavior"
+        // Jaccard similarity:
+        // s1: {"implement", "cached", "route", "behavior"} (size 4)
+        // s2: {"implement", "cached", "route", "preview", "behavior"} (size 5)
+        // intersection: {"implement", "cached", "route", "behavior"} (size 4)
+        // union: {"implement", "cached", "route", "preview", "behavior"} (size 5)
+        // sim: 4.0 / 5.0 = 0.8 >= 0.5
+        let new_task = "implement cached route behavior";
+        let (dec_semantic, _) = e.route_only_with_constraints(new_task, &constraints);
+        assert_eq!(dec_semantic.route, Route::Reuse);
+
+        // If semantic_cache_threshold is 0.0 (default/disabled), it should miss L2 cache
+        e.cfg.policy.semantic_cache_threshold = 0.0;
+        let (dec_miss, _) = e.route_only_with_constraints(new_task, &constraints);
+        assert_ne!(dec_miss.route, Route::Reuse);
     }
 
     #[test]
@@ -1442,6 +1720,152 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&r.output).expect("rescued output must be strictly valid JSON");
         assert_eq!(v["files"][1], "b.rs");
+    }
+
+    #[tokio::test]
+    async fn expects_json_maps_to_response_format_and_grammar() {
+        let e = test_engine();
+        let mock_arc = Arc::new(Adapter::Mock(crate::provider::Mock::new("dry-run")));
+        e.adapters
+            .write()
+            .unwrap()
+            .insert("__dryrun__".to_string(), mock_arc.clone());
+
+        let r = e.run("produce the plan as JSON", &[]).await.unwrap();
+        assert!(r.success);
+
+        // Retrieve the last Request passed to the Mock adapter
+        if let Adapter::Mock(mock) = &*mock_arc {
+            let req_opt = mock.last_req.lock().unwrap().clone();
+            assert!(req_opt.is_some(), "Request should have been executed");
+            let req = req_opt.unwrap();
+            assert!(
+                req.response_format.is_some(),
+                "response_format must be populated"
+            );
+            assert!(req.grammar.is_some(), "grammar must be populated");
+        } else {
+            panic!("Expected Mock adapter");
+        }
+    }
+
+    #[tokio::test]
+    async fn expects_json_schema_maps_to_response_format() {
+        let e = test_engine();
+        let mock_arc = Arc::new(Adapter::Mock(crate::provider::Mock::new("dry-run")));
+        e.adapters
+            .write()
+            .unwrap()
+            .insert("__dryrun__".to_string(), mock_arc.clone());
+
+        // We pass a JSON schema in the constraints
+        let r = e
+            .run("produce as JSON", &["schema: {\"type\": \"object\", \"properties\": {\"output\": {\"type\": \"string\"}}, \"required\": [\"output\"], \"additionalProperties\": false}".to_string()])
+            .await
+            .unwrap();
+        assert!(r.success);
+
+        if let Adapter::Mock(mock) = &*mock_arc {
+            let req_opt = mock.last_req.lock().unwrap().clone();
+            assert!(req_opt.is_some(), "Request should have been executed");
+            let req = req_opt.unwrap();
+
+            let fmt = req
+                .response_format
+                .expect("response_format must be populated");
+            assert_eq!(
+                fmt.get("type").and_then(|t| t.as_str()),
+                Some("json_schema")
+            );
+            let js = fmt.get("json_schema").expect("json_schema object expected");
+            assert_eq!(js.get("strict").and_then(|s| s.as_bool()), Some(true));
+            let schema = js.get("schema").expect("schema expected");
+            assert_eq!(schema.get("type").and_then(|t| t.as_str()), Some("object"));
+            assert!(schema.get("properties").is_some());
+        } else {
+            panic!("Expected Mock adapter");
+        }
+    }
+
+    #[tokio::test]
+    async fn rescued_truncated_json_is_not_cached() {
+        let e = test_engine();
+        {
+            let mut mock = crate::provider::Mock::new("dry-run");
+            mock.canned = r#"{"files": ["a.rs", "b.rs"], "status": "par"#.to_string();
+            e.adapters
+                .write()
+                .unwrap()
+                .insert("__dryrun__".to_string(), Arc::new(Adapter::Mock(mock)));
+        }
+        let task = "produce the migration plan as JSON";
+        let r = e.run(task, &[]).await.unwrap();
+        assert!(r.success);
+
+        let cache_key = e.solution_cache_key(task, &[]);
+        let cached = e.store.cached_solution(&cache_key).unwrap();
+        assert!(cached.is_none(), "rescued output must NOT be cached");
+    }
+
+    #[tokio::test]
+    async fn quality_gated_cascade_escalates_on_low_score() {
+        let mut e = test_engine();
+        e.dry_run = false; // Execute live chain logic
+
+        // Setup config policy
+        e.cfg.policy.cascade_threshold = 0.8;
+        e.cfg.policy.cascade_max_escalations = 2;
+
+        // Setup provider configs
+        let p_cfg = crate::config::Provider {
+            disabled: false,
+            adapter: "mock".to_string(),
+            max_context: 128000,
+            ..Default::default()
+        };
+        e.cfg
+            .providers
+            .insert("provider_a".to_string(), p_cfg.clone());
+        e.cfg
+            .providers
+            .insert("provider_b".to_string(), p_cfg.clone());
+
+        // Setup routing rules so the provider chain is resolved correctly
+        e.cfg.routing = vec![crate::config::RoutingRule {
+            provider: "provider_a".to_string(),
+            route_types: vec!["IMPLEMENT".to_string(), "PATCH".to_string()],
+            max_context: 128000,
+            fallback: "provider_b".to_string(),
+            timeout_ms: 5000,
+        }];
+
+        // Setup mock adapters with specific names in the adapter cache
+        let mock_a = Arc::new(Adapter::Mock(crate::provider::Mock::new("provider_a")));
+        let mock_b = Arc::new(Adapter::Mock(crate::provider::Mock::new("provider_b")));
+        e.adapters
+            .write()
+            .unwrap()
+            .insert("provider_a".to_string(), mock_a);
+        e.adapters
+            .write()
+            .unwrap()
+            .insert("provider_b".to_string(), mock_b);
+
+        // Define verification command that reads TOKENOS_OUTPUT env var and outputs score: 0.5 for provider_a and 0.9 for provider_b
+        e.cfg.policy.verification_command = if cfg!(target_os = "windows") {
+            "if ($env:TOKENOS_OUTPUT -like '*provider_a*') { Write-Output 'score: 0.5' } else { Write-Output 'score: 0.9' }".to_string()
+        } else {
+            "echo \"$TOKENOS_OUTPUT\" | grep -q 'provider_a' && echo 'score: 0.5' || echo 'score: 0.9'".to_string()
+        };
+
+        // Run task
+        let r = e.run("implement the new feature xyz", &[]).await.unwrap();
+
+        assert!(r.success);
+        assert_eq!(
+            r.provider, "provider_b",
+            "Quality cascade must escalate to provider_b"
+        );
     }
 
     #[tokio::test]
@@ -1979,5 +2403,105 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_re_ask_pattern() {
+        let mut e = test_engine();
+        e.dry_run = false;
+
+        e.cfg.policy.re_ask_limit = 2;
+
+        let p_cfg = crate::config::Provider {
+            disabled: false,
+            adapter: "mock".to_string(),
+            ..Default::default()
+        };
+        e.cfg.providers.insert("mock".to_string(), p_cfg.clone());
+
+        let mock = std::sync::Arc::new(Adapter::Mock(crate::provider::Mock::new("mock")));
+        e.adapters.write().unwrap().insert("mock".to_string(), mock);
+
+        e.cfg.policy.verification_command = if cfg!(target_os = "windows") {
+            "powershell -Command exit 1".to_string()
+        } else {
+            "exit 1".to_string()
+        };
+
+        let r = e.run("test task for re-ask", &[]).await;
+        assert!(r.is_err());
+
+        let tasks = e.store.list_tasks(10).unwrap();
+        assert!(!tasks.is_empty());
+        let task_id = &tasks[0].task_id;
+        let events = e.recorder.events(task_id).unwrap();
+
+        let prompt_events: Vec<_> = events.iter().filter(|ev| ev.kind == "prompt").collect();
+        assert_eq!(prompt_events.len(), 3);
+
+        let prompt1 =
+            String::from_utf8(e.recorder.blob(&prompt_events[0].blob_sha).unwrap()).unwrap();
+        assert!(!prompt1.contains("SYSTEM WARNING"));
+
+        let prompt2 =
+            String::from_utf8(e.recorder.blob(&prompt_events[1].blob_sha).unwrap()).unwrap();
+        assert!(prompt2.contains("SYSTEM WARNING"));
+        assert!(prompt2.contains("Verification command failed"));
+    }
+
+    #[tokio::test]
+    async fn test_llm_rubric_verification() {
+        let mut e = test_engine();
+        e.dry_run = false;
+
+        e.cfg.policy.llm_verification_rubric = "Make sure it is elegant.".to_string();
+
+        let p_cfg = crate::config::Provider {
+            disabled: false,
+            adapter: "mock".to_string(),
+            ..Default::default()
+        };
+        e.cfg.providers.insert("mock".to_string(), p_cfg.clone());
+
+        let canned_pass = r#"{"pass": true, "score": 0.95, "issues": []}"#;
+        let mut mock_inner = crate::provider::Mock::new("mock");
+        mock_inner.canned = canned_pass.to_string();
+        let mock = std::sync::Arc::new(Adapter::Mock(mock_inner));
+        e.adapters.write().unwrap().insert("mock".to_string(), mock);
+
+        let r = e.run("implement the new feature xyz", &[]).await.unwrap();
+        assert!(r.success);
+        let verified = r.verified.unwrap();
+        assert!(verified.pass);
+        assert_eq!(verified.tier, "llm");
+        assert_eq!(verified.score, 0.95);
+        assert!(verified.issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_llm_rubric_verification_failure() {
+        let mut e = test_engine();
+        e.dry_run = false;
+
+        e.cfg.policy.llm_verification_rubric = "Make sure it is elegant.".to_string();
+
+        let p_cfg = crate::config::Provider {
+            disabled: false,
+            adapter: "mock".to_string(),
+            ..Default::default()
+        };
+        e.cfg.providers.insert("mock".to_string(), p_cfg.clone());
+
+        let canned_fail = r#"{"pass": false, "score": 0.25, "issues": ["Code is not elegant"]}"#;
+        let mut mock_inner = crate::provider::Mock::new("mock");
+        mock_inner.canned = canned_fail.to_string();
+        let mock = std::sync::Arc::new(Adapter::Mock(mock_inner));
+        e.adapters.write().unwrap().insert("mock".to_string(), mock);
+
+        let r = e.run("implement the new feature xyz", &[]).await;
+        assert!(r.is_err());
+        let err_msg = r.unwrap_err().to_string();
+        assert!(err_msg.contains("verification failed"));
+        assert!(err_msg.contains("Code is not elegant"));
     }
 }

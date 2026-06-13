@@ -790,10 +790,7 @@ async fn run_eval(dataset_path: &str, ef: &EngineFlags) -> Result<()> {
     let mut correct = 0;
     let mut mismatches = Vec::new();
 
-    println!(
-        "{:<4} {:<15} {:<15} TASK",
-        "NUM", "EXPECTED", "PREDICTED"
-    );
+    println!("{:<4} {:<15} {:<15} TASK", "NUM", "EXPECTED", "PREDICTED");
     println!("{}", "-".repeat(80));
 
     for (idx, item) in items.iter().enumerate() {

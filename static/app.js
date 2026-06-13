@@ -182,6 +182,108 @@ $("#welcomeClose")?.addEventListener("click", () => {
   try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
   $("#welcomeBanner").style.display = "none";
 });
+
+/* Plain-language explanations shown to newcomers in the route preview. */
+const ROUTE_EXPLAIN = {
+  REUSE: "A verified or statically-checked answer for this exact goal is already cached — it will be served for zero tokens.",
+  DIRECT: "Small and unambiguous — answered with a minimal prompt on the cheapest viable provider.",
+  PATCH: "A well-scoped edit — only the relevant context is sent, keeping the prompt tiny.",
+  IMPLEMENT: "Real generation work — the full pipeline runs with verification of the output.",
+  PARTIAL: "An interrupted task is resumed from its compressed saved state.",
+  DELEGATE: "Big enough to hand to a sub-agent with a compressed delegation packet.",
+  ASK: "Too ambiguous to execute safely — the cheapest action is a clarifying question.",
+  ESCALATE: "Repeated failures or loops were detected — a human should take a look.",
+};
+const routeExplain = (route) => {
+  const key = route && route.startsWith("ESCALATE") ? "ESCALATE" : route;
+  return ROUTE_EXPLAIN[key] || "";
+};
+
+/* ---------- toasts ---------- */
+function toast(msg, kind = "") {
+  const host = $("#toasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  host.appendChild(el);
+  setTimeout(() => el.classList.add("hide"), 3600);
+  setTimeout(() => el.remove(), 4000);
+}
+
+/* ---------- meta (mode badge, version) ---------- */
+async function loadMeta() {
+  try {
+    const m = await api("/api/meta");
+    const ml = $("#modeLine");
+    if (ml) {
+      ml.innerHTML = m.dry_run
+        ? '<span class="mode-badge dry">● DRY-RUN · offline, $0</span>'
+        : '<span class="mode-badge live">● LIVE · real providers</span>';
+      ml.title = m.dry_run
+        ? "Mock provider exercises the full pipeline offline — no API key, no spend."
+        : `Live mode — ${m.providers_enabled} of ${m.providers_total} providers enabled. Executions cost real money.`;
+    }
+    const vt = $("#verText");
+    if (vt) vt.textContent = "v" + m.version;
+  } catch { /* older server without /api/meta — badge stays hidden */ }
+}
+
+/* ---------- navigation ---------- */
+function switchView(view) {
+  const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
+  if (!btn) return;
+  $$(".nav-item").forEach((b) => b.classList.remove("active"));
+  $$(".view").forEach((v) => v.classList.remove("active"));
+  btn.classList.add("active");
+  $("#view-" + view).classList.add("active");
+  refreshView(view);
+}
+
+$$(".nav-item").forEach((btn) => {
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
+/* Keyboard shortcuts: 1-5 switch views, Ctrl+Enter executes, Ctrl+Shift+Enter previews */
+const VIEW_KEYS = { 1: "dashboard", 2: "console", 3: "tasks", 4: "executions", 5: "config" };
+document.addEventListener("keydown", (ev) => {
+  const inField = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (!inField && VIEW_KEYS[ev.key] && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    switchView(VIEW_KEYS[ev.key]);
+    return;
+  }
+  if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+    const consoleVisible = $("#view-console").classList.contains("active");
+    if (!consoleVisible) return;
+    ev.preventDefault();
+    (ev.shiftKey ? $("#btnRoute") : $("#btnRun")).click();
+    return;
+  }
+  if (ev.key === "?" && !inField) { openHelp(); return; }
+  if (ev.key === "Escape") closeHelp();
+});
+
+/* ---------- help modal ---------- */
+function openHelp() { const m = $("#helpModal"); if (m) { m.style.display = ""; $("#helpClose")?.focus(); } }
+function closeHelp() { const m = $("#helpModal"); if (m) m.style.display = "none"; }
+$("#btnHelp")?.addEventListener("click", openHelp);
+$("#helpClose")?.addEventListener("click", closeHelp);
+$("#helpModal")?.addEventListener("click", (ev) => { if (ev.target === $("#helpModal")) closeHelp(); });
+
+/* ---------- welcome banner (first-run onboarding) ---------- */
+const WELCOME_KEY = "tokenos.welcome.dismissed";
+function maybeShowWelcome(sum) {
+  const b = $("#welcomeBanner");
+  if (!b) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(WELCOME_KEY) === "1"; } catch {}
+  const fresh = !sum || !sum.executions;
+  b.style.display = fresh && !dismissed ? "" : "none";
+}
+$("#welcomeClose")?.addEventListener("click", () => {
+  try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
+  $("#welcomeBanner").style.display = "none";
+});
 $("#welcomeHelp")?.addEventListener("click", openHelp);
 $("#welcomeTry")?.addEventListener("click", () => {
   switchView("console");
@@ -190,16 +292,16 @@ $("#welcomeTry")?.addEventListener("click", () => {
   toast("Example loaded — click “Preview Route” to see the free routing decision.", "ok");
 });
 
-/* ---------- dashboard ---------- */
 async function loadDashboard() {
   try {
-    const [sum, routes, providers, bandit, drift, apiStats, attemptStats, health] = await Promise.all([
+    const [sum, routes, providers, bandit, drift, apiStats, attemptStats, health, history] = await Promise.all([
       api("/api/summary"), api("/api/stats/routes"), api("/api/stats/providers"),
       api("/api/stats/bandit").catch(() => null),
       api("/api/stats/drift").catch(() => null),
       api("/api/stats/api").catch(() => null),
       api("/api/stats/attempts").catch(() => null),
       api("/api/health").catch(() => null),
+      api("/api/stats/history").catch(() => null),
     ]);
     setConn(true);
     const lu = $("#lastUpdated");
@@ -208,6 +310,7 @@ async function loadDashboard() {
 
     $("#kpiGrid").innerHTML = [
       kpi("Cost / Success", fmtUSD(sum.cost_per_success), "accent"),
+      kpi("Estimated Savings", fmtUSD(sum.savings_usd), "good"),
       kpi("Total Cost", fmtUSD(sum.total_cost_usd)),
       kpi("Success Rate", fmtPct(sum.overall_success_pct), sum.overall_success_pct >= 0.9 ? "good" : ""),
       kpi("Executions", fmtNum(sum.executions)),
@@ -242,6 +345,24 @@ async function loadDashboard() {
         </tr>`).join("")
       : emptyRow(6, "No provider calls yet.");
 
+    const bt2 = $("#breakerTable tbody");
+    if (bt2) {
+      const breakers = (health && health.breaker_board) || [];
+      bt2.innerHTML = breakers.length
+        ? breakers.map((b) => {
+            const statusClass = b.status === "COOLDOWN" ? "fail" : b.status === "HALF-OPEN" ? "status-blocked" : "ok";
+            return `<tr>
+              <td>${esc(b.provider)}</td>
+              <td><span class="badge ${statusClass}">${esc(b.status)}</span></td>
+              <td>${fmtNum(b.consecutive_429s)}</td>
+              <td>${fmtPct(b.fail_rate)}</td>
+              <td>${fmtMS(b.avg_latency_ms)}</td>
+              <td>${fmtNum(b.calls_in_window)}</td>
+            </tr>`;
+          }).join("")
+        : emptyRow(6, "No live breaker state recorded.");
+    }
+
     const bt = $("#banditTable tbody");
     if (bt) {
       const arms = (bandit && bandit.arms) || [];
@@ -263,20 +384,73 @@ async function loadDashboard() {
         ? provs2.map((d) => `<tr>
             <td>${esc(d.provider)}</td>
             <td>${fmtNum(d.samples)}</td>
-            <td>${Number(d.ratio_ewma).toFixed(3)}</td>
+            <td>
+              ${Number(d.ratio_ewma).toFixed(3)}
+              <div class="gauge-container" title="Calibration: 1.0 is perfect">
+                <div class="gauge-center-line"></div>
+                <div class="gauge-bar" style="left: ${Math.min(100, Math.max(0, (d.ratio_ewma - 0.5) / 1.0 * 100))}%"></div>
+              </div>
+            </td>
             <td>${d.drifting ? '<span class="badge fail">DRIFTING</span>' : '<span class="badge ok">calibrated</span>'}</td>
           </tr>`).join("")
         : emptyRow(4, "No live-usage samples yet — calibration appears after provider-billed runs.");
+      
+      const ck = $("#cacheKpis");
+      if (ck && drift && drift.solution_cache) {
+        const c = drift.solution_cache;
+        const totalSavedTokens = Math.round(c.zero_token_hits * 1000); // Estimate 1000 tokens saved per hit
+        ck.innerHTML = `
+          <div class="cache-kpi">
+            <div class="cache-kpi-val">${fmtNum(c.entries)}</div>
+            <div class="cache-kpi-lbl">Entries (Verified: ${c.test_verified})</div>
+          </div>
+          <div class="cache-kpi">
+            <div class="cache-kpi-val">${fmtNum(c.zero_token_hits)}</div>
+            <div class="cache-kpi-lbl">Zero-Token Hits</div>
+          </div>
+          <div class="cache-kpi">
+            <div class="cache-kpi-val">${fmtNum(totalSavedTokens)}</div>
+            <div class="cache-kpi-lbl">Est. Tokens Saved</div>
+          </div>
+        `;
+      }
+
       const cl = $("#cacheLine");
       if (cl) {
         if (drift && drift.solution_cache) {
           const c = drift.solution_cache;
           cl.textContent = `Solution cache: ${c.entries} cache entr${c.entries === 1 ? "y" : "ies"} (statically-checked: ${c.static_checked}, test-verified: ${c.test_verified}) · ${c.zero_token_hits} zero-token hit${c.zero_token_hits === 1 ? "" : "s"}`;
         } else {
-          // Clear stale telemetry after a partial refresh failure.
           cl.textContent = "";
         }
       }
+    }
+
+    const st = $("#spendTrend");
+    if (st && history) {
+      const maxCost = Math.max(0.0001, ...history.map((h) => h.cost_usd));
+      st.innerHTML = history.length
+        ? history.map((h) => {
+            const spendPct = (h.cost_usd / maxCost) * 100;
+            const successPct = h.runs ? (h.successes / h.runs) * 100 : 0;
+            return `
+              <div class="spend-bar-container spend-bar-hover-zone">
+                <div class="spend-tooltip">
+                  <strong>${esc(h.day)}</strong><br/>
+                  Spend: ${fmtUSD(h.cost_usd)}<br/>
+                  Executions: ${fmtNum(h.runs)}<br/>
+                  Successes: ${fmtNum(h.successes)} (${fmtPct(h.successes / (h.runs || 1))})
+                </div>
+                <div class="spend-bar-wrap">
+                  <div class="spend-bar-fill" style="height: ${spendPct}%;">
+                    <div class="spend-bar-success-fill" style="height: ${successPct}%;"></div>
+                  </div>
+                </div>
+                <div class="spend-bar-lbl">${esc(h.day.substring(5))}</div>
+              </div>
+            `;
+          }).join("")
+        : `<div class="hint" style="width: 100%; text-align: center;">No spend data recorded yet.</div>`;
     }
 
     const at = $("#apiStatsTable tbody");

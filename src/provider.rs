@@ -15,6 +15,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
+pub const GENERIC_JSON_GBNF: &str = r#"root   ::= object
+value  ::= object | array | string | number | ("true" | "false" | "null")
+object ::= "{" ws ( member ( ws "," ws member )* )? ws "}"
+member ::= string ws ":" ws value
+array  ::= "[" ws ( value ( ws "," ws value )* )? ws "]"
+string ::= "\"" ( [^"\\] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) )* "\""
+number ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+ws     ::= ([ \t\n\r])*"#;
+
 /// Kernel→adapter execution contract.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -27,6 +36,8 @@ pub struct Request {
     /// Output token cap (0 = provider default).
     pub max_out: i64,
     pub timeout: Duration,
+    pub response_format: Option<serde_json::Value>,
+    pub grammar: Option<String>,
 }
 
 /// Adapter→kernel result.
@@ -207,6 +218,7 @@ pub struct Mock {
     pub latency: Duration,
     /// Fixed response body (otherwise synthesized).
     pub canned: String,
+    pub last_req: std::sync::Arc<std::sync::Mutex<Option<Request>>>,
 }
 
 impl Mock {
@@ -217,10 +229,14 @@ impl Mock {
             fail_every_n: 0,
             latency: Duration::ZERO,
             canned: String::new(),
+            last_req: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     async fn execute(&self, req: &Request) -> Result<Response, ProviderError> {
+        if let Ok(mut guard) = self.last_req.lock() {
+            *guard = Some(req.clone());
+        }
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if !self.latency.is_zero() {
             tokio::time::sleep(self.latency).await;
@@ -333,6 +349,10 @@ struct OaRequest<'a> {
     messages: Vec<OaMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grammar: Option<String>,
 }
 
 async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
@@ -352,7 +372,10 @@ async fn execute_openai(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
         } else {
             None
         },
+        response_format: req.response_format.clone(),
+        grammar: req.grammar.clone(),
     };
+
     let mut rb = SHARED_CLIENT
         .post(format!("{}/chat/completions", h.endpoint))
         .timeout(req.timeout)
@@ -548,6 +571,10 @@ struct GmRequestPart<'a> {
 struct GmGenerationConfig {
     #[serde(rename = "maxOutputTokens")]
     max_output_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "responseMimeType")]
+    response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "responseSchema")]
+    response_schema: Option<serde_json::Value>,
 }
 
 async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, ProviderError> {
@@ -556,19 +583,30 @@ async fn execute_gemini(h: &HttpAdapter, req: &Request) -> Result<Response, Prov
     } else {
         req.model.clone()
     };
+    let (mime_type, schema) = if let Some(fmt) = &req.response_format {
+        let mime = Some("application/json".to_string());
+        let mut sch = None;
+        if let Some(schema_val) = fmt.get("json_schema") {
+            if let Some(s) = schema_val.get("schema") {
+                sch = Some(s.clone());
+            }
+        }
+        (mime, sch)
+    } else {
+        (None, None)
+    };
     let body = GmRequest {
         contents: vec![GmRequestContent {
             role: "user",
             parts: vec![GmRequestPart { text: &req.prompt }],
         }],
-        generation_config: if req.max_out > 0 {
-            Some(GmGenerationConfig {
-                max_output_tokens: req.max_out,
-            })
-        } else {
-            None
-        },
+        generation_config: Some(GmGenerationConfig {
+            max_output_tokens: if req.max_out > 0 { req.max_out } else { 8192 },
+            response_mime_type: mime_type,
+            response_schema: schema,
+        }),
     };
+
     // Security: API key travels in the X-Goog-Api-Key header,
     // NOT the URL query string. URLs are routinely captured by access logs,
     // proxies and tracing systems; headers are not.
@@ -628,6 +666,8 @@ mod tests {
             model: String::new(),
             max_out: 0,
             timeout: Duration::from_secs(5),
+            response_format: None,
+            grammar: None,
         }
     }
 

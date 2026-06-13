@@ -324,6 +324,13 @@ impl Indexer {
                 false
             }
         };
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS file_cache (
+                file TEXT PRIMARY KEY,
+                mtime INTEGER,
+                size INTEGER
+            )",
+        )?;
         Ok(Self {
             conn: Mutex::new(conn),
             fts,
@@ -334,9 +341,21 @@ impl Indexer {
     /// Returns the number of symbols indexed.
     pub fn index_workspace(&self, root: &Path) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM symbols", [])?;
-        let mut count = 0usize;
+
+        // 1. Read existing cache entries: relative_path -> (mtime, size)
+        let mut db_files = HashMap::new();
+        {
+            let mut stmt = conn.prepare("SELECT file, mtime, size FROM file_cache")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let file: String = row.get(0)?;
+                let mtime: i64 = row.get(1)?;
+                let size: i64 = row.get(2)?;
+                db_files.insert(file, (mtime, size));
+            }
+        }
+
+        // 2. Walk workspace and find active files
         let walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
             !(e.file_type().is_dir()
                 && e.file_name()
@@ -344,49 +363,115 @@ impl Indexer {
                     .map(|n| SKIP_DIRS.contains(&n))
                     .unwrap_or(false))
         });
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO symbols (file, name, kind, lang, start_line, end_line, body)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            )?;
-            for entry in walker.flatten() {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                let lang = lang_for(path);
-                if lang.is_empty() {
-                    continue;
-                }
-                match entry.metadata() {
-                    Ok(md) if md.len() <= 1 << 20 => {}
-                    _ => continue, // skip >1MB files and unreadable entries
-                }
-                let data = match std::fs::read_to_string(path) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string();
-                for sym in extract_symbols(&rel, lang, &data) {
-                    stmt.execute(rusqlite::params![
-                        sym.file,
-                        sym.name,
-                        sym.kind,
-                        sym.lang,
-                        sym.start_line,
-                        sym.end_line,
-                        sym.body
-                    ])?;
-                    count += 1;
+
+        let mut active_files = HashMap::new();
+        for entry in walker.flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let lang = lang_for(path);
+            if lang.is_empty() {
+                continue;
+            }
+            if let Ok(md) = entry.metadata() {
+                if md.len() <= 1 << 20 {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .to_string();
+                    let mtime = md
+                        .modified()
+                        .and_then(|t| {
+                            t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .map_err(std::io::Error::other)
+                        })
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let size = md.len() as i64;
+                    active_files.insert(rel, (mtime, size, path.to_path_buf()));
                 }
             }
         }
+
+        // 3. Find files to delete
+        let mut deleted_files = Vec::new();
+        for file in db_files.keys() {
+            if !active_files.contains_key(file) {
+                deleted_files.push(file.clone());
+            }
+        }
+
+        // 4. Find files to index
+        let mut files_to_index = Vec::new();
+        for (file, (mtime, size, path)) in &active_files {
+            match db_files.get(file) {
+                Some((db_mtime, db_size)) if db_mtime == mtime && db_size == size => {
+                    // Unchanged
+                }
+                _ => {
+                    files_to_index.push((file.clone(), *mtime, *size, path.clone()));
+                }
+            }
+        }
+
+        // 5. Update index inside transaction
+        let tx = conn.transaction()?;
+
+        // Remove deleted files
+        for file in deleted_files {
+            tx.execute(
+                "DELETE FROM symbols WHERE file = ?1",
+                rusqlite::params![file],
+            )?;
+            tx.execute(
+                "DELETE FROM file_cache WHERE file = ?1",
+                rusqlite::params![file],
+            )?;
+        }
+
+        // Parse and insert/update changed files
+        {
+            let mut insert_sym = tx.prepare(
+                "INSERT INTO symbols (file, name, kind, lang, start_line, end_line, body)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            )?;
+            let mut insert_cache = tx.prepare(
+                "INSERT OR REPLACE INTO file_cache (file, mtime, size)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+
+            for (rel, mtime, size, path) in files_to_index {
+                // Delete old symbols for this file
+                tx.execute(
+                    "DELETE FROM symbols WHERE file = ?1",
+                    rusqlite::params![rel],
+                )?;
+
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    let lang = lang_for(&path);
+                    for sym in extract_symbols(&rel, lang, &data) {
+                        insert_sym.execute(rusqlite::params![
+                            sym.file,
+                            sym.name,
+                            sym.kind,
+                            sym.lang,
+                            sym.start_line,
+                            sym.end_line,
+                            sym.body
+                        ])?;
+                    }
+                    insert_cache.execute(rusqlite::params![rel, mtime, size])?;
+                }
+            }
+        }
+
         tx.commit()?;
-        Ok(count)
+
+        // Return total symbol count
+        let total: i64 = conn.query_row("SELECT COUNT(1) FROM symbols", [], |r| r.get(0))?;
+        Ok(total as usize)
     }
 
     /// FTS5 match (or LIKE fallback) over names and bodies, best-ranked first.
@@ -450,25 +535,68 @@ impl Indexer {
 
     /// Compact context block for a task: best-matching symbols concatenated
     /// with file/line headers, capped at max_symbols. Empty if no match.
-    pub fn minimum_viable_context(&self, task: &str, max_symbols: usize) -> Result<String> {
-        let syms = self.search(task, max_symbols)?;
+    pub fn minimum_viable_context(&self, task: &str, token_budget: usize) -> Result<String> {
+        // 1. Search for a wider set of matching symbols (e.g. up to 30)
+        let syms = self.search(task, 30)?;
         if syms.is_empty() {
             return Ok(String::new());
         }
-        let mut b = String::new();
-        for s in &syms {
-            let _ = writeln!(
-                b,
-                "// {}:{}-{} [{} {}]\n{}\n",
-                s.file,
-                s.start_line,
-                s.end_line,
-                s.kind,
-                s.name,
-                s.body.trim_end_matches('\n')
-            );
+
+        // 2. Rank symbols using a lightweight degree-centrality (reference count) approximation:
+        // count how many times each symbol's name is referenced in other symbols' bodies.
+        let conn = self.conn.lock().unwrap();
+        let mut scored_syms = Vec::new();
+        for (index, s) in syms.into_iter().enumerate() {
+            let ref_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(1) FROM symbols WHERE body LIKE ?1 AND name != ?2",
+                    rusqlite::params![format!("%{}%", s.name), s.name],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+
+            // Score: search match rank + 3 * reference count
+            let score = (30 - index) as i64 + 3 * ref_count;
+            scored_syms.push((score, s));
         }
-        Ok(b.trim_end_matches('\n').to_string())
+
+        // Sort descending by score
+        scored_syms.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+        // 3. Binary-search fit budget: find the largest prefix of ranked symbols that fits the token budget
+        let mut low = 0;
+        let mut high = scored_syms.len();
+        let mut best_prefix = String::new();
+
+        while low <= high {
+            let mid = (low + high) / 2;
+            let mut prefix = String::new();
+            for (_, s) in &scored_syms[..mid] {
+                let _ = writeln!(
+                    prefix,
+                    "// {}:{}-{} [{} {}]\n{}\n",
+                    s.file,
+                    s.start_line,
+                    s.end_line,
+                    s.kind,
+                    s.name,
+                    s.body.trim_end_matches('\n')
+                );
+            }
+            let trimmed = prefix.trim_end_matches('\n');
+            let tokens = crate::tokenizer::count_conservative(trimmed);
+            if tokens <= token_budget {
+                best_prefix = trimmed.to_string();
+                low = mid + 1;
+            } else {
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
+            }
+        }
+
+        Ok(best_prefix)
     }
 
     /// Number of indexed symbols.
@@ -613,7 +741,9 @@ mod tests {
                 .unwrap();
             }
         }
-        let ctx = ix.minimum_viable_context("HandlePayment bug", 6).unwrap();
+        let ctx = ix
+            .minimum_viable_context("HandlePayment bug", 1000)
+            .unwrap();
         assert!(ctx.contains("// main.go:"));
         assert!(ctx.contains("[func HandlePayment]"));
     }

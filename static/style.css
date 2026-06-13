@@ -362,6 +362,37 @@ code.inline { background: var(--bg2); padding: 1px 6px; border-radius: 4px; font
   .kv dt { margin-top: 8px; }
   .trace-event { grid-template-columns: 70px 70px 1fr; gap: 8px; }
   .mode-line { padding: 0; }
+
+/* Toasts */
+.toasts { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 100; max-width: 360px; }
+.toast {
+  background: var(--panel2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: 10px 14px; font-size: 13px; box-shadow: var(--shadow);
+  animation: toastIn .2s ease-out; overflow-wrap: break-word;
+}
+.toast.err { border-left-color: var(--bad); }
+.toast.ok { border-left-color: var(--good); }
+@keyframes toastIn { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+.toast.hide { opacity: 0; transition: opacity .3s; }
+
+/* Responsive: collapse sidebar into top bar on narrow screens */
+@media (max-width: 760px) {
+  .layout { flex-direction: column; }
+  .sidebar {
+    width: 100%; height: auto; position: static; flex-direction: row;
+    align-items: center; gap: 10px; padding: 12px 14px; flex-wrap: wrap;
+    border-right: none; border-bottom: 1px solid var(--border);
+  }
+  .brand { padding: 0; }
+  .nav { flex-direction: row; flex-wrap: wrap; flex: 1; }
+  .nav-item.active::before { display: none; }
+  .sidebar-foot { margin-top: 0; padding: 0; }
+  .meta-rule { display: none; }
+  .main { padding: 18px 14px; }
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv dt { margin-top: 8px; }
+  .trace-event { grid-template-columns: 70px 70px 1fr; gap: 8px; }
+  .mode-line { padding: 0; }
   .help-btn { display: none; }
   .info-tip::after { width: 220px; left: auto; right: 0; transform: none; }
   .filter-input { min-width: 0; flex: 1; }
@@ -370,4 +401,65 @@ code.inline { background: var(--bg2); padding: 1px 6px; border-radius: 4px; font
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* Drift Gauge */
+.gauge-container {
+  width: 100%; height: 6px; background: var(--bg2); border-radius: 3px;
+  position: relative; overflow: visible; margin-top: 4px;
+}
+.gauge-bar {
+  width: 10px; height: 10px; background: var(--accent); border-radius: 50%;
+  position: absolute; top: -2px; transform: translateX(-50%);
+  box-shadow: 0 0 4px var(--accent); transition: left 0.3s ease;
+}
+.gauge-center-line {
+  position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+  background: var(--border); z-index: 1;
+}
+
+/* Cache KPI grid */
+.cache-kpi-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  margin-top: 12px; border-top: 1px solid var(--border-soft); padding-top: 10px;
+}
+.cache-kpi {
+  background: var(--bg); border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 8px 10px; text-align: center;
+}
+.cache-kpi-val { font-size: 14px; font-weight: 600; color: var(--text); }
+.cache-kpi-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
+
+/* Spend Trend */
+.spend-bar-container {
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  height: 100%; flex: 1; position: relative; cursor: pointer;
+}
+.spend-bar-hover-zone:hover .spend-tooltip {
+  display: block;
+}
+.spend-bar-wrap {
+  width: 100%; background: var(--bg2); border-radius: 4px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; height: 120px;
+}
+.spend-bar-fill {
+  background: linear-gradient(to top, var(--accent-subtle), var(--accent));
+  width: 100%; border-radius: 2px; transition: height 0.5s ease;
+}
+.spend-bar-success-fill {
+  background: var(--good);
+  width: 100%; height: 0; border-radius: 2px 2px 0 0;
+}
+.spend-bar-lbl {
+  font-size: 9px; color: var(--muted); margin-top: 4px; text-align: center;
+  max-width: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.spend-tooltip {
+  display: none; position: absolute; bottom: 135px; left: 50%; transform: translateX(-50%);
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 11px; color: var(--text); z-index: 50;
+  box-shadow: var(--shadow); white-space: nowrap; pointer-events: none;
+}
+.spend-tooltip::after {
+  content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: var(--panel2);
 }

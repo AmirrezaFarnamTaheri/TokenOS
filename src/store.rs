@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS solution_cache (
     verification_tier TEXT NOT NULL DEFAULT 'static',
     hits       INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    last_hit_at TEXT
+    last_hit_at TEXT,
+    goal       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS execution_attempts (
@@ -272,6 +273,12 @@ impl Store {
             // Migration to add verification_tier to solution_cache.
             conn.execute(
                 "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
+                [],
+            )
+            .ok();
+            // Migration to add goal to solution_cache.
+            conn.execute(
+                "ALTER TABLE solution_cache ADD COLUMN goal TEXT NOT NULL DEFAULT ''",
                 [],
             )
             .ok();
@@ -646,13 +653,14 @@ impl Store {
         route: &str,
         output: &str,
         verification_tier: &str,
+        goal: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO solution_cache (cache_key, route, output, verification_tier, hits, created_at)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5)
-             ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3, verification_tier = ?4",
-            params![cache_key, route, output, verification_tier, Utc::now().to_rfc3339()],
+            "INSERT INTO solution_cache (cache_key, route, output, verification_tier, hits, created_at, goal)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)
+             ON CONFLICT(cache_key) DO UPDATE SET route = ?2, output = ?3, verification_tier = ?4, goal = ?6",
+            params![cache_key, route, output, verification_tier, Utc::now().to_rfc3339(), goal],
         )?;
 
         // LRU Eviction: if solution_cache exceeds MAX_CACHE_SIZE, evict the least recently used entries.
@@ -677,6 +685,132 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    pub fn semantic_cached_solution(
+        &self,
+        goal: &str,
+        threshold: f64,
+    ) -> Result<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT cache_key, route, output, verification_tier, created_at, goal FROM solution_cache",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut best_match: Option<(String, String, String, String, f64)> = None;
+
+        for (cache_key, route, output, tier, created_at, cached_goal) in rows.flatten() {
+            if self.is_cache_entry_expired(&created_at) {
+                let _ = conn.execute(
+                    "DELETE FROM solution_cache WHERE cache_key = ?1",
+                    params![cache_key],
+                );
+                continue;
+            }
+            let sim = Self::jaccard_similarity(goal, &cached_goal);
+            if sim >= threshold
+                && best_match
+                    .as_ref()
+                    .map(|(_, _, _, _, s)| sim > *s)
+                    .unwrap_or(true)
+            {
+                best_match = Some((cache_key, route, output, tier, sim));
+            }
+        }
+
+        if let Some((cache_key, route, output, tier, _)) = best_match {
+            conn.execute(
+                "UPDATE solution_cache SET hits = hits + 1, last_hit_at = ?2 WHERE cache_key = ?1",
+                params![cache_key, Utc::now().to_rfc3339()],
+            )?;
+            Ok(Some((route, output, tier)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn peek_semantic_cached_solution(
+        &self,
+        goal: &str,
+        threshold: f64,
+    ) -> Result<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT cache_key, route, output, verification_tier, created_at, goal FROM solution_cache",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut best_match: Option<(String, String, String, String, f64)> = None;
+
+        for (cache_key, route, output, tier, created_at, cached_goal) in rows.flatten() {
+            if self.is_cache_entry_expired(&created_at) {
+                let _ = conn.execute(
+                    "DELETE FROM solution_cache WHERE cache_key = ?1",
+                    params![cache_key],
+                );
+                continue;
+            }
+            let sim = Self::jaccard_similarity(goal, &cached_goal);
+            if sim >= threshold
+                && best_match
+                    .as_ref()
+                    .map(|(_, _, _, _, s)| sim > *s)
+                    .unwrap_or(true)
+            {
+                best_match = Some((cache_key, route, output, tier, sim));
+            }
+        }
+
+        if let Some((_, route, output, tier, _)) = best_match {
+            Ok(Some((route, output, tier)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn jaccard_similarity(s1: &str, s2: &str) -> f64 {
+        let set1: std::collections::HashSet<String> = s1
+            .to_lowercase()
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
+            .filter(|w: &String| !w.is_empty())
+            .collect();
+        let set2: std::collections::HashSet<String> = s2
+            .to_lowercase()
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
+            .filter(|w: &String| !w.is_empty())
+            .collect();
+
+        if set1.is_empty() && set2.is_empty() {
+            return 1.0;
+        }
+        if set1.is_empty() || set2.is_empty() {
+            return 0.0;
+        }
+
+        let intersection = set1.intersection(&set2).count();
+        let union = set1.union(&set2).count();
+        intersection as f64 / union as f64
     }
 
     /// Helper to check if a solution cache entry is expired.
@@ -1083,6 +1217,34 @@ impl Store {
             + api_stats_deleted)
     }
 
+    pub fn get_daily_spend(&self) -> Result<Vec<DailySpend>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT date(created_at) as day,
+                      COALESCE(SUM(est_cost_usd), 0.0),
+                      COALESCE(SUM(success), 0),
+                      COUNT(1)
+               FROM executions
+               WHERE provider != 'mock'
+               GROUP BY day
+               ORDER BY day ASC
+               LIMIT 30"#,
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DailySpend {
+                day: r.get::<_, String>(0)?,
+                cost_usd: r.get::<_, f64>(1)?,
+                successes: r.get::<_, i64>(2)? as usize,
+                runs: r.get::<_, i64>(3)? as usize,
+            })
+        })?;
+        let mut res = Vec::new();
+        for r in rows {
+            res.push(r?);
+        }
+        Ok(res)
+    }
+
     /// Computes Effective Cost Per Successful Task per route.
     pub fn stats_by_route(&self) -> Result<Vec<RouteStats>> {
         let conn = self.conn.lock().unwrap();
@@ -1194,6 +1356,32 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn stats_by_gen_ai(&self) -> Result<Vec<GenAiStats>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT provider, model, route, COUNT(1),
+                      SUM(CASE WHEN success THEN 1 ELSE 0 END),
+                      COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0),
+                      COALESCE(SUM(cost_usd),0), COALESCE(AVG(latency_ms),0)
+               FROM execution_attempts
+               GROUP BY provider, model, route"#,
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(GenAiStats {
+                provider: r.get(0)?,
+                model: r.get(1)?,
+                route: r.get(2)?,
+                runs: r.get(3)?,
+                successes: r.get(4)?,
+                tokens_in: r.get(5)?,
+                tokens_out: r.get(6)?,
+                cost_usd: r.get(7)?,
+                avg_latency_ms: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Local store integrity and table cardinalities for doctor/health
     /// diagnostics. This performs no provider calls and reads only local
     /// SQLite metadata.
@@ -1257,6 +1445,21 @@ impl Store {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        let exec_savings: f64 = conn.query_row(
+            r#"SELECT COALESCE(SUM(
+                CASE WHEN ((tokens_in * 3.0 + tokens_out * 15.0) / 1000000.0) > est_cost_usd
+                     THEN ((tokens_in * 3.0 + tokens_out * 15.0) / 1000000.0) - est_cost_usd
+                     ELSE 0.0 END
+               ), 0.0) FROM executions WHERE provider != 'mock'"#,
+            [],
+            |r| r.get(0),
+        )?;
+        let cache_hits_savings: f64 = conn.query_row(
+            r#"SELECT COALESCE(SUM(hits * (length(output) / 4.0) * 15.0 / 1000000.0), 0.0) FROM solution_cache"#,
+            [],
+            |r| r.get(0),
+        )?;
+        let savings_usd = exec_savings + cache_hits_savings;
         Ok(Summary {
             tasks: tasks as usize,
             executions: executions as usize,
@@ -1274,6 +1477,7 @@ impl Store {
             } else {
                 0.0
             },
+            savings_usd,
         })
     }
 
@@ -1369,6 +1573,15 @@ pub struct ExecutionAttempt {
     pub created_at: String,
 }
 
+/// Daily spend telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailySpend {
+    pub day: String,
+    pub cost_usd: f64,
+    pub successes: usize,
+    pub runs: usize,
+}
+
 /// Per-route telemetry aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteStats {
@@ -1418,6 +1631,20 @@ pub struct AttemptStats {
     pub total_cost_usd: f64,
 }
 
+/// OpenTelemetry GenAI compatible attempt stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenAiStats {
+    pub provider: String,
+    pub model: String,
+    pub route: String,
+    pub runs: i64,
+    pub successes: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost_usd: f64,
+    pub avg_latency_ms: f64,
+}
+
 /// Local store integrity and cardinalities for diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreHealth {
@@ -1446,6 +1673,7 @@ pub struct Summary {
     pub cost_per_success: f64,
     pub avg_latency_ms: f64,
     pub overall_success_pct: f64,
+    pub savings_usd: f64,
 }
 
 /// Durable bandit state entry per provider.
@@ -1471,7 +1699,7 @@ mod tests {
     fn solution_cache_lifecycle() {
         let s = mem();
         assert!(s.cached_solution("k1").unwrap().is_none());
-        s.cache_solution("k1", "IMPLEMENT", "the answer", "static")
+        s.cache_solution("k1", "IMPLEMENT", "the answer", "static", "k1")
             .unwrap();
         let (route, out, tier) = s.cached_solution("k1").unwrap().unwrap();
         assert_eq!(route, "IMPLEMENT");
@@ -1480,7 +1708,7 @@ mod tests {
         let (entries, tests_entries, hits) = s.solution_cache_stats().unwrap();
         assert_eq!((entries, tests_entries, hits), (1, 0, 1));
         // Re-admission refreshes the stored output.
-        s.cache_solution("k1", "PATCH", "newer answer", "tests")
+        s.cache_solution("k1", "PATCH", "newer answer", "tests", "k1")
             .unwrap();
         let (route2, out2, tier2) = s.cached_solution("k1").unwrap().unwrap();
         assert_eq!(
@@ -1516,7 +1744,7 @@ mod tests {
         // Check LRU eviction (MAX_CACHE_SIZE is 1000)
         for i in 0..1005 {
             let key = format!("k_{}", i);
-            s.cache_solution(&key, "IMPLEMENT", "output", "static")
+            s.cache_solution(&key, "IMPLEMENT", "output", "static", &key)
                 .unwrap();
         }
 
@@ -1858,7 +2086,7 @@ mod tests {
             .unwrap();
         s.record_api_request("GET", "/api/summary", 200, 1_000)
             .unwrap();
-        s.cache_solution("k1", "DIRECT", "answer", "static")
+        s.cache_solution("k1", "DIRECT", "answer", "static", "k1")
             .unwrap();
         let _ = s.cached_solution("k1").unwrap();
 
@@ -1899,5 +2127,53 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map.get("anthropic").unwrap().0, 1.05);
         assert_eq!(map.get("anthropic").unwrap().1, 10);
+    }
+
+    #[test]
+    fn test_semantic_cache_l2_jaccard() {
+        let s = mem();
+        // Insert a goal
+        s.cache_solution(
+            "k1",
+            "IMPLEMENT",
+            "the answer",
+            "static",
+            "implement the user request tokenizer",
+        )
+        .unwrap();
+
+        // Exact lookup for a slightly different wording should return None
+        assert!(s
+            .cached_solution("implement the user request tokenizer")
+            .unwrap()
+            .is_none());
+
+        // Semantic lookup with high threshold should miss
+        let hit_high = s
+            .semantic_cached_solution("implement user tokenizer", 0.9)
+            .unwrap();
+        assert!(hit_high.is_none());
+
+        // Semantic lookup with a matching threshold should hit
+        // Jaccard similarity:
+        // s1: "implement user tokenizer" -> {"implement", "user", "tokenizer"} (size 3)
+        // s2: "implement the user request tokenizer" -> {"implement", "the", "user", "request", "tokenizer"} (size 5)
+        // intersection: {"implement", "user", "tokenizer"} (size 3)
+        // union: {"implement", "the", "user", "request", "tokenizer"} (size 5)
+        // similarity: 3.0 / 5.0 = 0.6
+        let hit_matching = s
+            .semantic_cached_solution("implement user tokenizer", 0.5)
+            .unwrap();
+        assert!(hit_matching.is_some());
+        let (route, out, tier) = hit_matching.unwrap();
+        assert_eq!(route, "IMPLEMENT");
+        assert_eq!(out, "the answer");
+        assert_eq!(tier, "static");
+
+        // The peek_semantic_cached_solution should also work the same
+        let peek = s
+            .peek_semantic_cached_solution("implement user tokenizer", 0.5)
+            .unwrap();
+        assert!(peek.is_some());
     }
 }

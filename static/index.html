@@ -74,6 +74,13 @@
           </table></div>
         </div>
         <div class="panel">
+          <div class="panel-head"><h2>Breaker Board <span class="info-tip" data-tip="Live circuit-breaker states. COOLDOWN indicates recent 429 rate limit triggers; consecutive 429s drive backoff; HALF-OPEN tests probes.">ⓘ</span></h2><span class="hint">circuit breaker states</span></div>
+          <div class="table-wrap"><table id="breakerTable">
+            <thead><tr><th>Provider</th><th>Status</th><th>Consecutive 429s</th><th>EWMA Fail Rate</th><th>EWMA Latency</th><th>Calls (Window)</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+        <div class="panel">
           <div class="panel-head"><h2>Bandit Standings <span class="info-tip" data-tip="A UCB1 multi-armed bandit learns which provider actually delivers. Higher mean reward = more verified successes; unexplored arms are guaranteed a trial.">ⓘ</span></h2><span class="hint">UCB1 — live failover evidence (this process)</span></div>
           <div class="table-wrap"><table id="banditTable">
             <thead><tr><th>Arm</th><th>Pulls</th><th>Mean Reward</th><th>Mean Latency</th><th>UCB1 Score</th></tr></thead>
@@ -86,6 +93,7 @@
             <thead><tr><th>Provider</th><th>Samples</th><th>Ratio (EWMA)</th><th>Status</th></tr></thead>
             <tbody></tbody>
           </table></div>
+          <div class="cache-kpi-grid" id="cacheKpis"></div>
           <div class="hint" id="cacheLine" style="margin-top:10px"></div>
         </div>
         <div class="panel">
@@ -110,9 +118,17 @@
           </table></div>
         </div>
       </div>
-      <div class="panel">
-        <div class="panel-head"><h2>Route Distribution</h2></div>
-        <div class="bars" id="routeBars"></div>
+      <div class="panel-grid">
+        <div class="panel">
+          <div class="panel-head"><h2>Route Distribution</h2></div>
+          <div class="bars" id="routeBars"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Daily Spend & Success Trend</h2><span class="hint">last 30 active days</span></div>
+          <div style="height: 140px; display: flex; align-items: flex-end; gap: 8px; padding: 10px 0;" id="spendTrend">
+            <div class="hint" style="width: 100%; text-align: center;">No spend data recorded yet.</div>
+          </div>
+        </div>
       </div>
     </section>
 

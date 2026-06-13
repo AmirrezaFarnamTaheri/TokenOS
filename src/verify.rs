@@ -20,6 +20,13 @@ pub struct VerifyResult {
     pub issues: Vec<String>,
     /// tokens spent on verification (0 for local tiers)
     pub cost_tokens: usize,
+    /// Confidence/quality score of the output (0.0 to 1.0)
+    #[serde(default = "default_score")]
+    pub score: f64,
+}
+
+fn default_score() -> f64 {
+    1.0
 }
 
 /// Free, local AST-lite differential pass: bracket/paren/brace balance,
@@ -35,6 +42,7 @@ pub fn static_check(route: &str, output: &str) -> VerifyResult {
             tier: "static".into(),
             issues,
             cost_tokens: 0,
+            score: 0.0,
         };
     }
 
@@ -66,11 +74,13 @@ pub fn static_check(route: &str, output: &str) -> VerifyResult {
         issues.push("output appears truncated (trailing ellipsis)".to_string());
     }
 
+    let pass = issues.is_empty();
     VerifyResult {
-        pass: issues.is_empty(),
+        pass,
         tier: "static".into(),
         issues,
         cost_tokens: 0,
+        score: if pass { 1.0 } else { 0.0 },
     }
 }
 
@@ -84,6 +94,7 @@ pub fn verify_output(
 ) -> VerifyResult {
     let mut res = static_check(route, output);
     if !res.pass {
+        res.score = 0.0;
         return res;
     }
 
@@ -93,21 +104,40 @@ pub fn verify_output(
         .unwrap_or(test_command);
 
     if !cmd.is_empty() {
-        let cmd_res = if cfg!(target_os = "windows") {
-            std::process::Command::new("powershell")
-                .args(["-Command", cmd])
-                .output()
+        let mut command = if cfg!(target_os = "windows") {
+            let mut c = std::process::Command::new("powershell");
+            c.args(["-Command", cmd]);
+            c
         } else {
-            std::process::Command::new("sh").args(["-c", cmd]).output()
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", cmd]);
+            c
         };
+        command.env("TOKENOS_OUTPUT", output);
+        let cmd_res = command.output();
 
         match cmd_res {
             Ok(output_cmd) => {
                 if output_cmd.status.success() {
                     res.tier = "tests".into();
+                    res.score = 1.0;
+                    // Parse optional confidence score from stdout
+                    let stdout_str = String::from_utf8_lossy(&output_cmd.stdout);
+                    for line in stdout_str.lines() {
+                        let lower = line.to_lowercase();
+                        if lower.starts_with("score:") || lower.starts_with("confidence:") {
+                            if let Some(val_str) = line.split(':').nth(1) {
+                                if let Ok(val) = val_str.trim().parse::<f64>() {
+                                    res.score = val.clamp(0.0, 1.0);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 } else {
                     res.pass = false;
                     res.tier = "tests".into();
+                    res.score = 0.0;
                     let err_msg = String::from_utf8_lossy(&output_cmd.stderr)
                         .trim()
                         .to_string();
@@ -123,6 +153,7 @@ pub fn verify_output(
             Err(e) => {
                 res.pass = false;
                 res.tier = "tests".into();
+                res.score = 0.0;
                 res.issues
                     .push(format!("Failed to execute verification command: {}", e));
             }
@@ -286,5 +317,41 @@ mod tests {
     #[test]
     fn prose_with_parens_passes() {
         assert!(static_check("DIRECT", "Done (see notes).").pass);
+    }
+
+    #[test]
+    fn verification_command_parses_score() {
+        let cmd = if cfg!(target_os = "windows") {
+            "powershell -Command \"Write-Output 'score: 0.85'\"".to_string()
+        } else {
+            "echo 'score: 0.85'".to_string()
+        };
+        let res = verify_output(
+            "IMPLEMENT",
+            "fn main() {}",
+            &cmd,
+            &std::collections::HashMap::new(),
+        );
+        assert!(res.pass);
+        assert_eq!(res.tier, "tests");
+        assert_eq!(res.score, 0.85);
+    }
+
+    #[test]
+    fn verification_command_parses_confidence() {
+        let cmd = if cfg!(target_os = "windows") {
+            "powershell -Command \"Write-Output 'confidence: 0.65'\"".to_string()
+        } else {
+            "echo 'confidence: 0.65'".to_string()
+        };
+        let res = verify_output(
+            "IMPLEMENT",
+            "fn main() {}",
+            &cmd,
+            &std::collections::HashMap::new(),
+        );
+        assert!(res.pass);
+        assert_eq!(res.tier, "tests");
+        assert_eq!(res.score, 0.65);
     }
 }

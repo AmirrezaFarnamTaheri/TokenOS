@@ -222,6 +222,7 @@ pub fn router_with_auth(engine: Arc<Engine>, auth_token: Option<String>) -> Rout
         .route("/api/stats/attempts", get(handle_attempt_stats))
         .route("/api/stats/bandit", get(handle_bandit_stats))
         .route("/api/stats/drift", get(handle_drift_stats))
+        .route("/api/stats/history", get(handle_history_stats))
         .route("/api/executions", get(handle_executions))
         .route("/api/attempts", get(handle_attempts))
         .route("/api/tasks", get(handle_tasks))
@@ -437,6 +438,38 @@ async fn handle_summary(State(state): State<WebState>) -> Response {
 async fn handle_health(State(state): State<WebState>) -> Response {
     let eng = state.engine;
     let enabled = eng.cfg.providers.values().filter(|p| !p.disabled).count();
+    let breakers: Vec<serde_json::Value> = eng
+        .tracker
+        .health_snapshots()
+        .into_iter()
+        .map(
+            |(
+                k,
+                ewma_lat,
+                fail_rate,
+                calls,
+                in_cooldown,
+                consecutive_429s,
+                half_open_in_flight,
+            )| {
+                let status = if in_cooldown {
+                    "COOLDOWN"
+                } else if consecutive_429s > 0 && half_open_in_flight {
+                    "HALF-OPEN"
+                } else {
+                    "CLOSED"
+                };
+                json!({
+                    "provider": k,
+                    "avg_latency_ms": ewma_lat,
+                    "fail_rate": fail_rate,
+                    "calls_in_window": calls,
+                    "status": status,
+                    "consecutive_429s": consecutive_429s,
+                })
+            },
+        )
+        .collect();
     match eng.store.health_snapshot() {
         Ok(store) => ok_json(json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -446,6 +479,7 @@ async fn handle_health(State(state): State<WebState>) -> Response {
             "providers_enabled": enabled,
             "workspace_index_enabled": eng.indexer.is_some(),
             "store": store,
+            "breaker_board": breakers,
         })),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -520,6 +554,14 @@ async fn handle_drift_stats(State(state): State<WebState>) -> Response {
             "zero_token_hits": cache_hits
         },
     }))
+}
+
+async fn handle_history_stats(State(state): State<WebState>) -> Response {
+    let eng = state.engine;
+    match eng.store.get_daily_spend() {
+        Ok(s) => ok_json(s),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 async fn handle_executions(State(state): State<WebState>) -> Response {
@@ -908,6 +950,48 @@ async fn handle_metrics(State(state): State<WebState>) -> Response {
     }
     out.push('\n');
 
+    // 6. OpenTelemetry GenAI Semantic Conventions (Interoperability)
+    if let Ok(gen_ai_stats) = eng.store.stats_by_gen_ai() {
+        out.push_str(
+            "# HELP gen_ai_client_token_usage_total Total tokens consumed (input or output)\n",
+        );
+        out.push_str("# TYPE gen_ai_client_token_usage_total counter\n");
+        for s in &gen_ai_stats {
+            out.push_str(&format!(
+                "gen_ai_client_token_usage_total{{gen_ai_provider_name=\"{}\",gen_ai_request_model=\"{}\",gen_ai_operation_name=\"chat\",gen_ai_token_type=\"input\",tokenos_route=\"{}\"}} {}\n",
+                s.provider, s.model, s.route, s.tokens_in
+            ));
+            out.push_str(&format!(
+                "gen_ai_client_token_usage_total{{gen_ai_provider_name=\"{}\",gen_ai_request_model=\"{}\",gen_ai_operation_name=\"chat\",gen_ai_token_type=\"output\",tokenos_route=\"{}\"}} {}\n",
+                s.provider, s.model, s.route, s.tokens_out
+            ));
+        }
+        out.push('\n');
+
+        out.push_str(
+            "# HELP gen_ai_client_operation_duration_seconds Average latency in seconds\n",
+        );
+        out.push_str("# TYPE gen_ai_client_operation_duration_seconds gauge\n");
+        for s in &gen_ai_stats {
+            let latency_secs = s.avg_latency_ms / 1000.0;
+            out.push_str(&format!(
+                "gen_ai_client_operation_duration_seconds{{gen_ai_provider_name=\"{}\",gen_ai_request_model=\"{}\",gen_ai_operation_name=\"chat\",tokenos_route=\"{}\"}} {}\n",
+                s.provider, s.model, s.route, latency_secs
+            ));
+        }
+        out.push('\n');
+
+        out.push_str("# HELP gen_ai_client_operation_cost_usd Total dynamic cost in USD\n");
+        out.push_str("# TYPE gen_ai_client_operation_cost_usd counter\n");
+        for s in &gen_ai_stats {
+            out.push_str(&format!(
+                "gen_ai_client_operation_cost_usd{{gen_ai_provider_name=\"{}\",gen_ai_request_model=\"{}\",gen_ai_operation_name=\"chat\",tokenos_route=\"{}\"}} {}\n",
+                s.provider, s.model, s.route, s.cost_usd
+            ));
+        }
+        out.push('\n');
+    }
+
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -956,6 +1040,20 @@ mod tests {
         let app = router(test_engine());
         let resp = app
             .oneshot(Request::get("/api/summary").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn history_endpoint_returns_json() {
+        let app = router(test_engine());
+        let resp = app
+            .oneshot(
+                Request::get("/api/stats/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
