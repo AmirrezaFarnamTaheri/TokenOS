@@ -142,6 +142,20 @@ tokenos config init --config ./tokenos.yaml
 
 `init` refuses to overwrite an existing file.
 
+## `tokenos eval` — run routing-accuracy evaluation
+
+```sh
+tokenos eval --dataset ./dataset.json
+tokenos eval --dataset ./dataset.yaml
+```
+
+| Option | Meaning |
+|---|---|
+| `--dataset <path>` | Path to the labeled dataset (JSON or YAML format) |
+| `[engine flags]` | See above |
+
+Runs the deterministic routing signal extraction and route decision against a labeled corpus. It outputs a comparison table, correct/incorrect statistics, and a mismatch breakdown showing expected vs. predicted routes alongside intent reasons.
+
 ## `tokenos serve` — web control panel
 
 ```sh

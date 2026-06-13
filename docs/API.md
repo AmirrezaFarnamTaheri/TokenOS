@@ -217,6 +217,21 @@ is the EWMA of actual÷estimated input tokens (1.0 = perfectly calibrated);
 }
 ```
 
+## GET `/api/stats/history`
+
+Daily spend telemetry for the last 30 active days (excluding mock runs):
+
+```json
+[
+  {
+    "day": "2026-06-13",
+    "cost_usd": 0.0125,
+    "successes": 5,
+    "runs": 6
+  }
+]
+```
+
 ## GET `/api/executions`
 
 Most recent 200 telemetry rows (newest first):
@@ -368,6 +383,61 @@ Response (engine-level failure — still HTTP 200):
 
 `429` if all in-process execution slots are occupied. The request is rejected
 before entering provider code. `504` if the run exceeds the server-side timeout.
+
+## GET `/metrics`
+
+Exposes plaintext Prometheus exposition format metrics (unauthenticated, to allow scraping by Prometheus monitoring agents).
+
+```text
+# HELP tokenos_tasks_total Total tasks submitted
+# TYPE tokenos_tasks_total counter
+tokenos_tasks_total 12
+
+# HELP tokenos_cost_usd_total Total cost in USD
+# TYPE tokenos_cost_usd_total counter
+tokenos_cost_usd_total 0.0123
+...
+```
+
+## POST `/v1/chat/completions`
+
+An OpenAI-compatible chat completions proxy endpoint (requires `run` or `admin` bearer authentication when configured).
+
+Request:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "say hello" }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "id": "chatcmpl-t-9f2c",
+  "object": "chat.completion",
+  "created": 1718280000,
+  "model": "claude-sonnet-4-20250514",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 8,
+    "total_tokens": 18
+  }
+}
+```
 
 ---
 
