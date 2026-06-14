@@ -3,295 +3,156 @@
 TokenOS is a deterministic execution kernel for LLM-driven agents. Its single
 governing rule:
 
-> **Never spend more resources deciding than the decision can save.**
+> Never spend more resources deciding than the decision can save.
 
-This document explains how the subsystems compose, what invariants each one
-maintains, and where the zero-token boundaries are.
+The active product is local-first: native desktop app, CLI, and embeddable Rust
+library. The former browser dashboard and HTTP API have been retired.
 
----
+## 1. System Positioning
 
-## 0. Design Positioning
+TokenOS is an in-process control kernel, not a conversational proxy, HTTP
+gateway, screen automation agent, or multi-tenant SaaS service.
 
-TokenOS is an in-process control kernel, not a conversational proxy and not a
-screen automation agent. The kernel keeps routing, context selection,
-verification, loop detection, provider ordering, and telemetry in native Rust
-code so those decisions cost local CPU time instead of provider tokens.
+| Axis | TokenOS pattern |
+|---|---|
+| Routing state | Local `State`, SQLite telemetry, deterministic signals |
+| Context control | Symbol-indexed minimum viable context and distilled payloads |
+| Credential boundary | API keys stay in env vars; prompts are masked before adapter calls |
+| Loop memory | Persisted SQLite windows by stable task scope |
+| Provider choice | Local shadow pricing, quota pressure, failure EWMA, UCB1 evidence |
+| UI boundary | Native egui/eframe app with direct engine/store calls |
 
-| Axis | Network proxy pattern | TokenOS pattern |
-|---|---|---|
-| Routing state | Middleware request history or provider-side conversation | Local `State`, SQLite telemetry, and deterministic signals |
-| Context control | Raw chat or tool-output forwarding | Symbol-indexed minimum viable context plus distilled payloads |
-| Credential boundary | Proxy transport and logs must be trusted | API keys stay in env vars; prompts are masked before adapter calls |
-| Loop memory | Often process-local only | Loop windows persist in SQLite by stable task scope |
-| Provider choice | Central gateway policy | Local shadow pricing plus process-local UCB1 evidence |
+Remote identity, certificate operations, provider contract testing, disk
+encryption, monitoring, and fleet-wide quota governance are operator-owned
+controls.
 
-This positioning is intentionally local-first. TokenOS can sit behind a
-reverse proxy, native HTTPS listener, or fleet gateway, but it does not claim
-to replace enterprise identity, certificate operations, provider contract
-testing, or fleet-wide quota governance by itself.
+## 2. Dataflow
 
-## 1. High-level dataflow
-
-```
-            task + constraints
-                    |
-                    v
-        +-----------------------+
-        |  kernel::decide()     |  deterministic route ladder -- ZERO tokens
-        |  (signals -> route)   |
-        +-----------+-----------+
-                    | Route in {DIRECT, REUSE, PATCH, IMPLEMENT,
-                    |           PARTIAL, DELEGATE, ASK, ESCALATE-*}
-                    v
-        +-----------------------+
-        |  contextidx           |  minimum viable context <= 2000 tokens
-        |  (symbol index)       |  -- ZERO tokens
-        +-----------+-----------+
-                    v
-        +-----------------------+
-        |  payload::build()     |  JIT cache-aligned prompt
-        |  (static->volatile)   |  (DELEGATE -> DelegationPacket JSON)
-        +-----------+-----------+
-                    v
-        +-----------------------+
-        |  maskcodec::mask()    |  secrets replaced with placeholders
-        +-----------+-----------+  before any byte leaves the process
-                    v
-        +-----------------------+
-        |  pricing + bandit     |  shadow-priced provider ordering,
-        |  failover ordering    |  scaled by UCB1 evidence -- ZERO tokens
-        +-----------+-----------+
-                    v
-        +-----------------------+
-        |  provider adapter     |  THE ONLY PAID STEP
-        |  (mock/openai/        |
-        |   anthropic/gemini)   |
-        +-----------+-----------+
-                    v
-        +-----------------------+
-        |  maskcodec::unmask()  |  placeholder echoes restored
-        |  jsonrescue::rescue() |  truncated JSON repaired (if JSON intent)
-        +-----------+-----------+
-                    v
-        +-----------------------+
-        |  verify::static_check |  free verification before acceptance
-        |  loopdetect           |  semantic loop => ESCALATE
-        +-----------+-----------+
-                    v
-        +-----------------------+
-        |  store (SQLite)       |  compressed state, telemetry,
-        |  recorder (CAS blobs) |  flight-recorder trace
-        +-----------------------+
+```text
+task + constraints
+  -> kernel::decide()             zero-token deterministic route ladder
+  -> contextidx                   minimum viable context, zero tokens
+  -> payload::build()             cache-aligned prompt or delegation packet
+  -> maskcodec::mask()            secrets masked before egress
+  -> pricing + bandit             provider ordering, zero tokens
+  -> provider adapter             only paid step unless mock/dry-run
+  -> maskcodec::unmask()          caller-boundary restoration only
+  -> jsonrescue + verify          free output rescue/checks
+  -> loopdetect                   persisted semantic loop detection
+  -> store + recorder             SQLite state and flight-recorder blobs
 ```
 
-Everything above and below the provider adapter is local CPU work. Routing,
-context selection, verification, loop detection, and provider ordering do not
-consume provider tokens.
+Everything except the provider adapter is local CPU and storage work.
 
-## 2. Crate layout
-
-The crate ships as a **library plus a thin binary**:
+## 3. Crate Layout
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Library root — every module is `pub`, so the kernel embeds in other runtimes |
-| `src/main.rs` | CLI binary (`clap`); a pure consumer of the `tokenos` library |
-
-### Module map
+| `src/lib.rs` | Library root; modules are public for embedding |
+| `src/main.rs` | CLI and native app dispatch |
 
 | Module | Responsibility | Key invariant |
 |---|---|---|
-| `kernel` | Route ladder, signal extraction, `RouterPolicy`, `State`, `DelegationPacket` | Same input ⇒ same route, always. No I/O. |
-| `config` | YAML config, provider profiles, two-tier model filter matrix, routing rules | Exclusion always wins; default config works offline |
-| `engine` | Orchestrator: route → context → payload → mask → failover → verify → record | The single place where money can be spent |
-| `provider` | Adapters: mock (fault-injectable), OpenAI, Anthropic, Gemini, proxy | Errors are classified (retryable vs terminal) |
-| `pricing` | Shadow pricing, EWMA failure tracking, quota pressure, lock-free UCB1 bandit | All reads/writes lock-free (`AtomicF64` bitcast CAS) |
-| `payload` | JIT cache-aligned prompt builder | Byte-stable static prefix ⇒ provider prompt-cache hits |
-| `verify` | Tiered verification: free static checks | Free checks always run before paid ones |
-| `tokenizer` | Calibrated heuristic + greedy BPE counter | `count_conservative` never under-estimates vs heuristic |
-| `jsonrescue` | Single-pass truncated-JSON rescuer | Never "repairs" non-JSON prose (EOF-consumption guard) |
-| `maskcodec` | Edge secret masking | Reverse vault lives only in the request's stack frame |
-| `loopdetect` | Myers bit-parallel Levenshtein loop detection | Window persisted in SQLite — survives process restarts |
-| `contextidx` | Structural symbol index (FTS5 with LIKE fallback) | Minimum viable context ≤ 2000 tokens |
-| `store` | SQLite state: tasks, failure memory, loop history, telemetry, trace index, solution cache | State objects and trace metadata, never raw transcripts |
-| `recorder` | Flight recorder: SHA-256 CAS blobs + NDJSON journal | Diagnostics never enter the context window |
-| `webui` | axum control panel | Lock-free read handlers, bounded concurrent runs, constant-time bearer auth |
-| `nativeapp` | feature-gated egui/eframe desktop UI | Native direct engine/store integration; no web server, loopback listener, browser, or webview |
+| `kernel` | Route ladder, signals, policy, state, delegation packets | Same input yields same route |
+| `config` | YAML config, provider profiles, model filters, routing rules | Exclusion wins; defaults work offline |
+| `engine` | Route, context, payload, provider failover, verify, record | The only place provider spend occurs |
+| `provider` | Mock, OpenAI, Anthropic, Gemini, proxy-compatible adapters | Errors are classified |
+| `pricing` | Shadow pricing, quota pressure, drift, UCB1 bandit | Hot-path statistics avoid coarse locks |
+| `payload` | Static-first prompt construction | Byte-stable prefix supports provider caches |
+| `verify` | Tiered verification | Free checks run before acceptance |
+| `tokenizer` | Conservative token estimation | Never under-estimates versus heuristic |
+| `jsonrescue` | Truncated JSON repair | Non-JSON prose is not fabricated into JSON |
+| `maskcodec` | Secret masking | Reverse vault is request-scoped |
+| `loopdetect` | Semantic loop detection | Window survives process restarts |
+| `contextidx` | Structural symbol index | Context is bounded before prompt build |
+| `store` | SQLite state and telemetry | State objects and metadata, not transcripts |
+| `recorder` | CAS blobs and NDJSON journals | Diagnostics stay outside conversation context |
+| `nativeapp` | egui/eframe desktop UI | Direct engine/store calls; no HTTP listener |
 
-## 3. The routing ladder
+## 4. Routing Ladder
 
-`kernel::decide()` walks a strict priority ladder. The first matching rung wins:
+`kernel::decide()` walks a strict priority ladder:
 
-| Priority | Route | Trigger | Token cost |
+| Priority | Route | Trigger | Provider cost |
 |---|---|---|---|
-| 0 | `ESCALATE-CONFLICT` | Contradictory constraints detected | 0 |
+| 0 | `ESCALATE-CONFLICT` | Contradictory constraints | 0 |
 | 0 | `ESCALATE-SAFETY` | Safety violation signal | 0 |
-| 0 | `ESCALATE-EXTERNAL` | Semantic loop detected (loopdetect) | 0 |
-| 1 | `ASK` | Missing critical info or confidence < `ask_threshold` (0.35) | 0 |
-| 2 | `DIRECT` | Trivial task, estimate ≤ `direct_max_tokens` (600) | minimal |
-| 3 | `REUSE` | Exact verified solution-cache hit for the same goal + constraints | 0 on replay |
-| 4 | `PATCH` | Localized change with no repeated failure on this goal | small |
-| 5 | `DELEGATE` | Repetitive + bounded + savings > `delegation_penalty × delegation_min_scale` | packet only |
-| 6 | `PARTIAL` | External blocker — deliver completed portion | bounded |
+| 0 | `ESCALATE-EXTERNAL` | Semantic loop or external blocker | 0 |
+| 1 | `ASK` | Missing critical info or low confidence | 0 |
+| 2 | `DIRECT` | Trivial, bounded local answer | minimal |
+| 3 | `REUSE` | Exact verified solution-cache hit | 0 on replay |
+| 4 | `PATCH` | Localized change with no repeated failure | small |
+| 5 | `DELEGATE` | Repetitive bounded work with savings | packet only |
+| 6 | `PARTIAL` | External blocker with useful completed work | bounded |
 | 7 | `IMPLEMENT` | Default productive path | normal |
 
-`ASK` and all escalations terminate locally at **zero LLM cost**. `REUSE` is
-not a workspace-index hit. The workspace index only supplies minimum viable
-context for a prompt; a task routes to `REUSE` only when the durable verified
-solution cache has an exact, replayable goal+constraint match.
+`ASK` emits exactly one local question, records a blocked task, and stops with
+zero tokens and no provider/model. `REUSE` requires an exact, replayable
+verified solution-cache hit; workspace context alone never routes to `REUSE`.
 
-Failure memory feeds back into the ladder: a goal that has previously failed
-with a similar approach is biased away from `PATCH`, and the failed approach
-is *forbidden* in the payload's constraint block.
+## 5. Provider Ordering
 
-ASK is deliberately local. Once the router decides information is missing, the
-engine emits one deterministic clarifying question, marks the task blocked,
-records zero tokens and no provider/model, and stops. Sending an ASK to a model
-would violate the routing contract because the system already knows it needs
-human input.
+Provider utility is quoted from confidence, token price, expected latency,
+quota pressure, context fit, and failure history. A process-local UCB1 bandit
+then adjusts ordering from observed reward:
 
-## 4. Shadow pricing and the bandit
+- verified success earns latency-discounted reward;
+- transport and verification failures earn zero;
+- unexplored arms remain eligible so provider exploration does not collapse.
 
-For each candidate provider the engine computes a quote:
+Standings are visible through `tokenos telemetry` and the native Operations
+view.
 
-```
-U = confidence / (alpha * tokenCost * 1000 + beta * latency)
-```
+## 6. Payload And Response Leg
 
-- `confidence` is discounted by a per-provider **failure EWMA**, and by
-  **quota pressure** as the provider approaches its per-minute limit.
-- A hard constraint removes providers whose context window cannot fit the
-  payload.
-- Ties break deterministically (provider name ordering) so failover order is
-  reproducible.
+Payloads are serialized in volatility order: static contract, semi-static
+constraints/failure memory, then volatile task/context. Delegation routes emit
+a compact JSON contract instead of a full prompt transcript.
 
-The **UCB1 bandit** (lock-free, `AtomicF64` compare-and-swap over bitcast
-`u64`s) then scales each utility by an *exploitation weight*:
+Responses pass through:
 
-| Arm state | Weight | Effect |
+1. JSON rescue for JSON-intent truncated output;
+2. static verification;
+3. loop detection;
+4. provider-attempt recording;
+5. final execution recording and trace indexing;
+6. caller-boundary unmasking.
+
+Unmasked content is returned to the caller but not written to SQLite or
+recorder blobs.
+
+## 7. Persistence
+
+| Store | Contents | Purpose |
 |---|---|---|
-| Unexplored (0 pulls) | `1.0` | Shadow pricing alone decides — every arm still gets explored |
-| Explored | `0.5 + mean_reward` | Live evidence reorders the failover chain |
+| SQLite | Task states, failure memory, loop windows, executions, provider attempts, aggregate request stats retained for legacy DBs, trace metadata, solution cache | Queryable operational state |
+| Flight recorder | Decision/prompt/response/rescue/error events and content-addressed blobs | Diagnostics without context-window cost |
 
-Reward signals:
+Task state is compressed into goals, status, blockers, acceptance, and next
+step. Conversation history is not the source of truth.
 
-- Verified success → reward `1.0`, latency-discounted.
-- Transport error → reward `0.0`.
-- Verification failure → reward `0.0`.
+## 8. Concurrency And Resource Boundaries
 
-Standings are observable via `tokenos telemetry`, `GET /api/stats/bandit`,
-and the dashboard's *Bandit Standings* panel.
+- Native UI work is split between the egui main thread and a background Tokio
+  runtime for long-running executions.
+- Bandit/tracker hot paths use atomic updates.
+- SQLite writes are transactional.
+- Route signal extraction uses linear-time regexes.
+- Context lookup is truncated before prompt build.
+- JSON rescue is single-pass and only runs for JSON-intent tasks.
+- Loop detection caps compared text before edit-distance work.
 
-## 5. Payload construction and cache alignment
+## 9. Determinism Guarantees
 
-`payload::build()` serializes sections in strict volatility order:
+Same inputs produce the same route, same baseline provider order, and same
+payload bytes. Runtime learning can reorder providers only through explicit
+recorded evidence. Dry-run swaps in the mock provider so the full pipeline is
+testable offline.
 
-1. **Static** — `KERNEL_CONTRACT` (byte-stable across all calls)
-2. **Semi-static** — constraints, forbidden approaches (from failure memory)
-3. **Volatile** — task, surgical context
+## 10. Related Docs
 
-Because the static prefix is byte-identical on every call, providers with
-prompt caching (Anthropic, OpenAI) hit their cache on the longest possible
-prefix.
-
-`Route::Delegate` short-circuits into `build_delegation()`, which emits a
-compact `DelegationPacket` JSON — task, scope, constraints, acceptance
-criteria, next step. Conclusions only; no history, no reasoning, no
-transcript.
-
-## 6. The response leg
-
-After a provider responds, in order:
-
-1. **JSON rescue** — if the task signals JSON intent (case-insensitive
-   `json` in the task or constraints) and the output is truncated JSON, the
-   single-pass lenient parser repairs it: partial strings keep their content,
-   dangling keys are dropped, open containers are closed. A truncation guard
-   refuses to touch prose that merely *starts* with a bracket. Rescues are
-   flight-recorded as `rescue` events.
-2. **Static verification** — free checks: diff shape for PATCH, exactly-one-
-   question contract for ASK, brace balance, ellipsis/truncation detection.
-3. **Loop detection** — normalized Myers bit-parallel Levenshtein distance
-   over a sliding window of the last 5 outputs (persisted in SQLite).
-   Distance < 3% ⇒ semantic loop ⇒ `ESCALATE-EXTERNAL`.
-4. **Attempt recording** — every provider leg is written to SQLite before the
-   engine decides whether to fail over, retry, escalate, or finalize.
-5. **Final recording** — the final execution row is written to SQLite; trace
-   metadata is indexed; full payloads land as SHA-256 content-addressed blobs
-   in the flight recorder.
-6. **Unmask for caller only** — placeholder echoes are restored from the
-   request-scoped vault after durable writes complete. The unmasked form is
-   returned to the caller and is not written to SQLite or recorder blobs.
-
-On startup, provider health and UCB1 evidence are hydrated from the attempt
-ledger first so failed failover legs continue to influence routing after a
-restart. Older databases without attempt rows fall back to final execution
-history; unreadable telemetry rows are surfaced as errors or startup warnings
-instead of being silently skipped.
-
-## 7. Persistence model
-
-Two stores, deliberately separate:
-
-| Store | Contents | Why separate |
-|---|---|---|
-| **SQLite** (`store.rs`) | Compressed task states, goal-keyed failure memory (max 5/goal), loop-detection windows, final execution telemetry, provider attempt ledger and aggregates, HTTP/API request aggregates, trace metadata, verified solution cache | Queryable, transactional, survives restarts |
-| **Flight recorder** (`recorder.rs`) | Decision/prompt/response/rescue/error events (NDJSON journal) + full payload blobs (SHA-256 CAS) | Diagnostics must never compete with state for context tokens |
-
-State is stored as **compressed state objects** (goal, status, blockers,
-acceptance, next step) — never transcripts. The conversation is not the
-source of truth; SQLite is.
-
-## 8. Concurrency model
-
-- **Web handlers are lock-free**: the axum router shares an `Arc<Engine>`;
-  there is no global mutex. A long-running `/api/run` never blocks telemetry
-  reads.
-- **Bandit and tracker** use atomic CAS loops over bitcast `f64`s — no locks
-  on the hot path.
-- **Route previews** (`/api/route`) run on `spawn_blocking` so pure CPU work
-  never stalls the async reactor.
-- **Execution backpressure** caps concurrent `/api/run` work at four in-process
-  slots. Saturated servers return `429` while keeping dashboard reads and route
-  previews available.
-- **Control-plane telemetry** is aggregated after every request as method,
-  normalized path, status, count, average latency, max latency, and last-seen
-  time. Bodies, auth headers, query strings, and per-request rows are not stored.
-- **Adapters map** is behind an `RwLock` only for registration; the read path
-  is shared.
-
-## 9. Resource And Complexity Boundaries
-
-TokenOS keeps the hot path bounded and inspectable:
-
-| Layer | Runtime shape | Bound |
-|---|---|---|
-| Route signal extraction | Rust `regex` and local heuristics | Linear-time regex engine, zero provider calls |
-| Provider quoting | Candidate scoring and deterministic ordering | `O(P log P)` in the number of configured providers |
-| Context lookup | SQLite FTS5 when available, LIKE fallback otherwise | Result truncated to minimum viable context before prompt build |
-| Context distillation | Single pass over selected context | Drops duplicate index headers and formatting weight only |
-| JSON rescue | Single-pass lenient parser | Runs only for JSON-intent tasks and only accepts full-input repairs |
-| Loop detection | Myers bit-parallel edit distance | Inputs capped at 20,000 chars before comparison |
-| Web execution | Axum handler plus semaphore | Four concurrent `/api/run` executions per process |
-| API telemetry | SQLite aggregate upsert | Stores route aggregates, not request bodies or per-request rows |
-
-## 10. Determinism Guarantees
-
-Same inputs produce:
-
-1. The same route (`kernel::decide` is pure).
-2. The same provider order (deterministic tie-breaking; bandit weights are
-   the only intentional run-time variation, and they default to neutral).
-3. The same payload bytes (BTreeMap-ordered config, stable serialization).
-
-This is what makes the kernel testable offline: `--dry-run` swaps in the
-fault-injectable mock adapter and the entire pipeline runs deterministically
-with zero network access.
-
-## 11. Related Production Docs
-
-- [CONFIGURATION.md](CONFIGURATION.md) — every config field explained
-- [CLI.md](CLI.md) — full command reference
-- [API.md](API.md) — HTTP API reference
-- [SECURITY.md](SECURITY.md) — threat model and hardening details
-- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) — release gates and external-control boundary
+- [CONFIGURATION.md](CONFIGURATION.md)
+- [CLI.md](CLI.md)
+- [API.md](API.md)
+- [SECURITY.md](SECURITY.md)
+- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md)

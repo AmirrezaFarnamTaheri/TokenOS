@@ -3,7 +3,7 @@
 //! The workers are not smart — this layer is.
 //!
 //! Concurrency invariant: `Engine::run` takes `&self`, so an
-//! `Arc<Engine>` can serve many concurrent web/CLI requests without any
+//! `Arc<Engine>` can serve many concurrent native app, CLI, or embedded requests without any
 //! coarse global lock. Internal state (adapter cache, pricing tracker,
 //! SQLite handle) is guarded by fine-grained mutexes held only for
 //! microsecond map/DB operations — never across network I/O.

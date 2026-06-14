@@ -2,8 +2,7 @@
 //!
 //! `tokenos app` is a real native desktop surface built with egui/eframe. It
 //! talks directly to the Rust engine and SQLite store; it does not start the
-//! Axum web dashboard, does not bind a loopback port, and does not open a
-//! browser.
+//! HTTP listener, does not bind a loopback port, and does not open a browser.
 
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
@@ -23,8 +22,8 @@ use crate::kernel::{Decision, Route, RouterPolicy, Signals, State};
 use crate::pricing::DriftStatus;
 use crate::recorder::Event;
 use crate::store::{
-    ApiRequestStats, AttemptStats, DailySpend, Execution, ExecutionAttempt, GenAiStats,
-    ProviderStats, RouteStats, StoreHealth, Summary,
+    AttemptStats, DailySpend, Execution, ExecutionAttempt, GenAiStats, ProviderStats, RequestStats,
+    RouteStats, StoreHealth, Summary,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -69,6 +68,7 @@ enum View {
     PolicyLab,
     Calibration,
     Operations,
+    Readiness,
     Tasks,
     Executions,
     Config,
@@ -83,6 +83,7 @@ impl View {
             Self::PolicyLab => "Policy Lab",
             Self::Calibration => "Calibration",
             Self::Operations => "Operations",
+            Self::Readiness => "Readiness",
             Self::Tasks => "Tasks",
             Self::Executions => "Executions",
             Self::Config => "Configuration",
@@ -96,7 +97,7 @@ struct Snapshot {
     routes: Vec<RouteStats>,
     providers: Vec<ProviderStats>,
     attempts: Vec<AttemptStats>,
-    api_stats: Vec<ApiRequestStats>,
+    request_stats: Vec<RequestStats>,
     raw_attempts: Vec<ExecutionAttempt>,
     gen_ai: Vec<GenAiStats>,
     bandit: Vec<BanditArmView>,
@@ -187,7 +188,19 @@ struct BatchRouteResult {
     confidence: f64,
     estimated_tokens: usize,
     provider_chain: Vec<String>,
+    estimated_provider_cost: Option<f64>,
+    budget_blocked: bool,
     reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderCostEstimate {
+    provider: String,
+    model: String,
+    input_tokens: usize,
+    output_tokens: usize,
+    estimated_cost_usd: f64,
+    over_budget: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +391,7 @@ impl TokenOsNativeApp {
             View::PolicyLab,
             View::Calibration,
             View::Operations,
+            View::Readiness,
             View::Tasks,
             View::Executions,
             View::Config,
@@ -412,6 +426,7 @@ impl TokenOsNativeApp {
                 View::PolicyLab => self.policy_lab(ui),
                 View::Calibration => self.calibration(ui),
                 View::Operations => self.operations(ui),
+                View::Readiness => self.readiness(ui),
                 View::Tasks => self.tasks(ui),
                 View::Executions => self.executions(ui),
                 View::Config => self.config(ui),
@@ -467,7 +482,7 @@ impl TokenOsNativeApp {
                         kv_row(ui, "Executions", h.executions.to_string());
                         kv_row(ui, "Attempts", h.execution_attempts.to_string());
                         kv_row(ui, "Traces", h.traces.to_string());
-                        kv_row(ui, "API stats", h.api_request_stats.to_string());
+                        kv_row(ui, "Request stats", h.request_stats.to_string());
                         kv_row(ui, "Cache entries", h.solution_cache.to_string());
                         kv_row(ui, "Cache hits", h.solution_cache_hits.to_string());
                     });
@@ -560,6 +575,14 @@ impl TokenOsNativeApp {
                 ui.label(reason);
                 ui.add_space(8.0);
                 signal_grid(ui, &decision.signals);
+                ui.add_space(8.0);
+                cost_forecast_table(
+                    ui,
+                    &self.engine,
+                    decision.route,
+                    decision.signals.estimated_tokens,
+                    &self.engine.cfg.policy,
+                );
                 ui.add_space(8.0);
                 provider_chain_table(ui, &self.engine, decision.route);
             });
@@ -654,6 +677,16 @@ impl TokenOsNativeApp {
                 .iter()
                 .filter(|r| r.route.is_terminal_local() || r.route == Route::Reuse)
                 .count();
+            let provider_cost: f64 = self
+                .batch_results
+                .iter()
+                .filter_map(|r| r.estimated_provider_cost)
+                .sum();
+            let budget_blocked = self
+                .batch_results
+                .iter()
+                .filter(|r| r.budget_blocked)
+                .count();
             metric_grid(
                 ui,
                 &[
@@ -683,6 +716,16 @@ impl TokenOsNativeApp {
                             .sum::<usize>()
                             .to_string(),
                         false,
+                    ),
+                    (
+                        "Provider Forecast",
+                        usd(provider_cost),
+                        provider_cost <= strong_cost,
+                    ),
+                    (
+                        "Budget Blocks",
+                        budget_blocked.to_string(),
+                        budget_blocked == 0,
                     ),
                 ],
             );
@@ -800,10 +843,10 @@ impl TokenOsNativeApp {
             );
             ui.columns(2, |cols| {
                 panel(&mut cols[0], "Effective Config Decision", |ui| {
-                    decision_panel(ui, &self.engine, &result.current)
+                    decision_panel(ui, &self.engine, &result.current, &self.engine.cfg.policy)
                 });
                 panel(&mut cols[1], "Simulated Decision", |ui| {
-                    decision_panel(ui, &self.engine, &result.simulated)
+                    decision_panel(ui, &self.engine, &result.simulated, &self.policy_lab_policy)
                 });
             });
         }
@@ -908,14 +951,14 @@ impl TokenOsNativeApp {
         heading(
             ui,
             "Operations",
-            "control-plane parity, live breakers, attempts, and GenAI telemetry",
+            "native runtime health, live breakers, attempts, and GenAI telemetry",
         );
         ui.columns(2, |cols| {
             panel(&mut cols[0], "Circuit Breakers", |ui| {
                 breaker_table(ui, &self.snapshot.breakers)
             });
-            panel(&mut cols[1], "API Surface", |ui| {
-                api_stats_table(ui, &self.snapshot.api_stats)
+            panel(&mut cols[1], "Request Aggregates", |ui| {
+                request_stats_table(ui, &self.snapshot.request_stats)
             });
         });
         ui.columns(2, |cols| {
@@ -928,6 +971,195 @@ impl TokenOsNativeApp {
         });
         panel(ui, "Recent Provider Attempts", |ui| {
             raw_attempts_table(ui, &self.snapshot.raw_attempts)
+        });
+    }
+
+    fn readiness(&mut self, ui: &mut Ui) {
+        heading(
+            ui,
+            "Readiness",
+            "local release and live-spend checks for the native runtime",
+        );
+
+        let enabled_providers: Vec<_> = self
+            .engine
+            .cfg
+            .providers
+            .iter()
+            .filter(|(_, provider)| !provider.disabled)
+            .collect();
+        let live_providers: Vec<_> = enabled_providers
+            .iter()
+            .copied()
+            .filter(|(_, provider)| provider.adapter != "mock")
+            .collect();
+        let keyed_live = live_providers
+            .iter()
+            .filter(|(_, provider)| {
+                !provider.api_key_env.is_empty()
+                    && std::env::var(&provider.api_key_env)
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+            })
+            .count();
+        let store_ok = self
+            .snapshot
+            .health
+            .as_ref()
+            .map(|health| health.quick_check == "ok")
+            .unwrap_or(false);
+        let traces_ready = self.engine.cfg.security.disable_traces
+            || self.engine.cfg.security.owner_only_permissions;
+        let budget_ready = self.engine.dry_run
+            || self.engine.cfg.policy.max_cost_per_task_usd > 0.0
+            || self.engine.cfg.security.daily_spend_limit_usd > 0.0
+            || self.engine.cfg.security.monthly_spend_limit_usd > 0.0;
+        let provider_ready =
+            self.engine.dry_run || live_providers.is_empty() || keyed_live == live_providers.len();
+        let ready_count = [
+            store_ok,
+            provider_ready,
+            budget_ready,
+            traces_ready,
+            self.engine.cfg.policy.reuse_cache,
+            true,
+        ]
+        .into_iter()
+        .filter(|ready| *ready)
+        .count();
+
+        metric_grid(
+            ui,
+            &[
+                ("Checks Ready", format!("{ready_count}/6"), ready_count == 6),
+                (
+                    "Mode",
+                    if self.engine.dry_run {
+                        "dry-run".to_string()
+                    } else {
+                        "live".to_string()
+                    },
+                    self.engine.dry_run || budget_ready,
+                ),
+                (
+                    "Enabled Providers",
+                    enabled_providers.len().to_string(),
+                    !enabled_providers.is_empty(),
+                ),
+                (
+                    "Live Keys Present",
+                    format!("{keyed_live}/{}", live_providers.len()),
+                    provider_ready,
+                ),
+            ],
+        );
+
+        ui.columns(2, |cols| {
+            panel(&mut cols[0], "Gate Checklist", |ui| {
+                readiness_row(
+                    ui,
+                    "SQLite integrity",
+                    store_ok,
+                    self.snapshot
+                        .health
+                        .as_ref()
+                        .map(|h| format!("quick_check={}", h.quick_check))
+                        .unwrap_or_else(|| "no health snapshot loaded".to_string()),
+                );
+                readiness_row(
+                    ui,
+                    "Live provider credentials",
+                    provider_ready,
+                    if live_providers.is_empty() {
+                        "no enabled live providers".to_string()
+                    } else {
+                        format!(
+                            "{keyed_live} of {} required env vars set",
+                            live_providers.len()
+                        )
+                    },
+                );
+                readiness_row(
+                    ui,
+                    "Spend ceiling",
+                    budget_ready,
+                    if self.engine.dry_run {
+                        "dry-run mode cannot spend provider tokens".to_string()
+                    } else if self.engine.cfg.policy.max_cost_per_task_usd > 0.0 {
+                        format!(
+                            "per-task sentinel {}",
+                            usd(self.engine.cfg.policy.max_cost_per_task_usd)
+                        )
+                    } else {
+                        format!(
+                            "daily {} / monthly {}",
+                            usd(self.engine.cfg.security.daily_spend_limit_usd),
+                            usd(self.engine.cfg.security.monthly_spend_limit_usd)
+                        )
+                    },
+                );
+                readiness_row(
+                    ui,
+                    "Trace storage policy",
+                    traces_ready,
+                    if self.engine.cfg.security.disable_traces {
+                        "traces disabled by config".to_string()
+                    } else {
+                        format!(
+                            "owner_only_permissions={} retention_days={}",
+                            self.engine.cfg.security.owner_only_permissions,
+                            self.engine.cfg.security.retention_days
+                        )
+                    },
+                );
+                readiness_row(
+                    ui,
+                    "Verified cache",
+                    self.engine.cfg.policy.reuse_cache,
+                    if self.engine.cfg.policy.reuse_cache {
+                        "zero-token verified replays enabled".to_string()
+                    } else {
+                        "disabled; repeated tasks will not reuse verified outputs".to_string()
+                    },
+                );
+                readiness_row(
+                    ui,
+                    "HTTP/web retirement",
+                    true,
+                    "native app uses direct engine/store calls; no listener is started".to_string(),
+                );
+            });
+
+            panel(&mut cols[1], "Provider Environment", |ui| {
+                Grid::new("readiness_provider_env")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        table_head(ui, &["Provider", "Adapter", "Key env", "Status"]);
+                        for (name, provider) in enabled_providers {
+                            ui.label(name);
+                            ui.label(&provider.adapter);
+                            ui.label(if provider.api_key_env.is_empty() {
+                                "-"
+                            } else {
+                                &provider.api_key_env
+                            });
+                            let status = if provider.adapter == "mock" {
+                                RichText::new("offline").color(accent())
+                            } else if provider.api_key_env.is_empty() {
+                                RichText::new("missing env name").color(bad())
+                            } else if std::env::var(&provider.api_key_env)
+                                .map(|v| !v.trim().is_empty())
+                                .unwrap_or(false)
+                            {
+                                RichText::new("ready").color(good())
+                            } else {
+                                RichText::new("env not set").color(warn())
+                            };
+                            ui.label(status);
+                            ui.end_row();
+                        }
+                    });
+            });
         });
     }
 
@@ -1046,7 +1278,11 @@ impl TokenOsNativeApp {
             panel(&mut cols[0], "Native Runtime", |ui| {
                 kv_row(ui, "UI", "egui/eframe native desktop");
                 kv_row(ui, "Control plane", "direct engine/store calls");
-                kv_row(ui, "Web server", "not started by tokenos app");
+                kv_row(
+                    ui,
+                    "HTTP listener",
+                    "retired; not available from tokenos app",
+                );
                 kv_row(
                     ui,
                     "Mode",
@@ -1126,7 +1362,7 @@ fn load_snapshot(engine: &Engine) -> Result<Snapshot> {
         routes: engine.store.stats_by_route()?,
         providers: engine.store.stats_by_provider()?,
         attempts: engine.store.stats_by_attempts(100)?,
-        api_stats: engine.store.stats_by_api_route(100)?,
+        request_stats: engine.store.stats_by_request_route(100)?,
         raw_attempts: engine.store.list_attempts(300)?,
         gen_ai: engine.store.stats_by_gen_ai()?,
         bandit: bandit_snapshot(engine),
@@ -1222,6 +1458,14 @@ fn route_batch(engine: &Engine, tasks: &[String], constraints: &[String]) -> Vec
         .enumerate()
         .map(|(idx, task)| {
             let (decision, _) = engine.route_only_with_constraints(task, constraints);
+            let costs = provider_cost_estimates(
+                engine,
+                decision.route,
+                decision.signals.estimated_tokens,
+                &engine.cfg.policy,
+            );
+            let estimated_provider_cost = costs.first().map(|c| c.estimated_cost_usd);
+            let budget_blocked = !costs.is_empty() && costs.iter().all(|c| c.over_budget);
             BatchRouteResult {
                 index: idx + 1,
                 task: task.clone(),
@@ -1229,10 +1473,59 @@ fn route_batch(engine: &Engine, tasks: &[String], constraints: &[String]) -> Vec
                 confidence: decision.signals.confidence,
                 estimated_tokens: decision.signals.estimated_tokens,
                 provider_chain: engine.cfg.provider_chain(decision.route.as_str()),
+                estimated_provider_cost,
+                budget_blocked,
                 reason: decision.reason,
             }
         })
         .collect()
+}
+
+fn provider_cost_estimates(
+    engine: &Engine,
+    route: Route,
+    estimated_input_tokens: usize,
+    policy: &RouterPolicy,
+) -> Vec<ProviderCostEstimate> {
+    if route.is_terminal_local() || route == Route::Reuse {
+        return Vec::new();
+    }
+    let output_tokens = route.max_output_tokens().max(0) as usize;
+    let mut estimates: Vec<_> = engine
+        .cfg
+        .provider_chain(route.as_str())
+        .into_iter()
+        .filter_map(|name| {
+            let provider = engine.cfg.providers.get(&name)?;
+            let estimated_cost_usd = (estimated_input_tokens as f64 * provider.cost_per_mtok_in
+                + output_tokens as f64 * provider.cost_per_mtok_out)
+                / 1_000_000.0;
+            Some(ProviderCostEstimate {
+                provider: name,
+                model: if provider.model.is_empty() {
+                    "default".to_string()
+                } else {
+                    provider.model.clone()
+                },
+                input_tokens: estimated_input_tokens,
+                output_tokens,
+                estimated_cost_usd,
+                over_budget: policy.max_cost_per_task_usd > 0.0
+                    && estimated_cost_usd > policy.max_cost_per_task_usd,
+            })
+        })
+        .collect();
+    estimates.sort_by(|a, b| {
+        a.over_budget
+            .cmp(&b.over_budget)
+            .then_with(|| {
+                a.estimated_cost_usd
+                    .partial_cmp(&b.estimated_cost_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then(a.provider.cmp(&b.provider))
+    });
+    estimates
 }
 
 fn parse_eval_items(input: &str) -> Result<Vec<EvalItem>> {
@@ -1451,6 +1744,19 @@ fn metric_card(ui: &mut Ui, label: &str, value: &str, highlighted: bool) {
         });
 }
 
+fn readiness_row(ui: &mut Ui, label: &str, ready: bool, detail: String) {
+    ui.horizontal_wrapped(|ui| {
+        let status = if ready {
+            RichText::new("READY").monospace().strong().color(good())
+        } else {
+            RichText::new("CHECK").monospace().strong().color(warn())
+        };
+        ui.add_sized([58.0, 22.0], egui::Label::new(status));
+        ui.label(RichText::new(label).strong());
+        ui.label(RichText::new(detail).small().color(muted()));
+    });
+}
+
 fn route_stats_table(ui: &mut Ui, routes: &[RouteStats]) {
     if routes.is_empty() {
         ui.label(RichText::new("No route telemetry yet.").color(muted()));
@@ -1587,6 +1893,8 @@ fn batch_results_table(ui: &mut Ui, rows: &[BatchRouteResult]) {
                     "Confidence",
                     "Tokens",
                     "Cost",
+                    "Provider Forecast",
+                    "Budget",
                     "Provider Chain",
                     "Task",
                     "Reason",
@@ -1598,6 +1906,16 @@ fn batch_results_table(ui: &mut Ui, rows: &[BatchRouteResult]) {
                 ui.label(pct(r.confidence));
                 ui.label(r.estimated_tokens.to_string());
                 ui.label(usd(r.route.cost()));
+                ui.label(
+                    r.estimated_provider_cost
+                        .map(usd)
+                        .unwrap_or_else(|| "$0.0000".to_string()),
+                );
+                ui.label(if r.budget_blocked {
+                    RichText::new("blocked").color(bad())
+                } else {
+                    RichText::new("ok").color(good())
+                });
                 ui.label(wrap(&r.provider_chain.join(" -> "), 34));
                 ui.label(wrap(&r.task, 42));
                 ui.label(RichText::new(wrap(&r.reason, 56)).color(muted()));
@@ -1607,12 +1925,12 @@ fn batch_results_table(ui: &mut Ui, rows: &[BatchRouteResult]) {
     });
 }
 
-fn api_stats_table(ui: &mut Ui, rows: &[ApiRequestStats]) {
+fn request_stats_table(ui: &mut Ui, rows: &[RequestStats]) {
     if rows.is_empty() {
-        ui.label(RichText::new("No web/API requests recorded yet.").color(muted()));
+        ui.label(RichText::new("No request aggregates recorded yet.").color(muted()));
         return;
     }
-    Grid::new("api_stats").striped(true).show(ui, |ui| {
+    Grid::new("request_stats").striped(true).show(ui, |ui| {
         table_head(
             ui,
             &[
@@ -1916,7 +2234,7 @@ fn policy_controls(ui: &mut Ui, policy: &mut RouterPolicy) {
     );
 }
 
-fn decision_panel(ui: &mut Ui, engine: &Engine, decision: &Decision) {
+fn decision_panel(ui: &mut Ui, engine: &Engine, decision: &Decision, policy: &RouterPolicy) {
     ui.horizontal(|ui| {
         route_pill(ui, decision.route);
         ui.label(
@@ -1930,7 +2248,62 @@ fn decision_panel(ui: &mut Ui, engine: &Engine, decision: &Decision) {
     ui.add_space(8.0);
     signal_grid(ui, &decision.signals);
     ui.add_space(8.0);
+    cost_forecast_table(
+        ui,
+        engine,
+        decision.route,
+        decision.signals.estimated_tokens,
+        policy,
+    );
+    ui.add_space(8.0);
     provider_chain_table(ui, engine, decision.route);
+}
+
+fn cost_forecast_table(
+    ui: &mut Ui,
+    engine: &Engine,
+    route: Route,
+    estimated_input_tokens: usize,
+    policy: &RouterPolicy,
+) {
+    let estimates = provider_cost_estimates(engine, route, estimated_input_tokens, policy);
+    ui.label(
+        RichText::new("Provider cost forecast")
+            .strong()
+            .color(muted()),
+    );
+    if estimates.is_empty() {
+        ui.label(RichText::new("No provider spend expected for this route.").color(good()));
+        return;
+    }
+    let all_blocked = estimates.iter().all(|e| e.over_budget);
+    if all_blocked {
+        error_box(
+            ui,
+            "Every enabled provider forecast exceeds the configured max cost per task.",
+        );
+    }
+    Grid::new("provider_cost_forecast")
+        .striped(true)
+        .show(ui, |ui| {
+            table_head(
+                ui,
+                &["Provider", "Model", "Input", "Output", "Forecast", "Budget"],
+            );
+            for estimate in estimates.iter().take(8) {
+                ui.label(&estimate.provider);
+                ui.label(wrap(&estimate.model, 22));
+                ui.label(estimate.input_tokens.to_string());
+                ui.label(estimate.output_tokens.to_string());
+                ui.label(usd(estimate.estimated_cost_usd));
+                ui.label(if estimate.over_budget {
+                    RichText::new("blocked").color(bad())
+                } else {
+                    RichText::new("ok").color(good())
+                });
+                ui.end_row();
+            }
+        });
 }
 
 fn signal_row(ui: &mut Ui, left: (&str, String), right: (&str, String)) {
@@ -2291,7 +2664,7 @@ mod tests {
     }
 
     #[test]
-    fn apgr_matches_web_eval_formula() {
+    fn apgr_matches_cli_eval_formula() {
         assert_eq!(apgr(0.5, 0.5), 0.0);
         assert!((apgr(0.75, 0.5) - 50.0).abs() < f64::EPSILON);
         assert_eq!(apgr(0.9, 1.0), 100.0);
@@ -2309,7 +2682,13 @@ mod tests {
         use crate::store::Store;
 
         let mut cfg = Config::default();
-        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        {
+            let mock = cfg.providers.get_mut("mock").unwrap();
+            mock.disabled = false;
+            mock.cost_per_mtok_in = 10.0;
+            mock.cost_per_mtok_out = 10.0;
+        }
+        cfg.policy.max_cost_per_task_usd = 0.000001;
         let arms: Vec<String> = cfg.providers.keys().cloned().collect();
         let engine = Engine {
             cfg,
@@ -2340,6 +2719,9 @@ mod tests {
         assert!(report.total_router_cost >= 0.0);
         assert_eq!(planned.len(), 2);
         assert!(planned.iter().all(|row| !row.task.is_empty()));
+        let costs = provider_cost_estimates(&engine, Route::Implement, 1000, &engine.cfg.policy);
+        assert!(!costs.is_empty());
+        assert!(costs.iter().all(|cost| cost.over_budget));
     }
 
     #[test]

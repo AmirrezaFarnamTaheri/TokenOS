@@ -1,169 +1,109 @@
 # TokenOS Security Model
 
-This document describes the threat model, the concrete hardening measures in
-the codebase, and the operational guidance for running TokenOS safely.
+This document describes the active threat model, local hardening measures, and
+operator responsibilities for TokenOS.
 
-## Threat model
+## Threat Model
 
-TokenOS sits between your workspace (potentially containing secrets) and
-third-party LLM providers (untrusted networks, logged requests). The kernel
-treats three surfaces as hostile:
+TokenOS sits between a local workspace and third-party LLM providers. The
+kernel treats these surfaces as hostile:
 
-1. **The outbound network path** — request URLs, proxies, provider logs.
-2. **The inbound web API** — anyone who can reach the dashboard port.
-3. **Model output** — unbounded, adversarial-shaped text fed into parsers.
+1. outbound network paths, provider logs, and proxies;
+2. model output, including malformed or adversarial-shaped text;
+3. local files and traces that may contain sensitive business content.
 
-TokenOS deliberately avoids several higher-risk orchestration patterns: it
-does not capture the user's screen, simulate OS input, modify IDE account
-databases, inject browser extensions, or run as a transparent raw-chat proxy.
-Provider calls leave the process only through the adapter layer after local
-routing, payload construction, and secret masking.
+The retired browser dashboard and HTTP API are not part of the active product.
+TokenOS does not ship an inbound listener, public web endpoint, browser
+extension, screen-control layer, or transparent raw-chat proxy.
 
-## 1. Secret protection
+## 1. Secret Protection
 
-### Edge secret masking (`maskcodec`)
+### Edge Secret Masking
 
-Every outbound prompt is scanned **before any byte leaves the process** for:
+Every outbound prompt is scanned before network egress for:
 
-- API keys and bearer tokens (provider-specific and generic patterns)
-- Private-key PEM blocks
-- Passwords and connection strings
-- Email addresses and IP addresses
+- API keys and bearer tokens;
+- private-key PEM blocks;
+- passwords and connection strings;
+- email addresses and IP addresses.
 
-Matches are replaced with stable placeholders; if the model echoes a
-placeholder, the response leg restores the original value. Properties:
+Matches are replaced with stable placeholders. If the model echoes a
+placeholder, the response leg restores the original value at the caller
+boundary. The reverse vault lives only in the request stack frame and is never
+persisted or shared.
 
-- The reverse vault (placeholder → secret) lives **only in the request's
-  stack frame** — it is never persisted, logged, or shared across requests.
-- Benign IP-like strings (e.g. version numbers) use a U+2024 sentinel
-  scan-past technique; a guard disables the sentinel trick entirely when the
-  input already contains U+2024, so pre-existing characters survive
-  masking verbatim.
+### API Keys
 
-### API keys
+- Keys are read only from environment variables named by config.
+- Config files store env-var names, not secret values.
+- Gemini authenticates with `X-Goog-Api-Key`, never a query-string key.
+- Provider requests leave the process only through the adapter layer after
+  routing, payload construction, and masking.
 
-- Keys are read **only** from environment variables (`api_key_env` names the
-  variable; the value never enters the config file).
-- `GET /api/config` returns the env-var *name*, never the value.
-- **No API keys in URLs**: the Gemini adapter authenticates via the
-  `X-Goog-Api-Key` request header, never the query string, so keys cannot
-  leak into access logs, proxies, or tracing systems.
+## 2. Native App Boundary
 
-## 2. Web API hardening
+`tokenos app` is a native egui/eframe application:
 
-### Bind policy
+- direct `Arc<Engine>` calls for preview and execution;
+- direct SQLite reads for telemetry and health;
+- no HTTP server;
+- no loopback bind;
+- no browser launch;
+- no webview shell.
 
-- Default bind is loopback (`127.0.0.1`).
-- Binding a non-loopback interface requires the explicit `--public` flag
-  **and** is refused unless a bearer token is configured. You cannot
-  accidentally expose an unauthenticated dashboard.
+This removes the former inbound web API threat class from the shipped UI.
+Programmatic integrations should embed the library crate and provide their own
+transport, identity, authorization, and audit boundary.
 
-### Bearer authentication
+## 3. Parser And Algorithm Safety
 
-- When a token is set (`--auth-token` / `$TOKENOS_AUTH_TOKEN`), every
-  `/api/*` request must present `Authorization: Bearer <token>`.
-- Comparison is **constant-time** — equality is computed over all bytes
-  regardless of where a mismatch occurs, closing the timing side channel.
-- Static assets bypass auth (they contain no data); every data endpoint
-  enforces it.
-- `security.api_token_rate_limit_per_min` enables a shared SQLite-backed
-  per-token request ledger. Tokens are hashed before storage, and multiple
-  TokenOS processes using the same DB coordinate this API request limit.
-- The embedded dashboard includes a bearer-token dialog. By default the token
-  is held in memory; users may opt into `sessionStorage` for the current browser
-  tab. The token is then injected by the single `fetch` wrapper for every
-  `/api/*` call.
+- Routing and masking regexes use Rust `regex`, which is linear-time and does
+  not support catastrophic backtracking.
+- Loop detection caps inputs before edit-distance comparison and uses Myers'
+  bit-parallel algorithm.
+- The JSON rescuer accepts repairs only when parsing consumes the full input;
+  prose that merely starts with JSON punctuation is returned untouched.
+- SQLite access uses prepared statements with bound parameters.
 
-### Request handling
+## 4. Data At Rest
 
-- Request bodies are strictly typed; malformed JSON returns `400` with a
-  descriptive error, never a panic.
-- `/api/run` is wrapped in a server-side timeout (`504` on expiry) so a hung
-  provider cannot pin a connection forever.
-- `/api/run` also has per-process backpressure: at most four executions run at
-  once. Additional run requests return `429` without entering provider code,
-  while telemetry and route-preview endpoints remain available.
-- Handlers are lock-free (`Arc<Engine>`, no global mutex) — a slow execution
-  cannot be used to starve health/telemetry endpoints.
-- HTTP/API request telemetry is aggregate-only. It stores method, normalized
-  path, status, count, latency summaries, and last-seen time; it does not store
-  request bodies, bearer tokens, authorization headers, query strings, or
-  per-request records.
-
-## 3. Parser and algorithm safety
-
-### ReDoS immunity
-
-All routing and masking regexes use the Rust `regex` crate, which compiles
-to finite automata with **linear-time matching** — catastrophic backtracking
-is not part of this regex engine's execution model.
-
-### Bounded Levenshtein
-
-Loop-detection comparisons cap input at 20k characters, keeping the
-quadratic-worst-case pass CPU-bounded even on enormous generations. The
-inner loop is Myers' bit-parallel algorithm (Hyyrö 2003 multiword), ~64×
-faster than the naive DP.
-
-### JSON rescuer guard
-
-The truncated-JSON rescuer is a single-pass lenient parser with an
-EOF-consumption guard: it only accepts a repair if parsing consumed the
-entire input. Prose that merely *starts* with a bracket is returned
-untouched — adversarial output cannot trick the rescuer into fabricating
-structured data from non-JSON.
-
-### SQL
-
-All SQLite access goes through `rusqlite` prepared statements with bound
-parameters — no string-built SQL anywhere in the codebase.
-
-## 4. Data at rest
-
-| Artifact | Location | Contents |
+| Artifact | Default location | Contents |
 |---|---|---|
-| State DB | `~/.local/share/tokenos/tokenos.db` | Task states, final execution telemetry, provider attempt ledger and aggregates, API request aggregates, failure memory, loop windows, trace metadata, verified solution cache |
-| Flight recorder | `~/.local/state/tokenos/traces` | NDJSON event journals + SHA-256 content-addressed payload blobs |
-| Config | `~/.config/tokenos/config.yaml` | Profiles and policy — **never keys** |
+| State DB | `~/.local/share/tokenos/tokenos.db` | Task states, execution telemetry, provider attempts, aggregates, failure memory, loop windows, trace metadata, solution cache |
+| Flight recorder | `~/.local/state/tokenos/traces` | NDJSON journals and SHA-256 content-addressed payload blobs |
+| Config | `~/.config/tokenos/config.yaml` | Profiles and policy, never key values |
 
-Note that flight-recorder blobs contain full prompts/responses (post-masking
-on the outbound side). Treat the traces directory with the same sensitivity
-as application logs: secrets are masked, but business content is present.
-Set `$TOKENOS_TRACES` to a suitably protected path in shared environments.
+Flight-recorder blobs contain masked prompts/responses but may still include
+sensitive business context. Protect traces and the state database as
+application data. Use OS disk encryption or a deployment-specific encrypted
+storage layer when required.
 
-The verified solution cache stores only replayable verified outputs. If a
-response still contains an opaque `SECRET` placeholder after masking, the output
-is safe to keep in traces but is not admitted to the cache because the reverse
-vault is request-scoped and cannot reconstruct the value later.
+The verified solution cache admits only replayable verified outputs. Outputs
+that still contain opaque secret placeholders are not cached.
 
-## 5. Supply chain
+## 5. Supply Chain
 
-- SQLite is **bundled** (`rusqlite` with the `bundled` feature) — no system
-  library version skew.
-- The dashboard has **zero frontend dependencies** — no CDN, no npm, no
-  third-party scripts. All assets are embedded in the binary at compile time
-  (`include_str!`), so the served UI is exactly what was reviewed at build
-  time.
+- SQLite is bundled through `rusqlite`.
+- The native UI uses egui/eframe and avoids webview/browser embedding.
+- The retired Axum browser-control module and explicit web-control
+  dependencies have been removed from the active manifest. Provider adapters
+  still use `reqwest` for outbound network calls.
+- `cargo audit` is part of the release gate.
 
-## 6. Operational checklist
+## 6. Operational Checklist
 
-- [ ] Run with the default loopback bind unless remote access is required.
-- [ ] Prefer `tokenos app` for local desktop use when built with
-      `--features native`; it uses direct native engine/store calls and does
-      not start the web server or expose a listener.
-- [ ] If exposing remotely: set a strong `$TOKENOS_AUTH_TOKEN`, use
-      `--public` deliberately, and use either native HTTPS
-      (`--tls-cert`/`--tls-key`) or a TLS-terminating reverse proxy.
-- [ ] Configure `security.api_token_rate_limit_per_min` for shared/public API
-      deployments where multiple processes may use the same DB.
-- [ ] Keep provider keys in env vars managed by your secret store; never
-      commit them.
-- [ ] Point `$TOKENOS_TRACES` and `$TOKENOS_DB` at appropriately
-      permissioned directories in multi-user environments.
-- [ ] Review `tokenos providers` after config changes to confirm the filter
-      matrix admits only the models you intend to pay for.
+- [ ] Keep provider keys in environment variables managed by a secret store or
+      secured shell environment.
+- [ ] Protect `$TOKENOS_DB` and `$TOKENOS_TRACES` with owner-only permissions
+      in shared environments.
+- [ ] Run `tokenos providers` after config changes to confirm model filters.
+- [ ] Run `tokenos doctor` before live use to verify local store health.
+- [ ] Use `tokenos route` or the native Run Console preview before paid runs.
+- [ ] Stage live provider compatibility and spend limits before production use.
+- [ ] Add monitoring, backups, restore testing, and incident procedures for any
+      operational deployment.
 
 ## Reporting
 
-If you discover a security issue, please open a private security advisory on
-the GitHub repository rather than a public issue.
+Report security issues through a private GitHub security advisory rather than a
+public issue.

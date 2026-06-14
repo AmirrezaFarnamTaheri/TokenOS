@@ -12,13 +12,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-
-tokio::task_local! {
-    pub static CURRENT_TOKEN_HASH: String;
-}
 
 /// Wraps the SQLite handle. A fine-grained internal mutex serializes writes
 /// (SQLite requirement) without ever being held across network I/O.
@@ -178,14 +173,8 @@ CREATE TABLE IF NOT EXISTS drift_ratios (
     updated_at  TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS api_token_usage (
-    token_hash   TEXT NOT NULL,
-    scope        TEXT NOT NULL,
-    window_start INTEGER NOT NULL,
-    count        INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (token_hash, scope, window_start)
-);
-
+-- Legacy table name retained for migration compatibility. Active callers use
+-- generic native/embedded request aggregate APIs.
 CREATE TABLE IF NOT EXISTS api_request_stats (
     method           TEXT NOT NULL,
     path             TEXT NOT NULL,
@@ -973,12 +962,11 @@ impl Store {
     // -----------------------------------------------------------------
 
     pub fn record_execution(&self, e: &Execution) -> Result<()> {
-        let token_hash = CURRENT_TOKEN_HASH.try_with(|h| h.clone()).ok();
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"INSERT INTO executions (task_id, route, provider, model, tokens_in, tokens_out,
-                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, verification_tier, created_at, token_hash)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"#,
+                latency_ms, retries, verification_cost, delegation_count, est_cost_usd, success, verification_tier, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"#,
             params![
                 e.task_id,
                 e.route,
@@ -994,24 +982,9 @@ impl Store {
                 e.success as i64,
                 e.verification_tier,
                 Utc::now().to_rfc3339(),
-                token_hash,
             ],
         )?;
         Ok(())
-    }
-
-    /// Sums the estimated USD cost of executions associated with a specific token hash
-    /// since the given UTC timestamp.
-    pub fn get_api_token_spend_since(&self, token_hash: &str, since: DateTime<Utc>) -> Result<f64> {
-        let conn = self.conn.lock().unwrap();
-        let since_str = since.to_rfc3339();
-        let spend: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(est_cost_usd), 0.0) FROM executions
-             WHERE token_hash = ?1 AND created_at >= ?2",
-            params![token_hash, since_str],
-            |r| r.get(0),
-        )?;
-        Ok(spend)
     }
 
     pub fn list_executions(&self, limit: usize) -> Result<Vec<Execution>> {
@@ -1120,36 +1093,9 @@ impl Store {
         Ok(total)
     }
 
-    /// Records one API-token request in a shared SQLite minute bucket.
-    /// Returns false when the configured per-token per-minute limit is full.
-    pub fn record_api_token_use(
-        &self,
-        token: &str,
-        scope: &str,
-        limit_per_min: u32,
-    ) -> Result<bool> {
-        if limit_per_min == 0 {
-            return Ok(true);
-        }
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let token_hash = hex::encode(hasher.finalize());
-        let now = Utc::now().timestamp();
-        let window_start = now - (now % 60);
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            r#"INSERT INTO api_token_usage (token_hash, scope, window_start, count)
-               VALUES (?1, ?2, ?3, 1)
-               ON CONFLICT(token_hash, scope, window_start) DO UPDATE SET count = count + 1
-               WHERE count < ?4"#,
-            params![token_hash, scope, window_start, limit_per_min as i64],
-        )?;
-        Ok(changed > 0)
-    }
-
-    /// Aggregates HTTP control-plane requests without storing request bodies,
-    /// authorization headers, query strings, or per-request rows.
-    pub fn record_api_request(
+    /// Aggregates native or embedded host requests without storing request
+    /// bodies, credentials, query strings, or per-request rows.
+    pub fn record_request_aggregate(
         &self,
         method: &str,
         path: &str,
@@ -1254,11 +1200,7 @@ impl Store {
             "DELETE FROM execution_attempts WHERE created_at < ?1",
             params![cutoff],
         )?;
-        let api_usage_deleted = conn.execute(
-            "DELETE FROM api_token_usage WHERE window_start < ?1",
-            params![(Utc::now() - chrono::Duration::days(retention_days as i64)).timestamp()],
-        )?;
-        let api_stats_deleted = conn.execute(
+        let request_stats_deleted = conn.execute(
             "DELETE FROM api_request_stats WHERE last_seen_at < ?1",
             params![cutoff],
         )?;
@@ -1269,8 +1211,7 @@ impl Store {
             + loops_deleted
             + cache_deleted
             + attempts_deleted
-            + api_usage_deleted
-            + api_stats_deleted)
+            + request_stats_deleted)
     }
 
     pub fn get_daily_spend(&self) -> Result<Vec<DailySpend>> {
@@ -1354,7 +1295,7 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub fn stats_by_api_route(&self, limit: usize) -> Result<Vec<ApiRequestStats>> {
+    pub fn stats_by_request_route(&self, limit: usize) -> Result<Vec<RequestStats>> {
         let limit = if limit == 0 { 50 } else { limit.min(500) };
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -1367,7 +1308,7 @@ impl Store {
             let count = r.get::<_, i64>(3)?.max(0);
             let total_latency_us = r.get::<_, i64>(4)?.max(0);
             let max_latency_us = r.get::<_, i64>(5)?.max(0);
-            Ok(ApiRequestStats {
+            Ok(RequestStats {
                 method: r.get(0)?,
                 path: r.get(1)?,
                 status: r.get::<_, i64>(2)? as u16,
@@ -1461,10 +1402,8 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        let api_request_stats: i64 =
+        let request_stats: i64 =
             conn.query_row("SELECT COUNT(1) FROM api_request_stats", [], |r| r.get(0))?;
-        let api_token_usage: i64 =
-            conn.query_row("SELECT COUNT(1) FROM api_token_usage", [], |r| r.get(0))?;
         let drift_ratios: i64 =
             conn.query_row("SELECT COUNT(1) FROM drift_ratios", [], |r| r.get(0))?;
         Ok(StoreHealth {
@@ -1477,8 +1416,7 @@ impl Store {
             traces,
             solution_cache,
             solution_cache_hits,
-            api_request_stats,
-            api_token_usage,
+            request_stats,
             drift_ratios,
         })
     }
@@ -1663,9 +1601,9 @@ pub struct ProviderStats {
     pub total_tokens: i64,
 }
 
-/// Aggregated HTTP control-plane request telemetry.
+/// Aggregated native or embedded host request telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiRequestStats {
+pub struct RequestStats {
     pub method: String,
     pub path: String,
     pub status: u16,
@@ -1713,8 +1651,7 @@ pub struct StoreHealth {
     pub traces: i64,
     pub solution_cache: i64,
     pub solution_cache_hits: i64,
-    pub api_request_stats: i64,
-    pub api_token_usage: i64,
+    pub request_stats: i64,
     pub drift_ratios: i64,
 }
 
@@ -2100,19 +2037,19 @@ mod tests {
     }
 
     #[test]
-    fn api_request_stats_aggregate() {
+    fn request_stats_aggregate() {
         let s = mem();
-        s.record_api_request("GET", "/api/summary", 200, 1_000)
+        s.record_request_aggregate("NATIVE", "dashboard.summary", 200, 1_000)
             .unwrap();
-        s.record_api_request("GET", "/api/summary", 200, 3_000)
+        s.record_request_aggregate("NATIVE", "dashboard.summary", 200, 3_000)
             .unwrap();
-        s.record_api_request("POST", "/api/run", 429, 5_000)
+        s.record_request_aggregate("NATIVE", "console.execute", 429, 5_000)
             .unwrap();
 
-        let stats = s.stats_by_api_route(10).unwrap();
+        let stats = s.stats_by_request_route(10).unwrap();
         let summary = stats
             .iter()
-            .find(|r| r.method == "GET" && r.path == "/api/summary" && r.status == 200)
+            .find(|r| r.method == "NATIVE" && r.path == "dashboard.summary" && r.status == 200)
             .unwrap();
         assert_eq!(summary.count, 2);
         assert!((summary.avg_latency_ms - 2.0).abs() < 1e-9);
@@ -2120,7 +2057,7 @@ mod tests {
 
         let run = stats
             .iter()
-            .find(|r| r.method == "POST" && r.path == "/api/run" && r.status == 429)
+            .find(|r| r.method == "NATIVE" && r.path == "console.execute" && r.status == 429)
             .unwrap();
         assert_eq!(run.count, 1);
     }
@@ -2140,7 +2077,7 @@ mod tests {
         .unwrap();
         s.record_attempt("t1", "mock", "mock-1", "DIRECT", 1, 1, 2, true, "", 0.0)
             .unwrap();
-        s.record_api_request("GET", "/api/summary", 200, 1_000)
+        s.record_request_aggregate("NATIVE", "dashboard.summary", 200, 1_000)
             .unwrap();
         s.cache_solution("k1", "DIRECT", "answer", "static", "k1")
             .unwrap();
@@ -2151,7 +2088,7 @@ mod tests {
         assert_eq!(health.tasks, 1);
         assert_eq!(health.executions, 1);
         assert_eq!(health.execution_attempts, 1);
-        assert_eq!(health.api_request_stats, 1);
+        assert_eq!(health.request_stats, 1);
         assert_eq!(health.solution_cache, 1);
         assert_eq!(health.solution_cache_hits, 1);
     }

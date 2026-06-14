@@ -1,13 +1,12 @@
-# Getting Started with TokenOS
+# Getting Started With TokenOS
 
-This guide takes you from a fresh clone to a running dashboard in about five
-minutes — entirely offline first, then with live providers.
+This guide takes you from a fresh clone to an offline run, native desktop app,
+and optional live provider execution.
 
 ## Prerequisites
 
-- **Rust ≥ 1.75** (`rustup` recommended). That's it — SQLite is bundled, the
-  dashboard has zero frontend dependencies, and there are no system
-  libraries to install.
+- Rust 1.75 or newer (`rustup` recommended).
+- No system SQLite install is required; SQLite is bundled.
 
 ## 1. Build
 
@@ -15,88 +14,61 @@ minutes — entirely offline first, then with live providers.
 git clone https://github.com/AmirrezaFarnamTaheri/TokenOS.git
 cd TokenOS
 cargo build --release
-# binary: target/release/tokenos
 ```
 
-Optionally run the test suite (a few seconds, fully offline):
+Optional native desktop build:
 
 ```sh
-cargo test
+cargo build --release --features native
 ```
 
-## 2. First run — completely offline
+## 2. First Run - Completely Offline
 
-TokenOS ships with a fault-injectable **mock provider**, so you can exercise
-the entire pipeline without an API key or network access:
+TokenOS ships with a fault-injectable mock provider, so the full pipeline can
+run without an API key or network access.
 
 ```sh
-# Write the default config (~/.config/tokenos/config.yaml)
 ./target/release/tokenos config init
-
-# Preview a routing decision — deterministic, free, no LLM involved
 ./target/release/tokenos route "fix typo in README"
-
-# Execute through the full pipeline against the mock
 ./target/release/tokenos run "say hello" --dry-run
 ```
 
-`route` shows you the kernel's decision ladder output: the chosen route, the
-reason, extracted signals, token estimates, and the provider failover chain.
-Nothing is spent until you `run` without `--dry-run` against a live provider.
+`route` shows the selected route, reason, confidence, estimated tokens, and
+provider chain. Nothing is spent until a live provider is enabled and `run` is
+used without `--dry-run`.
 
-## 3. Inspect what happened
-
-```sh
-./target/release/tokenos tasks                 # persisted task states
-./target/release/tokenos trace <task-id>       # flight-recorder timeline
-./target/release/tokenos telemetry             # cost-per-success + bandit standings
-./target/release/tokenos attempts              # provider legs, including failed failovers
-./target/release/tokenos doctor                # local config/store/trace health
-```
-
-Every decision, prompt, and response was recorded out-of-band — debugging
-never consumes context tokens.
-
-## 4. Launch the dashboard
+## 3. Inspect What Happened
 
 ```sh
-./target/release/tokenos serve --port 8080 --dry-run
-# open http://127.0.0.1:8080
+./target/release/tokenos tasks
+./target/release/tokenos trace <task-id>
+./target/release/tokenos attempts
+./target/release/tokenos telemetry
+./target/release/tokenos doctor
 ```
 
-The control panel gives you:
+Every decision, prompt, response, rescue, verification event, and error is
+recorded out-of-band so debugging does not consume context tokens.
 
-- **Dashboard** — cost-per-success KPI, route distribution, provider health,
-  system health, attempt aggregates, live UCB1 bandit standings
-- **Run Console** — free route preview, then execute
-  (keyboard: `Ctrl+Enter` to execute, `Ctrl+Shift+Enter` to preview,
-  keys `1`–`5` switch views)
-- **Tasks / Executions** — persisted state, final execution rows, and provider
-  attempt legs
-- **Configuration** — read-only effective config
-
-If you start the dashboard with `--auth-token` or expose it with `--public`,
-click **API token** in the sidebar and enter the bearer token. The dashboard
-then attaches `Authorization: Bearer ...` to every API request. Tokens are
-kept in memory unless you explicitly remember them for the current browser tab.
-
-Prefer the native desktop app instead of the browser dashboard:
+## 4. Launch The Native Desktop App
 
 ```sh
 cargo build --release --features native
 ./target/release/tokenos app --dry-run
 ```
 
-`tokenos app` is a native egui/eframe application. It does not start the web
-server, bind a loopback port, open a browser, or embed a webview. It includes
-dashboard telemetry, route preview/execution, bulk route planning, policy
-simulation, route calibration, operational stats, task traces, executions,
-provider attempts, and configuration views through direct engine and SQLite
-calls.
+The native app is an egui/eframe desktop application with direct engine and
+SQLite integration. It includes dashboard telemetry, route preview and
+execution, provider cost forecasts, bulk route planning, policy simulation,
+route calibration, operational stats, task traces, executions, provider
+attempts, and configuration views.
 
-## 5. Connect a live provider
+The retired browser dashboard and HTTP API are not part of the active product.
+No loopback listener or browser tab is started by `tokenos app`.
 
-1. Export the key (env vars only — keys never touch disk):
+## 5. Connect A Live Provider
+
+1. Export the provider key:
 
    ```sh
    export ANTHROPIC_API_KEY=sk-ant-...
@@ -107,10 +79,10 @@ calls.
    ```yaml
    providers:
      anthropic:
-       disabled: false        # flip this
+       disabled: false
    ```
 
-3. Verify the filter matrix admits the models you expect:
+3. Verify model filters:
 
    ```sh
    ./target/release/tokenos providers
@@ -122,28 +94,23 @@ calls.
    ./target/release/tokenos run "summarize the routing module" --workspace .
    ```
 
-`--workspace .` builds a structural symbol index over your codebase so the
-prompt carries the *minimum viable context* (≤ 2000 tokens) instead of whole
-files.
+`--workspace .` builds a structural symbol index so prompts carry minimum
+viable context instead of whole files.
 
-## 6. Good habits
+## 6. Good Habits
 
-- **Preview before paying.** `tokenos route "<task>"` is always free and
-  tells you exactly what a run would do.
-- **Watch cost-per-success.** `tokenos telemetry` surfaces the headline
-  metric the whole kernel optimizes.
-- **Use constraints.** `--constraints "a; b; c"` feeds the verifier and the
-  payload builder; repeated failures on a goal automatically forbid the
-  failed approach.
-- **Keep the dashboard local.** If you must expose it, set
-  `TOKENOS_AUTH_TOKEN`, enter that token in the dashboard's API-token dialog,
-  and read [SECURITY.md](SECURITY.md) first.
+- Preview before paying with `tokenos route "<task>"`.
+- Watch cost per successful task with `tokenos telemetry` or the native app.
+- Use constraints; they feed the verifier and payload builder.
+- Keep provider keys in environment variables managed by your shell or secret
+  store.
+- Protect `$TOKENOS_DB` and `$TOKENOS_TRACES` as application data.
 
-## Next steps
+## Next Steps
 
-- [CLI.md](CLI.md) — every command and flag
-- [CONFIGURATION.md](CONFIGURATION.md) — every config field
-- [ARCHITECTURE.md](ARCHITECTURE.md) — how the kernel works inside
-- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) — release gates and deployment boundary
-- [SECURITY.md](SECURITY.md) — safe local and remote operation
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — when something looks wrong
+- [CLI.md](CLI.md) - every command and flag
+- [CONFIGURATION.md](CONFIGURATION.md) - every config field
+- [ARCHITECTURE.md](ARCHITECTURE.md) - how the kernel works inside
+- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) - release gates
+- [SECURITY.md](SECURITY.md) - safe operation
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - when something looks wrong

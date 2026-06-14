@@ -1,173 +1,186 @@
 # TokenOS Troubleshooting Guide
 
-Symptoms, causes, and fixes — roughly in the order you're likely to hit them.
+Symptoms, causes, and fixes.
 
-## Build issues
+## Build Issues
 
 ### `error: package ... requires rustc 1.75 or newer`
 
-Update your toolchain: `rustup update stable`.
+Update Rust:
+
+```sh
+rustup update stable
+```
 
 ### Linker errors mentioning `sqlite3`
 
-You shouldn't see these — SQLite is bundled (`rusqlite` `bundled` feature).
-If you do, run `cargo clean && cargo build`; a stale build cache from a
-different feature set is the usual culprit.
-
-## Configuration issues
-
-### "config not found" or defaults being used unexpectedly
-
-Resolution order is: `--config` flag → `$TOKENOS_CONFIG` → 
-`~/.config/tokenos/config.yaml`. Check which one is winning:
+SQLite is bundled through `rusqlite`. If this appears, clean stale artifacts:
 
 ```sh
-tokenos config        # prints the effective merged configuration
+cargo clean
+cargo build
 ```
 
-### My provider never gets selected
+### `tokenos app` is unavailable
 
-Work through this checklist:
+The native app is feature-gated:
 
-1. **Is it enabled?** `disabled: false` in the profile.
-2. **Is the key present?** The env var named in `api_key_env` must be set in
-   the shell that launches tokenos.
-3. **Does the filter matrix admit the model?** Run `tokenos providers` —
-   remember **exclusion always wins**, and a non-empty `include` list is a
-   strict whitelist.
-4. **Is there a routing rule for the route?** Check `execution_routing` —
-   the route printed by `tokenos route "<task>"` must appear in some rule's
-   `route_types`, or the provider must survive the default shadow-priced
-   ordering.
-5. **Does the context fit?** Providers whose `max_context_tokens` can't hold
-   the payload are excluded from the chain entirely.
+```sh
+cargo build --release --features native
+./target/release/tokenos app --dry-run
+```
 
-### `tokenos config init` says the file already exists
+Default builds still include the CLI and library.
 
-By design — `init` never overwrites. Move or delete the old file first.
+## Configuration Issues
 
-## Routing surprises
+### Config not found or defaults are unexpected
+
+Resolution order is `--config` flag, `$TOKENOS_CONFIG`, then
+`~/.config/tokenos/config.yaml`.
+
+```sh
+tokenos config
+```
+
+### Provider never gets selected
+
+Check:
+
+1. `disabled: false` in the provider profile.
+2. The env var named by `api_key_env` is set in the launching shell.
+3. `tokenos providers` admits the configured model.
+4. The route appears in `routing` or survives shadow pricing.
+5. The provider context window can fit the payload.
+
+### `tokenos config init` says the file exists
+
+`init` never overwrites. Move the old file or pass a different `--config`.
+
+## Routing Surprises
 
 ### Everything routes to ASK
 
-The confidence signal is below `ask_threshold` (default 0.35). Either the
-task genuinely lacks critical information (the kernel asks exactly one
-question and stops — at zero cost), or your tasks are very terse. Add
-specifics, or lower `policy.ask_threshold`.
+The confidence signal is below `policy.ask_threshold`, or the task lacks
+critical information. ASK is local: one question, no provider, no tokens.
 
-### A task I expect to be DIRECT routes to IMPLEMENT
+### DIRECT routes to IMPLEMENT
 
-`DIRECT` requires the **conservative** token estimate (max of the calibrated
-heuristic and a greedy BPE count) to be ≤ `policy.direct_max_tokens`
-(default 600). The conservative counter deliberately never under-estimates,
-so borderline tasks fall through to `IMPLEMENT`. Raise the policy value if
-your workload skews trivial.
+`DIRECT` requires the conservative estimate to fit
+`policy.direct_max_tokens`. The estimator deliberately avoids undercounting.
 
-### PATCH suddenly stopped being offered for a goal
+### PATCH stopped being offered
 
-That goal has failure memory: a previous similar failure was recorded, the
-approach is now forbidden, and routing is biased away from `PATCH`. This is
-intentional — see the failure entries with `tokenos trace <task-id>`.
+Failure memory exists for that goal. Inspect the trace and attempts:
 
-### ESCALATE-EXTERNAL: "semantic loop"
+```sh
+tokenos trace <task-id>
+tokenos attempts --limit 20
+```
 
-The last outputs for this goal were ≥ 97% similar (normalized Levenshtein
-< 3%). The window is **persisted in SQLite**, so this fires even across
-separate CLI invocations. It means the system is genuinely stuck — change
-the approach or constraints rather than retrying the same prompt.
+### ESCALATE-EXTERNAL: semantic loop
 
-## Execution issues
+Recent outputs for the same goal were too similar. Change the approach or
+constraints rather than retrying the same prompt.
+
+## Execution Issues
 
 ### `all providers failed`
 
-Check the attempt ledger first:
+Start with:
 
 ```sh
 tokenos attempts --limit 20
 tokenos telemetry
+tokenos trace <task-id>
 ```
 
-`tokenos attempts` shows each provider leg, including failed failover attempts,
-latency, cost estimate, and classified error. `tokenos telemetry` shows whether
-the failures are isolated to one provider-route pair or systemic. Then inspect
-the trace: `tokenos trace <task-id>` shows the detailed flight-recorder events.
 Common causes:
 
-- Expired/missing API key (auth errors are terminal, not retried)
-- Quota exhaustion — if `quota_limit_per_min` is set, pressure discounts the
-  provider before hard failure
-- Network egress blocked — verify with the mock: `--dry-run` should succeed
+- missing or expired key;
+- provider quota exhaustion;
+- model filter excludes the configured model;
+- provider context window too small;
+- network egress blocked.
 
-### Output looks like repaired JSON I didn't ask for
+Use `--dry-run` to verify the local pipeline independently of provider access.
 
-The JSON rescuer only activates when the task or constraints mention
-"json" (case-insensitive) **and** the output parses as truncated JSON
-consuming the whole input. Rescues are logged as `rescue` events in the
-trace. If you see one, the model's output really was cut mid-stream.
+### Output looks like repaired JSON
 
-### Latency spikes on first call per provider
+The JSON rescuer only activates for JSON-intent tasks or constraints and only
+accepts full-input repairs. Rescues are recorded as trace events.
 
-Connection establishment plus a cold prompt cache. The payload builder's
-byte-stable static prefix means subsequent calls hit the provider's prompt
-cache; the bandit also learns latency and reorders failover accordingly.
+### First provider call is slow
 
-## Dashboard issues
+Initial connection setup and cold prompt caches are expected. Later calls use
+the payload builder's stable static prefix and bandit latency learning.
 
-### "connecting…" never turns green
+## Native App Issues
 
-The frontend polls `/api/summary`. Check:
+### App opens but data is empty
 
-- Is the server actually up? (`tokenos serve` prints the bind address.)
-- Auth: if a token is configured, click **API token** in the sidebar and enter
-  the same bearer token used to start the server. The dashboard then attaches
-  it to all `/api/*` requests.
-
-### `--host 0.0.0.0` is refused
-
-Binding non-loopback requires both `--public` **and** an auth token
-(`--auth-token` or `$TOKENOS_AUTH_TOKEN`). This is a guardrail, not a bug.
-
-### Dashboard loads but every panel says 401
-
-The static shell can load without auth, but every `/api/*` data call still
-requires the bearer token when auth is configured. Click **API token** in the
-sidebar, enter the same token used to start the server, and retry the panel. If
-it still fails, clear the token and re-enter it; wrong tokens are rejected with
-the same `401` shape as missing tokens.
-
-### Bandit panel says "unexplored" everywhere
-
-Bandit state is **per-process** and learns from live executions in the
-serving process. Run some tasks from the Run Console and the standings fill
-in. CLI runs in a different process won't appear in the server's panel.
-
-### Stats look stale
-
-The dashboard auto-refreshes every 5 seconds while the tab is visible (it
-deliberately pauses when hidden to save resources). Switch views or refocus
-the tab to force an immediate refresh.
-
-## State and storage
-
-### I want a clean slate
+Run:
 
 ```sh
-rm ~/.local/share/tokenos/tokenos.db        # tasks, telemetry, failure memory, loop windows
-rm -r ~/.local/state/tokenos/traces         # flight recorder
+tokenos doctor
+tokenos telemetry
 ```
 
-(Or point `$TOKENOS_DB` / `$TOKENOS_TRACES` at fresh paths.)
+The app reads the same SQLite database as the CLI. If you pass `--db` or
+`TOKENOS_DB` to one surface, pass the same path to the other.
 
-### Where did my trace blobs go?
+### Readiness says live keys are missing
 
-`tokenos trace <id>` shows the event timeline; add `--blobs` to print full
-payload contents. Raw blobs live under the traces directory in `objects/`,
-keyed by SHA-256.
+The provider is enabled but the env var named by `api_key_env` is not set in
+the process that launched the app. Start the app from a shell with the key set,
+or use your OS launch mechanism to inject environment variables.
 
-## Still stuck?
+### Readiness warns about spend ceiling
+
+For live mode, configure at least one spend guard:
+
+```yaml
+policy:
+  max_cost_per_task_usd: 0.05
+security:
+  daily_spend_limit_usd: 5.0
+  monthly_spend_limit_usd: 50.0
+```
+
+### Native app does not expose an HTTP endpoint
+
+Correct. The browser dashboard and HTTP API are retired. Use CLI commands,
+native views, or library embedding.
+
+## State And Storage
+
+### Clean slate
+
+Remove or redirect the state paths:
+
+```sh
+rm ~/.local/share/tokenos/tokenos.db
+rm -r ~/.local/state/tokenos/traces
+```
+
+On Windows, delete the equivalent paths or set `$TOKENOS_DB` and
+`$TOKENOS_TRACES` to fresh locations.
+
+### Trace blobs are missing
+
+Run:
+
+```sh
+tokenos trace <task-id> --blobs
+```
+
+If traces are disabled in config, future payload blobs will not be recorded.
+
+## Still Stuck
 
 Open an issue with:
 
-1. `tokenos --version` / `rustc --version`
-2. The `tokenos route "<task>"` output (free, deterministic, shareable)
-3. The relevant `tokenos trace <task-id>` timeline (redact business content)
+1. `tokenos --version` and `rustc --version`;
+2. `tokenos doctor --json`;
+3. `tokenos route "<task>"`;
+4. relevant `tokenos trace <task-id>` output with business content redacted.

@@ -23,4 +23,3 @@ pub mod recorder;
 pub mod store;
 pub mod tokenizer;
 pub mod verify;
-pub mod webui;

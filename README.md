@@ -1,229 +1,166 @@
-# TokenOS — Token-Optimal Agent Execution Kernel
+# TokenOS - Token-Optimal Agent Execution Kernel
 
-A deterministic execution kernel for LLM-driven agents, written in native Rust.
-Its single governing rule:
+TokenOS is a deterministic execution kernel for LLM-driven agents, written in
+native Rust. Its governing rule:
 
-> **Never spend more resources deciding than the decision can save.**
+> Never spend more resources deciding than the decision can save.
 
-Routing, verification, loop detection, context selection, and provider choice are
-all done **in code, with zero tokens** — the model is only invoked for work that
-actually requires generation.
+Routing, verification, loop detection, context selection, provider choice, and
+cost forecasting are done locally in Rust. Provider tokens are spent only when
+generation is actually required.
 
-## Headline metric
+## Native-First Status
 
-**Effective Cost Per Successful Task** — surfaced in `tokenos telemetry` and on the
-dashboard. Everything in the kernel exists to drive this number down.
+TokenOS now ships as:
 
-## Quick start
+- a native desktop app (`tokenos app`, feature `native`);
+- a CLI binary for local automation;
+- an embeddable Rust library crate.
 
-```sh
-cargo build --release                          # no system deps; SQLite is bundled
-./target/release/tokenos config init           # write default config
-./target/release/tokenos route "fix typo"      # FREE routing preview — zero tokens
-./target/release/tokenos run "say hello" --dry-run   # full pipeline, fully offline
-./target/release/tokenos serve --dry-run       # dashboard at http://127.0.0.1:8080
-```
+The former browser dashboard, embedded static assets, Axum HTTP API, and
+`tokenos serve` command are retired. There is no shipped loopback server,
+browser control plane, webview shell, or `/api/*` surface in the active product.
 
-Prefer a desktop app over a browser dashboard?
+## Quick Start
 
 ```sh
-cargo build --release --features native        # enables the egui/eframe desktop UI
-./target/release/tokenos app --dry-run         # native dashboard, no browser or loopback server
+cargo build --release
+./target/release/tokenos config init
+./target/release/tokenos route "fix typo"
+./target/release/tokenos run "say hello" --dry-run
 ```
 
-No API key is needed for any of the above — the fault-injectable mock provider
-exercises the entire pipeline offline. See
-[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the five-minute tour.
+Build and launch the native desktop app:
+
+```sh
+cargo build --release --features native
+./target/release/tokenos app --dry-run
+```
+
+No API key is needed for the offline path. The mock provider exercises routing,
+payload construction, verification, recording, and telemetry without network
+access or provider spend.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Clone → offline run → dashboard → live providers |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dataflow, module invariants, routing ladder, bandit, persistence |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every YAML field, the filter matrix, env overrides |
-| [docs/CLI.md](docs/CLI.md) | Full command and flag reference with workflows |
-| [docs/API.md](docs/API.md) | HTTP API endpoints, shapes, auth, curl cookbook |
-| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, masking, auth, parser safety, ops checklist |
-| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Release gates, component readiness, deployment boundary |
-| [docs/RISK_ACCEPTANCE.md](docs/RISK_ACCEPTANCE.md) | Accepted/external production risks and operator actions |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
-| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Ground rules, testing conventions, PR checklist |
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Clone, offline run, native app, live providers |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Dataflow, module invariants, routing ladder, persistence |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | YAML fields, model filters, provider policy |
+| [docs/CLI.md](docs/CLI.md) | Command and flag reference |
+| [docs/API.md](docs/API.md) | Retired HTTP API notice and native/CLI replacements |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, masking, storage, operator controls |
+| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Release gates and production boundary |
+| [docs/RISK_ACCEPTANCE.md](docs/RISK_ACCEPTANCE.md) | External controls and accepted operator-owned risks |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom, cause, fix |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Engineering rules and validation checklist |
 
 ## Architecture
 
-```
+```text
 src/
-  lib.rs               Library crate root (kernel embeddable in other runtimes)
-  main.rs              CLI (clap), web dashboard entrypoint, native app dispatch
-  kernel.rs            Deterministic router: route ladder, signals, policy, state, delegation packet
-  config.rs            YAML config, provider chains, two-tier model filter matrix
-  engine.rs            Orchestrator: route → context → payload → failover → verify → record
-  provider.rs          Adapters: mock (fault-injectable), OpenAI, Anthropic, Gemini, proxy-IDE
-  pricing.rs           Shadow pricing U = confidence/(α·cost + β·latency) + EWMA + lock-free UCB1 bandit
-  payload.rs           JIT cache-aligned prompt builder (static → semi-static → volatile)
-  verify.rs            Tiered verification: free static checks before any LLM call
-  tokenizer.rs         Offline token estimator + greedy BPE counter (conservative budgeting)
-  jsonrescue.rs        Single-pass truncated-JSON rescuer (EOF as soft boundary)
-  maskcodec.rs         Edge secret-masking codec (mask outbound, unmask echoes)
-  loopdetect.rs        Semantic loop detection: Myers bit-parallel Levenshtein, 3% ceiling
-  contextidx.rs        Surgical context: structural symbol index (FTS5, LIKE fallback)
-  store.rs             SQLite state store: tasks, failures, loops, executions, attempts, API stats, traces, cache
-  recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON journals)
-  webui.rs             Lock-free axum control panel (dashboard, run console, traces, bandit, config)
-  nativeapp.rs         Feature-gated native egui desktop UI backed by direct engine/store calls
-static/                Embedded dashboard assets (index.html, app.js, style.css)
+  lib.rs        Library crate root for embedding TokenOS in other runtimes
+  main.rs       CLI and native app dispatch
+  kernel.rs     Deterministic router: route ladder, signals, policy, state
+  config.rs     YAML config, provider chains, model filter matrix
+  engine.rs     Orchestrator: route -> context -> payload -> failover -> verify -> record
+  provider.rs   Mock, OpenAI, Anthropic, Gemini, and proxy-compatible adapters
+  pricing.rs    Shadow pricing, quota pressure, drift, UCB1 provider bandit
+  payload.rs    JIT cache-aligned prompt builder
+  verify.rs     Free static verification before paid work is accepted
+  tokenizer.rs  Conservative offline token estimator
+  jsonrescue.rs Single-pass truncated-JSON rescuer
+  maskcodec.rs  Edge secret masking and request-scoped unmasking
+  loopdetect.rs Semantic loop detection with persisted windows
+  contextidx.rs Structural symbol index for minimum viable context
+  store.rs      SQLite state, telemetry, attempts, traces, and cache metadata
+  recorder.rs   Content-addressed flight recorder
+  nativeapp.rs  Feature-gated egui/eframe desktop UI
 ```
 
-### The routing ladder (execution priority)
+## Native Desktop App
 
-| Priority | Route | Trigger |
-|---|---|---|
-| 0 | `ESCALATE-CONFLICT/SAFETY/EXTERNAL` | Contradictions, safety violations, loops |
-| 1 | `ASK` | Missing critical info or confidence < 0.35 — exactly one local question |
-| 2 | `DIRECT` | Trivial task, est. tokens ≤ 600 — answer immediately |
-| 3 | `REUSE` | Exact verified solution-cache hit for the same goal + constraints |
-| 4 | `PATCH` | Localized change, no repeated failure — minimal diff |
-| 5 | `PARTIAL` | External blocker — deliver everything completed |
-| 6 | `DELEGATE` | Repetitive + bounded + savings exceed delegation penalty |
-| 7 | `IMPLEMENT` | Default productive path |
+`tokenos app` is a native egui/eframe application. It calls the Rust engine and
+SQLite store directly. It does not start an HTTP server, bind a loopback port,
+open a browser, or embed a webview.
 
-Escalations and ASK terminate locally at **zero LLM cost**.
+The native app includes:
 
-### Key mechanisms
+- dashboard KPIs: cost per successful task, estimated savings, success rate,
+  total tokens, route effectiveness, provider health, spend, and store health;
+- run console with free route preview, extracted routing signals, provider
+  chain diagnostics, provider cost forecast, budget sentinel status, and
+  execution output;
+- route planner for pasted task backlogs with route mix, provider demand,
+  confidence, token estimates, forecast provider spend, budget blocks, and
+  all-IMPLEMENT baseline savings;
+- policy lab for simulating ASK threshold, DIRECT token ceiling, delegation
+  economics, budget sentinel, semantic cache threshold, cascade limits,
+  re-ask limit, cache reuse, and learned-routing fallback;
+- calibration workbench for YAML/JSON labeled route datasets, APGR, savings,
+  mismatch analysis, and ASK-threshold sweeps;
+- operations views for circuit breakers, estimator drift, solution-cache
+  counters, OpenTelemetry GenAI rollups, provider attempts, tasks, executions,
+  and flight-recorder traces.
 
-- **Two-tier model filter matrix** — per-provider `include`/`exclude` wildcard lists;
-  exclusion always wins, then non-empty include acts as whitelist, else allow.
-- **Shadow pricing** — every candidate provider is quoted
-  `U = confidence / (α·cost·1000 + β·latency)`, discounted by failure-EWMA and live
-  quota pressure; hard context-window constraint; deterministic tie-breaking.
-- **Failure memory** — max 5 entries per task; a repeated similar failure forbids the
-  same approach and biases routing away from `PATCH`.
-- **JIT cache alignment** — payloads are serialized static-first with a byte-stable
-  kernel contract so provider prompt caches hit on every call.
-- **Loop detection** — normalized Levenshtein distance over a sliding window of 5
-  outputs; distance < 3% ⇒ semantic loop ⇒ escalate. The window is **persisted in
-  SQLite**, so loops are detected across cold CLI process invocations.
-- **Surgical context** — workspace parsed into structural symbols (Go, Python,
-  JS/TS, Rust, Java, C, Ruby) and queried for the minimum viable context
-  (≤ 2000 tokens) instead of shipping whole files. Context informs prompts; it
-  does **not** imply `REUSE`.
-- **Verified solution cache** — only verified, replayable outputs are admitted.
-  Exact goal+constraint replays return zero-token cached results; outputs that
-  still contain opaque secret placeholders are deliberately not cached.
-- **Flight recorder** — every decision, prompt, and response is content-addressed
-  (SHA-256) outside the conversation and indexed in SQLite, so debugging never
-  consumes context tokens and trace events remain queryable.
-- **Provider attempt ledger** — every provider leg is queryable and aggregated,
-  including failed failover attempts, verification failures, loop-escalation
-  attempts, and successful final legs. Surfaced through `tokenos attempts`,
-  `tokenos telemetry`, `/api/attempts`, `/api/stats/attempts`, and the
-  dashboard. Startup health hydration replays attempts first, then falls back
-  to final execution rows for older databases.
-- **Tiered verification** — free static checks (diff shape for PATCH, single-question
-  contract for ASK, brace balance, truncation detection) run before anything costs.
-- **UCB1 bandit failover** — a lock-free multi-armed bandit over the provider
-  fleet scales each shadow-priced utility by live observed evidence
-  (`0.5 + mean_reward` for explored arms; neutral `1.0` for unexplored arms so
-  shadow pricing alone decides and every arm is still explored). Verified
-  successes earn latency-discounted reward; transport failures and
-  verification failures earn zero. Standings surface in `tokenos telemetry`,
-  `/api/stats/bandit`, and the dashboard.
-- **Truncated-JSON rescue** — when the goal demands JSON, a generation cut
-  mid-stream (timeout, token limit) is repaired by a single-pass lenient parser
-  instead of being discarded: strings cut at EOF keep their partial contents,
-  dangling keys are dropped, open containers are closed. A truncation guard
-  refuses to "repair" prose that merely starts with a bracket. Every rescue is
-  logged to the flight recorder at zero token cost.
-- **Conservative token budgeting** — routing estimates take the max of the
-  calibrated chars/token heuristic and a greedy longest-match BPE segmenter, so
-  a route is never selected on an underestimate.
-- **Delegation packets** — `DELEGATE` routes transmit a minimal JSON contract
-  (task, scope, constraints, acceptance, next step) — conclusions only, no
-  history, no reasoning.
-- **Edge secret masking** — outbound prompts are scanned for API keys,
-  tokens, private-key blocks, passwords, connection strings, emails and IPs;
-  secrets are replaced with stable placeholders before any network byte leaves
-  the process, and echoes are restored on the response leg. The reverse vault
-  lives only in the request's stack frame.
-- **Verified solution cache** — an exact goal+constraints re-request is
-  served from a durable SQLite cache at **zero tokens**. Only verified
-  successes are admitted; a later failure of the same goal evicts the entry.
-  Toggle with `policy.reuse_cache`.
-- **Rate-limit circuit breaker** — a 429 opens a per-provider breaker
-  with exponential backoff (5s → 120s cap); failover skips the provider while
-  the breaker is open. Retrying a provider that just said "stop" is
-  almost always wasted work.
-- **Route-scoped output budgets** — each route caps the output tokens it
-  may request: an ASK is one question (256), a PATCH is a minimal diff (2048),
-  only full builds get the wide ceiling (4096). Paying for headroom a route's
-  contract cannot use is pure waste.
-- **Context distillation** — the context block is distilled before
-  transmission: trailing whitespace stripped, blank-line runs collapsed,
-  duplicate index headers dropped (code lines are never deduplicated).
-  Deterministic and idempotent, so prompt-cache alignment is preserved.
-- **Budget sentinel** — `policy.max_cost_per_task_usd` sets a hard
-  per-task ceiling. Over-budget providers are pruned from the chain; if every
-  candidate exceeds the ceiling the run terminates locally at zero token cost.
-- **Estimator drift watchdog** — an EWMA of actual÷estimated token
-  ratios per provider flags calibration drift outside the trusted band
-  [0.75, 1.30]. Surfaced in `tokenos telemetry`, `/api/stats/drift`, and the
-  dashboard's Estimator Calibration panel.
-- **Durable API surface telemetry** — the control plane aggregates method,
-  normalized path, status, count, average latency, and max latency in SQLite.
-  Surfaced at `/api/stats/api` and in the dashboard without storing request
-  bodies, auth headers, or per-request rows.
-
-## Build
-
-Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
+## CLI
 
 ```sh
-cargo build --release        # binary at target/release/tokenos
-cargo test                   # offline unit tests across all subsystems
-cargo fmt --all -- --check   # blocking in CI
-cargo clippy --all-targets -- -D warnings
-```
-
-The optional **native desktop app** (`tokenos app`) is feature-gated so
-headless/server builds stay lean:
-
-```sh
-cargo build --release --features native
-```
-
-The app is an egui/eframe desktop surface. It calls the Rust engine and SQLite
-store directly, so it does not bind a loopback port, open a browser, run Axum,
-or embed a webview. Active CI lives in `.github/workflows/ci.yml`; it checks
-formatting, clippy, audit, release build, tests, and native binaries for
-Linux/macOS/Windows, and attaches binaries to tagged releases.
-
-The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
-kernel can be embedded inside other agent runtimes.
-
-## Usage
-
-```sh
-tokenos config init                       # write default config (~/.config/tokenos/config.yaml)
-tokenos route "fix typo in README"        # FREE routing preview (no LLM call)
-tokenos run "task" --dry-run              # full pipeline against the offline mock
-tokenos run "task" --workspace .          # surgical context from your codebase
-tokenos providers                         # filter-matrix verdicts per provider
-tokenos telemetry                         # cost-per-success + per-route stats
-tokenos doctor                            # local config/store/trace health
-tokenos attempts                          # failed/successful provider legs
-tokenos tasks                             # persisted task states
-tokenos trace <task-id> --blobs           # flight-recorder timeline + payloads
-tokenos index . --query "auth token"      # build & probe the symbol index
-tokenos serve --port 8080 --dry-run       # web control panel
-tokenos app --dry-run                     # native desktop UI, no browser
+tokenos config init
+tokenos route "fix typo in README"
+tokenos run "task" --dry-run
+tokenos run "task" --workspace .
+tokenos providers
+tokenos telemetry
+tokenos doctor
+tokenos attempts
+tokenos tasks
+tokenos trace <task-id> --blobs
+tokenos index . --query "auth token"
+tokenos eval --dataset ./routes.yaml
+tokenos app --dry-run
 ```
 
 API keys are read from environment variables only (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `GEMINI_API_KEY` by default) and are **never** written to disk
-or exposed over the web API.
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY` by default) and are never written to the
+config file.
 
-### Configuration
+## Key Mechanisms
+
+- **Routing ladder**: conflict, safety, external blockers, ASK, DIRECT, REUSE,
+  PATCH, DELEGATE, PARTIAL, and IMPLEMENT are selected deterministically.
+- **ASK is local**: missing critical information produces one local question,
+  zero provider/model, zero tokens, and zero cost.
+- **Verified solution cache**: exact goal+constraint replays return cached,
+  verified outputs at zero tokens.
+- **Surgical context**: workspace symbols are indexed and distilled to minimum
+  viable context instead of sending whole files.
+- **Secret masking**: outbound prompts are masked before network egress;
+  unmasking happens only at the caller boundary.
+- **Provider failover**: shadow pricing, quota pressure, failure EWMA, UCB1
+  evidence, and budget ceilings determine provider order.
+- **Provider attempt ledger**: every provider leg is recorded, including failed
+  failover attempts and verification failures.
+- **Estimator drift watchdog**: actual/estimated token ratios are tracked and
+  surfaced in CLI and native operations views.
+- **Flight recorder**: decision, prompt, response, rescue, verify, and error
+  events are stored out-of-band as content-addressed diagnostics.
+
+## Build And Validation
+
+Requires Rust 1.75 or newer. SQLite is bundled through `rusqlite`.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
+cargo build --release --locked --features native
+cargo audit
+```
+
+## Configuration
 
 `~/.config/tokenos/config.yaml` (override with `$TOKENOS_CONFIG`):
 
@@ -234,8 +171,8 @@ policy:
   direct_max_tokens: 600
   delegation_penalty: 1500
   delegation_min_scale: 1.5
-  max_cost_per_task_usd: 0   # budget sentinel; 0 = disabled
-  reuse_cache: true          # verified solution cache
+  max_cost_per_task_usd: 0
+  reuse_cache: true
 providers:
   anthropic:
     adapter: anthropic
@@ -244,84 +181,35 @@ providers:
     priority: 1
     models:
       include: ["claude-*"]
-      exclude: ["*-haiku-*"]     # exclusion always wins
+      exclude: ["*-haiku-*"]
 routing:
   - route: IMPLEMENT
     provider: anthropic
     fallback: [openai, mock]
 ```
 
-Other env overrides: `$TOKENOS_DB` (state database), `$TOKENOS_TRACES` (flight
-recorder directory).
+Other environment overrides: `$TOKENOS_DB` for state and `$TOKENOS_TRACES` for
+flight-recorder storage.
 
-## Security & concurrency properties
+## Security Properties
 
-- **No API keys in URLs** — the Gemini adapter authenticates via the
-  `X-Goog-Api-Key` request header, never the query string, so secrets cannot
-  leak into access logs, proxies, or tracing systems.
-- **Lock-free web handlers** — the dashboard shares an `Arc<Engine>` with no
-  global mutex; long-running `/api/run` executions never block telemetry reads.
-- **ReDoS-immune heuristics** — all routing regexes compile to finite automata
-  (Rust `regex` crate): linear-time matching, no catastrophic backtracking.
-- **Bounded Levenshtein** — loop comparisons cap input at 20k chars, keeping the
-  quadratic pass CPU-bounded on huge generations.
+- Provider secrets stay in environment variables and request headers, never
+  URLs or config files.
+- No inbound HTTP listener ships in the active app.
+- SQLite access uses prepared statements with bound parameters.
+- Regex heuristics use Rust's linear-time `regex` engine.
+- Loop detection caps compared text before edit-distance work.
+- Trace blobs contain masked prompts/responses but should still be protected as
+  sensitive application logs.
 
-## Web control panel
+## Design Principles
 
-`tokenos serve` embeds a zero-dependency GUI:
-
-- **Dashboard** — cost-per-success KPI, route distribution, per-provider stats,
-  system health, attempt health, live UCB1 bandit standings (`/api/stats/bandit`)
-- **Run console** — free route preview (signals + provider chain + token estimates)
-  before committing to a paid execution
-- **Tasks** — persisted state with flight-recorder trace timeline per task
-- **Executions** — final execution rows plus the provider-attempt ledger
-- **Configuration** — read-only view (keys stay in env)
-
-Keyboard-first: views on keys `1`–`5`, `Ctrl+Enter` executes,
-`Ctrl+Shift+Enter` previews the route for free. Zero frontend dependencies —
-all assets are embedded in the binary at compile time.
-
-Full endpoint reference: [docs/API.md](docs/API.md).
-
-### Native desktop app
-
-`tokenos app` (build feature `native`) starts a real desktop UI:
-
-- native egui/eframe shell with dashboard, run console, bulk route planner,
-  policy simulator, route calibration, operations telemetry, task browser,
-  execution browser, provider stats, attempt aggregates, spend chart, and
-  configuration readout
-- no Axum control plane, no loopback listener, no bearer-token browser handoff,
-  and no browser launch
-- direct `Arc<Engine>` integration for route preview and execution; direct
-  store reads for telemetry and health snapshots
-- native parity for the web dashboard's high-value operational surfaces:
-  provider-chain diagnostics, routing signals, UCB1 bandit standings,
-  estimator drift/cache counters, circuit-breaker state, API stats,
-  OpenTelemetry GenAI rollups, provider-attempt ledger, and flight-recorder
-  task traces
-- zero-cost bulk Route Planner for pasting task backlogs and seeing route mix,
-  provider demand, estimated route cost, savings versus an all-IMPLEMENT
-  baseline, confidence, token estimates, and provider chains before execution
-- zero-cost Policy Lab for tuning ASK threshold, DIRECT token ceiling,
-  delegation economics, budget sentinel, semantic cache threshold, cascade
-  limits, re-ask limit, cache reuse, and learned-routing fallback against one
-  scenario without writing config or contacting providers
-- calibration workbench for YAML/JSON labeled route datasets, including weak
-  baseline, APGR, savings, mismatch breakdown, and ASK-threshold sweep
-- a background Tokio runtime handles long-running executions without freezing
-  the UI
-- `tokenos serve` remains the separate web dashboard/API entrypoint for
-  browser or remote-control workflows
-
-## Design principles
-
-1. Decisions are made in code, not in prompts.
-2. State lives in SQLite, not in conversation history.
-3. Diagnostics live in the flight recorder, not in the context window.
+1. Decisions are made in code, not prompts.
+2. State lives in SQLite, not conversation history.
+3. Diagnostics live in the flight recorder, not the context window.
 4. Every free check runs before every paid check.
-5. Determinism everywhere: same inputs ⇒ same route, same provider order, same payload bytes.
+5. Same inputs produce the same route, provider ordering baseline, and payload
+   bytes.
 
 ## License
 

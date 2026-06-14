@@ -23,12 +23,6 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
-axum = "0.7"
-hyper = { version = "1", features = ["http1", "http2", "server"] }
-hyper-util = { version = "0.1", features = ["http1", "http2", "server", "tokio"] }
-tokio-rustls = "0.26"
-tower-http = { version = "0.6", features = ["timeout", "catch-panic"] }
-base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 regex = "1"
@@ -43,9 +37,6 @@ eframe = { version = "0.34.3", optional = true, default-features = false, featur
 default = []
 # `cargo build --release --features native` -> enables the native desktop UI.
 native = ["dep:eframe"]
-
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "thin"

@@ -10,11 +10,9 @@ TokenOS reads a single YAML document. Every field has a sensible default —
 | Config file | `~/.config/tokenos/config.yaml` | `$TOKENOS_CONFIG` env var or `--config <path>` flag |
 | State database | `~/.local/share/tokenos/tokenos.db` | `$TOKENOS_DB` env var or `--db <path>` flag |
 | Flight recorder dir | `~/.local/state/tokenos/traces` | `$TOKENOS_TRACES` env var or `--traces <path>` flag |
-| Web auth token | — | `$TOKENOS_AUTH_TOKEN` env var or `--auth-token <tok>` flag |
 
 API keys are read **only** from environment variables (named per provider in
-`api_key_env`). They are never written to disk and never returned by the
-config API.
+`api_key_env`). They are never written to disk or printed by `tokenos config`.
 
 ## Top-level document
 
@@ -222,7 +220,7 @@ execution_routing:
 
 ## `security` — security & governance policies
 
-Configures traces retention, spend limits, and scoped API tokens.
+Configures trace retention and local spend limits.
 
 ```yaml
 security:
@@ -231,22 +229,15 @@ security:
   owner_only_permissions: true    # enforces owner-only (0o600/0o700) file permissions on Unix
   daily_spend_limit_usd: 0.0      # daily cost ceiling; 0 disables
   monthly_spend_limit_usd: 0.0    # monthly cost ceiling; 0 disables
-  api_token_rate_limit_per_min: 60 # shared SQLite-backed per-token API request limit; 0 disables
-  api_tokens:
-    read_only_token_abc: ["read"]
-    runner_token_xyz: ["run", "read"]
-    admin_token_123: ["admin"]
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `disable_traces` | bool | `false` | If true, trace files are not written to disk. |
-| `retention_days` | int | `30` | Auto-pruning window for loop history, final execution telemetry, provider attempts, API aggregates, verified cache entries, and traces on startup. |
+| `retention_days` | int | `30` | Auto-pruning window for loop history, final execution telemetry, provider attempts, request aggregates, verified cache entries, and traces on startup. |
 | `owner_only_permissions` | bool | `true` | Enforces owner-only file permissions on traces and state files. |
 | `daily_spend_limit_usd` | float | `0.0` | Saturated daily spend blocks further execution; 0 disables. |
 | `monthly_spend_limit_usd` | float | `0.0` | Saturated monthly spend blocks further execution; 0 disables. |
-| `api_token_rate_limit_per_min` | int | `0` | Per-token API request ceiling per minute. Counts are stored by SHA-256 token hash in SQLite, so multiple TokenOS processes sharing the same DB coordinate this limit. |
-| `api_tokens` | map | `{}` | Map of API bearer token to list of authorized scopes (`read`, `run`, `admin`). |
 
 ---
 

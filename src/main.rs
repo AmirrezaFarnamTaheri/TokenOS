@@ -5,9 +5,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use std::sync::Arc;
 use tokenos::engine::{Engine, Options};
-use tokenos::{config, contextidx, provider, recorder, store, webui};
+use tokenos::{config, contextidx, provider, recorder, store};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -136,31 +135,6 @@ enum Command {
         #[command(flatten)]
         engine: EngineFlags,
     },
-    /// Launch the web control panel
-    Serve {
-        /// Listen port
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-        /// Listen host (loopback by default; see --public)
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// Explicitly allow binding a non-loopback interface.
-        /// Refused unless an auth token is also configured.
-        #[arg(long)]
-        public: bool,
-        /// Bearer token required on every /api/* request.
-        /// Falls back to the TOKENOS_AUTH_TOKEN environment variable.
-        #[arg(long)]
-        auth_token: Option<String>,
-        /// PEM certificate file for native HTTPS serving.
-        #[arg(long)]
-        tls_cert: Option<String>,
-        /// PEM private key file for native HTTPS serving.
-        #[arg(long)]
-        tls_key: Option<String>,
-        #[command(flatten)]
-        engine: EngineFlags,
-    },
     /// Run routing-accuracy evaluation over a labeled dataset
     Eval {
         /// Labeled dataset path
@@ -201,7 +175,7 @@ fn main() {
         #[cfg(feature = "native")]
         {
             let result = build_engine(ef)
-                .map(Arc::new)
+                .map(std::sync::Arc::new)
                 .and_then(tokenos::nativeapp::run_app);
             if let Err(e) = result {
                 eprintln!("error: {}", e);
@@ -214,8 +188,7 @@ fn main() {
             let _ = ef;
             eprintln!(
                 "error: this binary was built without the native desktop shell.\n\
-                 rebuild with: cargo build --release --features native\n\
-                 (or use the browser dashboard: tokenos serve)"
+                 rebuild with: cargo build --release --features native"
             );
             std::process::exit(1);
         }
@@ -554,12 +527,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     store_health["quick_check"].as_str().unwrap_or("unknown")
                 );
                 println!(
-                    "rows          tasks={} executions={} attempts={} traces={} api_stats={}",
+                    "rows          tasks={} executions={} attempts={} traces={} request_stats={}",
                     store_health["tasks"],
                     store_health["executions"],
                     store_health["execution_attempts"],
                     store_health["traces"],
-                    store_health["api_request_stats"]
+                    store_health["request_stats"]
                 );
                 println!(
                     "cache         entries={} hits={}",
@@ -678,79 +651,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let cfg = config::Config::load(cfg_path.as_deref().map(std::path::Path::new))?;
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
-        }
-        Command::Serve {
-            port,
-            host,
-            public,
-            auth_token,
-            tls_cert,
-            tls_key,
-            engine: ef,
-        } => {
-            // The dashboard binds loopback by default.
-            // A non-loopback bind requires BOTH --public and an auth token so
-            // an unauthenticated control plane can never face a network.
-            // An empty token ("") authenticates nothing — treat it as absent
-            // from BOTH sources so `--public --auth-token ""` is rejected the
-            // same way as a missing token.
-            let token = auth_token.filter(|t| !t.is_empty()).or_else(|| {
-                std::env::var("TOKENOS_AUTH_TOKEN")
-                    .ok()
-                    .filter(|t| !t.is_empty())
-            });
-            let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
-            if !loopback {
-                if !public {
-                    return Err(anyhow!(
-                        "refusing to bind non-loopback host {:?} without --public                          (the dashboard can trigger paid API executions)",
-                        host
-                    ));
-                }
-                if token.is_none() {
-                    return Err(anyhow!(
-                        "--public requires an auth token: pass --auth-token or set                          TOKENOS_AUTH_TOKEN"
-                    ));
-                }
-                eprintln!(
-                    "WARNING: dashboard exposed on {host}:{port}; bearer auth is ENFORCED on /api/*"
-                );
-            }
-            let eng = Arc::new(build_engine(&ef)?);
-            let tls_paths = match (tls_cert, tls_key) {
-                (Some(cert), Some(key)) => Some((cert, key)),
-                (None, None) => None,
-                _ => {
-                    return Err(anyhow!(
-                        "--tls-cert and --tls-key must be provided together"
-                    ))
-                }
-            };
-            println!(
-                "TokenOS control panel listening on {}://{}:{} (dry-run={}, auth={})",
-                if tls_paths.is_some() { "https" } else { "http" },
-                host,
-                port,
-                ef.dry_run,
-                if token.is_some() {
-                    "on"
-                } else {
-                    "off (loopback only)"
-                }
-            );
-            if let Some((cert, key)) = tls_paths {
-                webui::serve_tls(
-                    eng,
-                    &host,
-                    port,
-                    token,
-                    std::path::Path::new(&cert),
-                    std::path::Path::new(&key),
-                )
-                .await
-            } else {
-                webui::serve(eng, &host, port, token).await
-            }
         }
         Command::Eval {
             dataset,
