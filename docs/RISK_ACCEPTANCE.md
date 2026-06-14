@@ -12,7 +12,7 @@ infrastructure.
 |---|---|---|
 | C-01 | Native UI without webview advisories | `native` builds use egui/eframe with direct engine/store calls. Webview dependencies are not used. |
 | C-02 | Browser dashboard retirement | `tokenos serve`, `src/webui.rs`, `static/`, and direct web-control dependencies have been removed. Provider adapters still use `reqwest` and its transitive HTTP stack. |
-| C-03 | Native readiness workflow | The native app includes a Readiness panel for SQLite health, provider keys, spend ceilings, trace policy, cache policy, and retired HTTP boundary. |
+| C-03 | Native readiness and action workflow | The native app includes Readiness and Action Center panels for SQLite health, provider keys, spend ceilings, trace policy, cache policy, retired HTTP boundary, provider failures, estimator drift, and next operator actions. |
 | C-04 | Provider cost forecast | Native route preview, batch planning, and policy simulation surface forecast provider spend and budget blocks before execution. |
 | C-05 | Retired audit/report artifacts | Production guidance is maintained in `README.md` and `docs/`. |
 

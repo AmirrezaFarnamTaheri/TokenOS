@@ -58,10 +58,11 @@ cargo build --release --features native
 ```
 
 The native app is an egui/eframe desktop application with direct engine and
-SQLite integration. It includes dashboard telemetry, route preview and
-execution, provider cost forecasts, bulk route planning, policy simulation,
-route calibration, operational stats, task traces, executions, provider
-attempts, and configuration views.
+SQLite integration. It includes dashboard telemetry, an Action Center with
+prioritized operator actions, route preview and execution, provider cost
+forecasts, bulk route planning, policy simulation, route calibration,
+operational stats, task traces, executions, provider attempts, and
+configuration views.
 
 The retired browser dashboard and HTTP API are not part of the active product.
 No loopback listener or browser tab is started by `tokenos app`.

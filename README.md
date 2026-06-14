@@ -89,6 +89,9 @@ The native app includes:
 
 - dashboard KPIs: cost per successful task, estimated savings, success rate,
   total tokens, route effectiveness, provider health, spend, and store health;
+- action center with prioritized operator actions synthesized from readiness,
+  spend guards, credential state, provider failures, drift, cache settings, and
+  recent attempts;
 - run console with free route preview, extracted routing signals, provider
   chain diagnostics, provider cost forecast, budget sentinel status, and
   execution output;

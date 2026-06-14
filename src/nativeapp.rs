@@ -63,6 +63,7 @@ pub fn run_app(engine: Arc<Engine>) -> Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Dashboard,
+    ActionCenter,
     Console,
     Planner,
     PolicyLab,
@@ -78,6 +79,7 @@ impl View {
     fn label(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
+            Self::ActionCenter => "Action Center",
             Self::Console => "Run Console",
             Self::Planner => "Route Planner",
             Self::PolicyLab => "Policy Lab",
@@ -128,6 +130,21 @@ struct BreakerView {
     calls_in_window: usize,
     status: String,
     consecutive_429s: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ActionSeverity {
+    Info,
+    Watch,
+    Critical,
+}
+
+#[derive(Debug, Clone)]
+struct ActionItem {
+    severity: ActionSeverity,
+    title: String,
+    detail: String,
+    next_step: String,
 }
 
 struct RunMessage {
@@ -386,6 +403,7 @@ impl TokenOsNativeApp {
         ui.add_space(8.0);
         for view in [
             View::Dashboard,
+            View::ActionCenter,
             View::Console,
             View::Planner,
             View::PolicyLab,
@@ -421,6 +439,7 @@ impl TokenOsNativeApp {
             .auto_shrink([false, false])
             .show(ui, |ui| match self.view {
                 View::Dashboard => self.dashboard(ui),
+                View::ActionCenter => self.action_center(ui),
                 View::Console => self.console(ui),
                 View::Planner => self.planner(ui),
                 View::PolicyLab => self.policy_lab(ui),
@@ -443,9 +462,17 @@ impl TokenOsNativeApp {
             error_box(ui, err);
         }
         if let Some(sum) = &self.snapshot.summary {
+            let actions = action_items(&self.engine, &self.snapshot);
             metric_grid(
                 ui,
                 &[
+                    (
+                        "Action Items",
+                        actions.len().to_string(),
+                        !actions
+                            .iter()
+                            .any(|a| a.severity == ActionSeverity::Critical),
+                    ),
                     ("Cost / Success", usd(sum.cost_per_success), true),
                     ("Estimated Savings", usd(sum.savings_usd), true),
                     ("Total Cost", usd(sum.total_cost_usd), false),
@@ -460,6 +487,7 @@ impl TokenOsNativeApp {
                     ("Avg Latency", ms(sum.avg_latency_ms), false),
                 ],
             );
+            panel(ui, "Action Center", |ui| action_preview(ui, &actions));
         }
 
         ui.columns(2, |cols| {
@@ -501,6 +529,96 @@ impl TokenOsNativeApp {
         });
         panel(ui, "Provider Attempt Aggregates", |ui| {
             attempt_stats_table(ui, &self.snapshot.attempts)
+        });
+    }
+
+    fn action_center(&mut self, ui: &mut Ui) {
+        heading(
+            ui,
+            "Action Center",
+            "prioritized operational work from readiness, spend, drift, and provider health",
+        );
+        let actions = action_items(&self.engine, &self.snapshot);
+        let critical = actions
+            .iter()
+            .filter(|a| a.severity == ActionSeverity::Critical)
+            .count();
+        let watch = actions
+            .iter()
+            .filter(|a| a.severity == ActionSeverity::Watch)
+            .count();
+        let info = actions
+            .iter()
+            .filter(|a| a.severity == ActionSeverity::Info)
+            .count();
+        metric_grid(
+            ui,
+            &[
+                ("Critical", critical.to_string(), critical == 0),
+                ("Watch", watch.to_string(), watch == 0),
+                ("Info", info.to_string(), true),
+                (
+                    "Live Mode",
+                    if self.engine.dry_run {
+                        "no".to_string()
+                    } else {
+                        "yes".to_string()
+                    },
+                    self.engine.dry_run || critical == 0,
+                ),
+            ],
+        );
+        ui.columns(2, |cols| {
+            panel(&mut cols[0], "Prioritized Actions", |ui| {
+                action_table(ui, &actions)
+            });
+            panel(&mut cols[1], "Decision Context", |ui| {
+                let enabled = self
+                    .engine
+                    .cfg
+                    .providers
+                    .values()
+                    .filter(|provider| !provider.disabled)
+                    .count();
+                kv_row(
+                    ui,
+                    "Provider mode",
+                    if self.engine.dry_run {
+                        "dry-run"
+                    } else {
+                        "live"
+                    },
+                );
+                kv_row(ui, "Enabled providers", enabled.to_string());
+                kv_row(
+                    ui,
+                    "Budget sentinel",
+                    usd(self.engine.cfg.policy.max_cost_per_task_usd),
+                );
+                kv_row(
+                    ui,
+                    "Daily spend ceiling",
+                    usd(self.engine.cfg.security.daily_spend_limit_usd),
+                );
+                kv_row(
+                    ui,
+                    "Monthly spend ceiling",
+                    usd(self.engine.cfg.security.monthly_spend_limit_usd),
+                );
+                if let Some(summary) = &self.snapshot.summary {
+                    kv_row(ui, "Cost per success", usd(summary.cost_per_success));
+                    kv_row(ui, "Success rate", pct(summary.overall_success_pct));
+                }
+                if let Some(health) = &self.snapshot.health {
+                    kv_row(ui, "SQLite", &health.quick_check);
+                    kv_row(
+                        ui,
+                        "Provider attempts",
+                        health.execution_attempts.to_string(),
+                    );
+                    kv_row(ui, "Trace rows", health.traces.to_string());
+                }
+            });
         });
     }
 
@@ -1757,6 +1875,295 @@ fn readiness_row(ui: &mut Ui, label: &str, ready: bool, detail: String) {
     });
 }
 
+fn action_items(engine: &Engine, snapshot: &Snapshot) -> Vec<ActionItem> {
+    let mut items = Vec::new();
+    if let Some(err) = &snapshot.error {
+        items.push(ActionItem {
+            severity: ActionSeverity::Critical,
+            title: "Telemetry load failed".to_string(),
+            detail: wrap(err, 110),
+            next_step: "Run tokenos doctor, then verify the configured database and trace paths."
+                .to_string(),
+        });
+    }
+
+    match &snapshot.health {
+        Some(health) if health.quick_check != "ok" => items.push(ActionItem {
+            severity: ActionSeverity::Critical,
+            title: "SQLite integrity check failed".to_string(),
+            detail: format!("quick_check={}", health.quick_check),
+            next_step: "Stop live execution and restore or inspect the state database.".to_string(),
+        }),
+        None => items.push(ActionItem {
+            severity: ActionSeverity::Watch,
+            title: "No local health snapshot".to_string(),
+            detail: "Store health has not loaded yet.".to_string(),
+            next_step: "Refresh telemetry or run tokenos doctor.".to_string(),
+        }),
+        _ => {}
+    }
+
+    let enabled_live: Vec<_> = engine
+        .cfg
+        .providers
+        .iter()
+        .filter(|(_, provider)| !provider.disabled && provider.adapter != "mock")
+        .collect();
+    let missing_keys: Vec<_> = enabled_live
+        .iter()
+        .filter(|(_, provider)| {
+            provider.api_key_env.trim().is_empty()
+                || std::env::var(&provider.api_key_env)
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+        })
+        .map(|(name, provider)| {
+            if provider.api_key_env.trim().is_empty() {
+                format!("{name}: missing api_key_env")
+            } else {
+                format!("{name}: {}", provider.api_key_env)
+            }
+        })
+        .collect::<Vec<_>>();
+    if !engine.dry_run && !missing_keys.is_empty() {
+        items.push(ActionItem {
+            severity: ActionSeverity::Critical,
+            title: "Live provider credentials incomplete".to_string(),
+            detail: missing_keys.join(", "),
+            next_step: "Set the listed environment variables before running live provider work."
+                .to_string(),
+        });
+    }
+
+    let has_spend_guard = engine.dry_run
+        || engine.cfg.policy.max_cost_per_task_usd > 0.0
+        || engine.cfg.security.daily_spend_limit_usd > 0.0
+        || engine.cfg.security.monthly_spend_limit_usd > 0.0;
+    if !has_spend_guard {
+        items.push(ActionItem {
+            severity: ActionSeverity::Critical,
+            title: "Live spend has no configured ceiling".to_string(),
+            detail: "No per-task, daily, or monthly spend guard is active.".to_string(),
+            next_step: "Set policy.max_cost_per_task_usd or security daily/monthly spend limits."
+                .to_string(),
+        });
+    }
+
+    if !engine.cfg.security.disable_traces && !engine.cfg.security.owner_only_permissions {
+        items.push(ActionItem {
+            severity: ActionSeverity::Watch,
+            title: "Trace files are not owner-hardened".to_string(),
+            detail: "Flight recorder traces can include sensitive business context.".to_string(),
+            next_step:
+                "Enable security.owner_only_permissions or point traces at a protected path."
+                    .to_string(),
+        });
+    }
+
+    for breaker in &snapshot.breakers {
+        if breaker.status != "CLOSED" {
+            items.push(ActionItem {
+                severity: ActionSeverity::Critical,
+                title: format!("{} breaker {}", breaker.provider, breaker.status),
+                detail: format!(
+                    "{} calls, {} fail rate, {} consecutive 429s",
+                    breaker.calls_in_window,
+                    pct(breaker.fail_rate),
+                    breaker.consecutive_429s
+                ),
+                next_step: "Let cooldown expire, check quotas, or move the route chain to another provider."
+                    .to_string(),
+            });
+        } else if breaker.fail_rate >= 0.5 && breaker.calls_in_window >= 3 {
+            items.push(ActionItem {
+                severity: ActionSeverity::Watch,
+                title: format!("{} failure rate is high", breaker.provider),
+                detail: format!(
+                    "{} fail rate across {} recent calls",
+                    pct(breaker.fail_rate),
+                    breaker.calls_in_window
+                ),
+                next_step: "Inspect provider attempts and consider reprioritizing this route."
+                    .to_string(),
+            });
+        }
+    }
+
+    for drift in &snapshot.drift {
+        if drift.drifting {
+            items.push(ActionItem {
+                severity: ActionSeverity::Watch,
+                title: format!("{} token estimator drift", drift.provider),
+                detail: format!(
+                    "EWMA ratio {:.3} over {} samples",
+                    drift.ratio_ewma, drift.samples
+                ),
+                next_step: "Review recent attempts and recalibrate pricing/token assumptions."
+                    .to_string(),
+            });
+        }
+    }
+
+    let recent_attempts = snapshot.raw_attempts.iter().take(12).collect::<Vec<_>>();
+    if !recent_attempts.is_empty() {
+        let failures = recent_attempts
+            .iter()
+            .filter(|attempt| !attempt.success)
+            .count();
+        if failures == recent_attempts.len() && recent_attempts.len() >= 3 {
+            items.push(ActionItem {
+                severity: ActionSeverity::Critical,
+                title: "Recent provider attempts are all failing".to_string(),
+                detail: format!(
+                    "{failures} of {} recent attempts failed",
+                    recent_attempts.len()
+                ),
+                next_step: "Open Operations, inspect attempt errors, and pause live execution."
+                    .to_string(),
+            });
+        } else if failures >= 3 {
+            items.push(ActionItem {
+                severity: ActionSeverity::Watch,
+                title: "Recent provider failures need review".to_string(),
+                detail: format!(
+                    "{failures} of {} recent attempts failed",
+                    recent_attempts.len()
+                ),
+                next_step: "Inspect failed attempts for quota, auth, or verification patterns."
+                    .to_string(),
+            });
+        }
+    }
+
+    if let Some(summary) = &snapshot.summary {
+        if summary.executions == 0 {
+            items.push(ActionItem {
+                severity: ActionSeverity::Info,
+                title: "No execution telemetry yet".to_string(),
+                detail: "The dashboard is ready, but there are no runs to analyze.".to_string(),
+                next_step: "Run a dry-run task from the Run Console to seed telemetry.".to_string(),
+            });
+        } else if summary.successes == 0 {
+            items.push(ActionItem {
+                severity: ActionSeverity::Critical,
+                title: "No successful executions recorded".to_string(),
+                detail: format!("{} executions, 0 successes", summary.executions),
+                next_step: "Inspect traces and provider attempts before continuing.".to_string(),
+            });
+        } else if summary.overall_success_pct < 0.8 && summary.executions >= 5 {
+            items.push(ActionItem {
+                severity: ActionSeverity::Watch,
+                title: "Success rate is below operating target".to_string(),
+                detail: format!(
+                    "{} over {} executions",
+                    pct(summary.overall_success_pct),
+                    summary.executions
+                ),
+                next_step: "Review route effectiveness and failure memory for recurring causes."
+                    .to_string(),
+            });
+        }
+    }
+
+    if !engine.cfg.policy.reuse_cache {
+        items.push(ActionItem {
+            severity: ActionSeverity::Info,
+            title: "Verified solution cache disabled".to_string(),
+            detail: "Exact repeated tasks will not replay verified zero-token outputs.".to_string(),
+            next_step: "Enable policy.reuse_cache when deterministic replay is acceptable."
+                .to_string(),
+        });
+    }
+
+    if items.is_empty() {
+        items.push(ActionItem {
+            severity: ActionSeverity::Info,
+            title: "No immediate operator action".to_string(),
+            detail: "Local readiness checks and recent telemetry do not show blocking risk."
+                .to_string(),
+            next_step: "Continue previewing routes before paid execution.".to_string(),
+        });
+    }
+
+    items.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    items
+}
+
+fn action_preview(ui: &mut Ui, actions: &[ActionItem]) {
+    for action in actions.iter().take(4) {
+        action_row(ui, action);
+    }
+    if actions.len() > 4 {
+        ui.label(
+            RichText::new(format!(
+                "{} more action item(s) in Action Center",
+                actions.len() - 4
+            ))
+            .small()
+            .color(muted()),
+        );
+    }
+}
+
+fn action_table(ui: &mut Ui, actions: &[ActionItem]) {
+    if actions.is_empty() {
+        ui.label(RichText::new("No action items.").color(good()));
+        return;
+    }
+    for action in actions {
+        action_row(ui, action);
+        ui.add_space(6.0);
+    }
+}
+
+fn action_row(ui: &mut Ui, action: &ActionItem) {
+    egui::Frame::default()
+        .fill(match action.severity {
+            ActionSeverity::Critical => Color32::from_rgba_unmultiplied(248, 113, 113, 22),
+            ActionSeverity::Watch => Color32::from_rgba_unmultiplied(251, 191, 36, 20),
+            ActionSeverity::Info => panel_dark(),
+        })
+        .stroke(Stroke::new(1.0, severity_color(action.severity)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized(
+                    [74.0, 22.0],
+                    egui::Label::new(
+                        RichText::new(severity_label(action.severity))
+                            .monospace()
+                            .strong()
+                            .color(severity_color(action.severity)),
+                    ),
+                );
+                ui.label(RichText::new(&action.title).strong());
+            });
+            ui.label(RichText::new(&action.detail).small().color(muted()));
+            ui.label(RichText::new(&action.next_step).small().color(text()));
+        });
+}
+
+fn severity_label(severity: ActionSeverity) -> &'static str {
+    match severity {
+        ActionSeverity::Critical => "CRITICAL",
+        ActionSeverity::Watch => "WATCH",
+        ActionSeverity::Info => "INFO",
+    }
+}
+
+fn severity_color(severity: ActionSeverity) -> Color32 {
+    match severity {
+        ActionSeverity::Critical => bad(),
+        ActionSeverity::Watch => warn(),
+        ActionSeverity::Info => accent(),
+    }
+}
+
 fn route_stats_table(ui: &mut Ui, routes: &[RouteStats]) {
     if routes.is_empty() {
         ui.label(RichText::new("No route telemetry yet.").color(muted()));
@@ -2615,6 +3022,73 @@ fn bad() -> Color32 {
 mod tests {
     use super::*;
 
+    fn healthy_store() -> StoreHealth {
+        StoreHealth {
+            quick_check: "ok".to_string(),
+            tasks: 0,
+            executions: 0,
+            execution_attempts: 0,
+            failure_memory: 0,
+            loop_history: 0,
+            traces: 0,
+            solution_cache: 0,
+            solution_cache_hits: 0,
+            request_stats: 0,
+            drift_ratios: 0,
+        }
+    }
+
+    fn snapshot_with_summary(executions: usize, successes: usize) -> Snapshot {
+        Snapshot {
+            health: Some(healthy_store()),
+            summary: Some(Summary {
+                tasks: executions,
+                executions,
+                successes,
+                total_tokens: 0,
+                total_cost_usd: 0.0,
+                cost_per_success: 0.0,
+                avg_latency_ms: 0.0,
+                overall_success_pct: if executions == 0 {
+                    0.0
+                } else {
+                    successes as f64 / executions as f64
+                },
+                savings_usd: 0.0,
+            }),
+            ..Snapshot::default()
+        }
+    }
+
+    fn test_engine_with_config(cfg: crate::config::Config, dry_run: bool) -> Engine {
+        use std::path::Path;
+        use std::sync::RwLock;
+
+        use crate::pricing::{DriftWatchdog, Tracker, Ucb1Router};
+        use crate::recorder::Recorder;
+        use crate::store::Store;
+
+        let arms: Vec<String> = cfg.providers.keys().cloned().collect();
+        cfg.validate().unwrap();
+        Engine {
+            cfg,
+            store: Store::open(Some(Path::new(":memory:"))).unwrap(),
+            recorder: Recorder::new(Some(Path::new(&format!(
+                "{}/tokenos-native-action-test-{}-{}",
+                std::env::temp_dir().display(),
+                std::process::id(),
+                dry_run
+            ))))
+            .unwrap(),
+            tracker: Tracker::new(),
+            bandit: Ucb1Router::new(&arms),
+            drift: DriftWatchdog::new(),
+            indexer: None,
+            dry_run,
+            adapters: RwLock::new(HashMap::new()),
+        }
+    }
+
     #[test]
     fn constraints_parser_ignores_empty_lines() {
         assert_eq!(
@@ -2668,6 +3142,39 @@ mod tests {
         assert_eq!(apgr(0.5, 0.5), 0.0);
         assert!((apgr(0.75, 0.5) - 50.0).abs() < f64::EPSILON);
         assert_eq!(apgr(0.9, 1.0), 100.0);
+    }
+
+    #[test]
+    fn action_center_flags_live_credential_and_budget_risks() {
+        let mut cfg = crate::config::Config::default();
+        {
+            let openai = cfg.providers.get_mut("openai").unwrap();
+            openai.disabled = false;
+            openai.api_key_env = "TOKENOS_NATIVE_TEST_MISSING_KEY_DO_NOT_SET_9F4C7B31".to_string();
+        }
+        let engine = test_engine_with_config(cfg, false);
+        let actions = action_items(&engine, &snapshot_with_summary(0, 0));
+
+        assert!(actions.iter().any(|action| {
+            action.severity == ActionSeverity::Critical
+                && action.title.contains("credentials incomplete")
+        }));
+        assert!(actions.iter().any(|action| {
+            action.severity == ActionSeverity::Critical
+                && action.title.contains("no configured ceiling")
+        }));
+    }
+
+    #[test]
+    fn action_center_healthy_dry_run_has_no_critical_items() {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        let engine = test_engine_with_config(cfg, true);
+        let actions = action_items(&engine, &snapshot_with_summary(1, 1));
+
+        assert!(actions
+            .iter()
+            .all(|action| action.severity != ActionSeverity::Critical));
     }
 
     #[test]
