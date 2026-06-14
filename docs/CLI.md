@@ -202,6 +202,27 @@ native app calls the Rust engine directly for route previews and executions and
 reads SQLite telemetry directly for dashboard, task, execution, provider,
 attempt, spend, health, and configuration views.
 
+Native panels include:
+
+- Dashboard: cost-per-success, route/provider health, spend, store health,
+  UCB1 bandit standings, estimator drift, solution-cache counters, and attempt
+  aggregates.
+- Run Console: route preview, extracted routing signals, provider chain,
+  execution controls, and final output.
+- Route Planner: paste a backlog, preview every route for free, and inspect
+  route mix, provider demand, estimated route cost, all-IMPLEMENT baseline
+  savings, confidence, token estimates, and provider chains.
+- Policy Lab: simulate routing-policy changes against one scenario without
+  writing config or spending tokens. Controls include ASK threshold, DIRECT
+  token ceiling, delegation economics, budget sentinel, semantic cache
+  threshold, cascade limits, re-ask limit, cache reuse, and learned routing.
+- Calibration: YAML/JSON labeled route datasets with accuracy, weak baseline,
+  APGR, savings, mismatch breakdown, and ASK-threshold sweep.
+- Operations: circuit-breaker state, API request stats, estimator drift/cache,
+  OpenTelemetry GenAI rollups, and raw provider-attempt ledger.
+- Tasks / Executions: persisted task state, flight-recorder event timeline,
+  final execution rows, and provider attempts.
+
 Use `tokenos serve` when you explicitly want the browser dashboard or HTTP API.
 
 ---

@@ -180,7 +180,7 @@ Requires Rust ≥ 1.75 (SQLite is bundled — no system dependencies).
 
 ```sh
 cargo build --release        # binary at target/release/tokenos
-cargo test                   # 234 unit tests across all subsystems, fully offline
+cargo test                   # offline unit tests across all subsystems
 cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
@@ -288,13 +288,28 @@ Full endpoint reference: [docs/API.md](docs/API.md).
 
 `tokenos app` (build feature `native`) starts a real desktop UI:
 
-- native egui/eframe shell with dashboard, run console, task browser,
+- native egui/eframe shell with dashboard, run console, bulk route planner,
+  policy simulator, route calibration, operations telemetry, task browser,
   execution browser, provider stats, attempt aggregates, spend chart, and
   configuration readout
 - no Axum control plane, no loopback listener, no bearer-token browser handoff,
   and no browser launch
 - direct `Arc<Engine>` integration for route preview and execution; direct
   store reads for telemetry and health snapshots
+- native parity for the web dashboard's high-value operational surfaces:
+  provider-chain diagnostics, routing signals, UCB1 bandit standings,
+  estimator drift/cache counters, circuit-breaker state, API stats,
+  OpenTelemetry GenAI rollups, provider-attempt ledger, and flight-recorder
+  task traces
+- zero-cost bulk Route Planner for pasting task backlogs and seeing route mix,
+  provider demand, estimated route cost, savings versus an all-IMPLEMENT
+  baseline, confidence, token estimates, and provider chains before execution
+- zero-cost Policy Lab for tuning ASK threshold, DIRECT token ceiling,
+  delegation economics, budget sentinel, semantic cache threshold, cascade
+  limits, re-ask limit, cache reuse, and learned-routing fallback against one
+  scenario without writing config or contacting providers
+- calibration workbench for YAML/JSON labeled route datasets, including weak
+  baseline, APGR, savings, mismatch breakdown, and ASK-threshold sweep
 - a background Tokio runtime handles long-running executions without freezing
   the UI
 - `tokenos serve` remains the separate web dashboard/API entrypoint for

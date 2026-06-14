@@ -116,6 +116,7 @@ The crate ships as a **library plus a thin binary**:
 | `store` | SQLite state: tasks, failure memory, loop history, telemetry, trace index, solution cache | State objects and trace metadata, never raw transcripts |
 | `recorder` | Flight recorder: SHA-256 CAS blobs + NDJSON journal | Diagnostics never enter the context window |
 | `webui` | axum control panel | Lock-free read handlers, bounded concurrent runs, constant-time bearer auth |
+| `nativeapp` | feature-gated egui/eframe desktop UI | Native direct engine/store integration; no web server, loopback listener, browser, or webview |
 
 ## 3. The routing ladder
 

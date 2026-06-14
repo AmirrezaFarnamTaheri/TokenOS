@@ -80,6 +80,20 @@ click **API token** in the sidebar and enter the bearer token. The dashboard
 then attaches `Authorization: Bearer ...` to every API request. Tokens are
 kept in memory unless you explicitly remember them for the current browser tab.
 
+Prefer the native desktop app instead of the browser dashboard:
+
+```sh
+cargo build --release --features native
+./target/release/tokenos app --dry-run
+```
+
+`tokenos app` is a native egui/eframe application. It does not start the web
+server, bind a loopback port, open a browser, or embed a webview. It includes
+dashboard telemetry, route preview/execution, bulk route planning, policy
+simulation, route calibration, operational stats, task traces, executions,
+provider attempts, and configuration views through direct engine and SQLite
+calls.
+
 ## 5. Connect a live provider
 
 1. Export the key (env vars only — keys never touch disk):
