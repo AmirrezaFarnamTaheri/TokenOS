@@ -148,6 +148,9 @@ vault is request-scoped and cannot reconstruct the value later.
 ## 6. Operational checklist
 
 - [ ] Run with the default loopback bind unless remote access is required.
+- [ ] Prefer `tokenos app` for local desktop use when built with
+      `--features native`; it uses direct native engine/store calls and does
+      not start the web server or expose a listener.
 - [ ] If exposing remotely: set a strong `$TOKENOS_AUTH_TOKEN`, use
       `--public` deliberately, and use either native HTTPS
       (`--tls-cert`/`--tls-key`) or a TLS-terminating reverse proxy.

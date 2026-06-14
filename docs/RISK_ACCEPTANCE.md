@@ -10,7 +10,7 @@ infrastructure outside this checkout.
 
 | ID | Item | Closure |
 |---|---|---|
-| C-01 | Optional native GTK3-family dependency advisories | Removed `tao`/`wry` webview dependencies. The `native` feature now builds a zero-extra-dependency desktop launcher that opens the loopback dashboard in the system browser. `cargo audit` no longer reports the GTK3-family or `glib` advisories. |
+| C-01 | Optional native GTK3-family dependency advisories | Removed `tao`/`wry` webview dependencies. The `native` feature now builds an egui/eframe desktop UI that calls the engine and store directly instead of opening the web dashboard in a browser. `cargo audit` no longer reports the GTK3-family or `glib` advisories. |
 | C-02 | Native HTTPS serving | `tokenos serve` supports `--tls-cert` and `--tls-key` PEM files for direct HTTPS serving. Reverse proxies remain useful for redirects, HSTS policy, WAFs, and centralized logging. |
 | C-03 | Shared API-token request limits | `security.api_token_rate_limit_per_min` enables a SQLite-backed per-token per-minute request ledger. Tokens are stored by SHA-256 hash, so multiple TokenOS processes using the same DB coordinate API request limits. |
 | C-04 | Aggregate API surface telemetry | `/api/stats/api` reports method, normalized path, status, count, average latency, max latency, and last-seen time without storing bodies, auth headers, query strings, or per-request rows. |

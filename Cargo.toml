@@ -37,12 +37,12 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 walkdir = "2"
 once_cell = "1"
+eframe = { version = "0.34.3", optional = true, default-features = false, features = ["default_fonts", "glow"] }
+
 [features]
 default = []
-# `cargo build --release --features native` → enables `tokenos app`.
-# The launcher intentionally uses the OS browser over an ephemeral loopback
-# dashboard instead of bundling a webview dependency chain.
-native = []
+# `cargo build --release --features native` -> enables the native desktop UI.
+native = ["dep:eframe"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

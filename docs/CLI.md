@@ -189,6 +189,21 @@ If `security.api_token_rate_limit_per_min` is configured, each bearer token
 also has a SQLite-backed per-minute request ledger shared by every TokenOS
 process using the same database.
 
+## `tokenos app` — native desktop UI
+
+```sh
+cargo build --release --features native
+tokenos app --dry-run
+```
+
+Starts the egui/eframe desktop application. It does not start the Axum web
+server, bind a loopback port, open a browser, or use the HTML dashboard. The
+native app calls the Rust engine directly for route previews and executions and
+reads SQLite telemetry directly for dashboard, task, execution, provider,
+attempt, spend, health, and configuration views.
+
+Use `tokenos serve` when you explicitly want the browser dashboard or HTTP API.
+
 ---
 
 ## Exit codes

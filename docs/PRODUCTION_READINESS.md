@@ -11,8 +11,8 @@ TokenOS is finalized as a local-first Rust execution kernel:
 
 - CLI binary and embeddable library crate.
 - Embedded Axum dashboard and JSON API.
-- Optional native launcher that opens the loopback dashboard in the system
-  browser without a webview/GTK dependency chain.
+- Optional native desktop app backed by egui/eframe and direct engine/store
+  calls, separate from the web dashboard/API listener.
 - Local SQLite state store and content-addressed flight recorder.
 - Provider adapters for mock, OpenAI, Anthropic, Gemini, and proxy endpoints.
 
@@ -34,7 +34,7 @@ must add the controls listed in [RISK_ACCEPTANCE.md](RISK_ACCEPTANCE.md).
 | Traceability | Recorder events are indexed in SQLite, provider attempts are first-class rows and aggregates exposed by CLI/API/dashboard, startup provider health replays attempt rows, corrupt telemetry reads fail visibly, and API request telemetry is aggregate-only. |
 | Data minimization | Prompts are masked before provider calls; unmasked output is returned only at the caller boundary. Placeholder-bearing outputs are not replayed from the solution cache. |
 | Storage hygiene | Trace disablement, retention pruning, and Unix owner-only permissions are implemented for state and recorder artifacts. |
-| Supply chain | The native launcher avoids the prior GTK/webview dependency path; `cargo audit` is part of the required gate. |
+| Supply chain | The native desktop app avoids webview/browser embedding; `cargo audit` is part of the required gate. |
 | Licensing | The repository uses `AGPL-3.0-only` and ships the full AGPLv3 license text in `LICENSE`. |
 
 ## Release Gates
@@ -89,6 +89,7 @@ Expected behavior:
 | `store` | Production-local | SQLite is transactional and bundled; application-level encryption is deployment-specific. |
 | `recorder` | Production-local | Content-addressed traces are useful diagnostics and should be protected as application logs. |
 | `webui` | Production-local with deployment controls | Loopback default is safe for local use; remote access requires TLS, bearer auth, and scoped tokens. |
+| `nativeapp` | Production-local | Native egui/eframe desktop UI with direct engine/store calls; does not start Axum, bind loopback, open a browser, or use a webview. |
 | `static` | Production-local | No frontend build step, CDN, or third-party script dependency. |
 | `.github/workflows/ci.yml` | Source-ready | Hosted branch protection must still be enforced by repository administration. |
 

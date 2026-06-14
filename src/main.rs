@@ -193,10 +193,10 @@ fn build_engine(ef: &EngineFlags) -> Result<Engine> {
 fn main() {
     let cli = Cli::parse();
 
-    // The native shell's event loop must OWN the main thread (a hard
-    // platform requirement on macOS, and the sane default everywhere), so
-    // `app` is dispatched before any tokio runtime exists — run_app spins
-    // up its own background runtime for the control plane.
+    // The native shell's event loop must own the main thread (a hard platform
+    // requirement on macOS, and the sane default everywhere), so `app` is
+    // dispatched before the CLI creates its Tokio runtime. The native app
+    // manages its own background runtime for engine executions.
     if let Command::App { engine: ef } = &cli.command {
         #[cfg(feature = "native")]
         {

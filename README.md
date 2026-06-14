@@ -24,11 +24,11 @@ cargo build --release                          # no system deps; SQLite is bundl
 ./target/release/tokenos serve --dry-run       # dashboard at http://127.0.0.1:8080
 ```
 
-Prefer a desktop-style launcher over typing a URL?
+Prefer a desktop app over a browser dashboard?
 
 ```sh
-cargo build --release --features native        # no webview/GTK dependency chain
-./target/release/tokenos app --dry-run         # opens the loopback dashboard in your browser
+cargo build --release --features native        # enables the egui/eframe desktop UI
+./target/release/tokenos app --dry-run         # native dashboard, no browser or loopback server
 ```
 
 No API key is needed for any of the above — the fault-injectable mock provider
@@ -55,7 +55,7 @@ exercises the entire pipeline offline. See
 ```
 src/
   lib.rs               Library crate root (kernel embeddable in other runtimes)
-  main.rs              CLI (clap) + embedded web GUI entrypoint
+  main.rs              CLI (clap), web dashboard entrypoint, native app dispatch
   kernel.rs            Deterministic router: route ladder, signals, policy, state, delegation packet
   config.rs            YAML config, provider chains, two-tier model filter matrix
   engine.rs            Orchestrator: route → context → payload → failover → verify → record
@@ -71,6 +71,7 @@ src/
   store.rs             SQLite state store: tasks, failures, loops, executions, attempts, API stats, traces, cache
   recorder.rs          Out-of-band flight recorder (content-addressable blobs + NDJSON journals)
   webui.rs             Lock-free axum control panel (dashboard, run console, traces, bandit, config)
+  nativeapp.rs         Feature-gated native egui desktop UI backed by direct engine/store calls
 static/                Embedded dashboard assets (index.html, app.js, style.css)
 ```
 
@@ -184,17 +185,18 @@ cargo fmt --all -- --check   # blocking in CI
 cargo clippy --all-targets -- -D warnings
 ```
 
-The optional **desktop launcher** (`tokenos app`) is feature-gated so
+The optional **native desktop app** (`tokenos app`) is feature-gated so
 headless/server builds stay lean:
 
 ```sh
 cargo build --release --features native
 ```
 
-The launcher opens the embedded loopback dashboard in the system browser and
-does not compile a webview stack. Active CI lives in `.github/workflows/ci.yml`;
-it checks formatting, clippy, audit, release build, tests, and launcher binaries
-for Linux/macOS/Windows, and attaches binaries to tagged releases.
+The app is an egui/eframe desktop surface. It calls the Rust engine and SQLite
+store directly, so it does not bind a loopback port, open a browser, run Axum,
+or embed a webview. Active CI lives in `.github/workflows/ci.yml`; it checks
+formatting, clippy, audit, release build, tests, and native binaries for
+Linux/macOS/Windows, and attaches binaries to tagged releases.
 
 The crate ships as a library (`src/lib.rs`) plus a thin CLI binary, so the
 kernel can be embedded inside other agent runtimes.
@@ -214,6 +216,7 @@ tokenos tasks                             # persisted task states
 tokenos trace <task-id> --blobs           # flight-recorder timeline + payloads
 tokenos index . --query "auth token"      # build & probe the symbol index
 tokenos serve --port 8080 --dry-run       # web control panel
+tokenos app --dry-run                     # native desktop UI, no browser
 ```
 
 API keys are read from environment variables only (`OPENAI_API_KEY`,
@@ -283,14 +286,19 @@ Full endpoint reference: [docs/API.md](docs/API.md).
 
 ### Native desktop app
 
-`tokenos app` (build feature `native`) starts the SAME dashboard on an
-ephemeral loopback port and opens it in the system browser:
+`tokenos app` (build feature `native`) starts a real desktop UI:
 
-- the axum control plane binds an **ephemeral loopback port** (127.0.0.1:0)
-  on a background runtime — the kernel never faces a network in app mode
-- Ctrl+C tears down the process, server included
-- no WebKitGTK/WebView2/WKWebView dependency chain is compiled
-- engine, API, auth model and frontend bytes are identical to `tokenos serve`
+- native egui/eframe shell with dashboard, run console, task browser,
+  execution browser, provider stats, attempt aggregates, spend chart, and
+  configuration readout
+- no Axum control plane, no loopback listener, no bearer-token browser handoff,
+  and no browser launch
+- direct `Arc<Engine>` integration for route preview and execution; direct
+  store reads for telemetry and health snapshots
+- a background Tokio runtime handles long-running executions without freezing
+  the UI
+- `tokenos serve` remains the separate web dashboard/API entrypoint for
+  browser or remote-control workflows
 
 ## Design principles
 
