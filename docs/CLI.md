@@ -156,6 +156,8 @@ Native panels include:
   health, UCB1 bandit standings, estimator drift, cache counters, and attempts.
 - Action Center: prioritized operator actions generated from readiness, spend,
   credentials, provider health, drift, cache, and recent attempt signals.
+- Command Deck: global native search across panels, actions, tasks, executions,
+  and providers with one-click handoff into the relevant view.
 - Run Console: route preview, routing signals, provider chain, provider cost
   forecast, budget-sentinel status, execution controls, and final output.
 - Route Planner: backlog preview with route mix, provider demand, token

@@ -92,6 +92,8 @@ The native app includes:
 - action center with prioritized operator actions synthesized from readiness,
   spend guards, credential state, provider failures, drift, cache settings, and
   recent attempts;
+- command deck with global native search across panels, action items, tasks,
+  executions, providers, and direct handoff into the console or ledgers;
 - run console with free route preview, extracted routing signals, provider
   chain diagnostics, provider cost forecast, budget sentinel status, and
   execution output;

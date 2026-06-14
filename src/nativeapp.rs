@@ -64,6 +64,7 @@ pub fn run_app(engine: Arc<Engine>) -> Result<()> {
 enum View {
     Dashboard,
     ActionCenter,
+    CommandDeck,
     Console,
     Planner,
     PolicyLab,
@@ -80,6 +81,7 @@ impl View {
         match self {
             Self::Dashboard => "Dashboard",
             Self::ActionCenter => "Action Center",
+            Self::CommandDeck => "Command Deck",
             Self::Console => "Run Console",
             Self::Planner => "Route Planner",
             Self::PolicyLab => "Policy Lab",
@@ -92,6 +94,21 @@ impl View {
         }
     }
 }
+
+const NAV_VIEWS: [View; 12] = [
+    View::Dashboard,
+    View::ActionCenter,
+    View::CommandDeck,
+    View::Console,
+    View::Planner,
+    View::PolicyLab,
+    View::Calibration,
+    View::Operations,
+    View::Readiness,
+    View::Tasks,
+    View::Executions,
+    View::Config,
+];
 
 #[derive(Default)]
 struct Snapshot {
@@ -227,6 +244,23 @@ struct PolicyLabResult {
     constraints: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CommandResult {
+    score: i32,
+    kind: &'static str,
+    title: String,
+    detail: String,
+    target: CommandTarget,
+}
+
+#[derive(Debug, Clone)]
+enum CommandTarget {
+    OpenView(View),
+    UseTask(String),
+    FilterTasks(String),
+    FilterExecutions(String),
+}
+
 struct TokenOsNativeApp {
     engine: Arc<Engine>,
     rt: Runtime,
@@ -257,6 +291,7 @@ struct TokenOsNativeApp {
     selected_task_id: Option<String>,
     trace_events: Vec<Event>,
     trace_error: Option<String>,
+    command_query: String,
     status: String,
 }
 
@@ -294,6 +329,7 @@ impl TokenOsNativeApp {
             selected_task_id: None,
             trace_events: Vec::new(),
             trace_error: None,
+            command_query: String::new(),
             status: "ready".to_string(),
         };
         app.refresh_snapshot();
@@ -366,6 +402,31 @@ impl TokenOsNativeApp {
         });
     }
 
+    fn apply_command_target(&mut self, target: CommandTarget) {
+        match target {
+            CommandTarget::OpenView(view) => {
+                self.view = view;
+                self.status = format!("opened {}", view.label());
+            }
+            CommandTarget::UseTask(task) => {
+                self.task_input = task;
+                self.preview = None;
+                self.view = View::Console;
+                self.status = "loaded task into Run Console".to_string();
+            }
+            CommandTarget::FilterTasks(query) => {
+                self.task_filter = query;
+                self.view = View::Tasks;
+                self.status = "filtered task ledger".to_string();
+            }
+            CommandTarget::FilterExecutions(query) => {
+                self.exec_filter = query;
+                self.view = View::Executions;
+                self.status = "filtered execution telemetry".to_string();
+            }
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(6.0);
@@ -390,6 +451,18 @@ impl TokenOsNativeApp {
                         warn()
                     }),
             );
+            ui.separator();
+            let search = ui.add_sized(
+                [320.0, 24.0],
+                TextEdit::singleline(&mut self.command_query)
+                    .hint_text("Search commands, tasks, executions"),
+            );
+            if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.view = View::CommandDeck;
+            }
+            if ui.button("Deck").clicked() {
+                self.view = View::CommandDeck;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Refresh").clicked() {
                     self.refresh_snapshot();
@@ -401,19 +474,7 @@ impl TokenOsNativeApp {
 
     fn side_nav(&mut self, ui: &mut Ui) {
         ui.add_space(8.0);
-        for view in [
-            View::Dashboard,
-            View::ActionCenter,
-            View::Console,
-            View::Planner,
-            View::PolicyLab,
-            View::Calibration,
-            View::Operations,
-            View::Readiness,
-            View::Tasks,
-            View::Executions,
-            View::Config,
-        ] {
+        for view in NAV_VIEWS {
             let selected = self.view == view;
             if ui
                 .add_sized(
@@ -440,6 +501,7 @@ impl TokenOsNativeApp {
             .show(ui, |ui| match self.view {
                 View::Dashboard => self.dashboard(ui),
                 View::ActionCenter => self.action_center(ui),
+                View::CommandDeck => self.command_deck(ui),
                 View::Console => self.console(ui),
                 View::Planner => self.planner(ui),
                 View::PolicyLab => self.policy_lab(ui),
@@ -619,6 +681,71 @@ impl TokenOsNativeApp {
                     kv_row(ui, "Trace rows", health.traces.to_string());
                 }
             });
+        });
+    }
+
+    fn command_deck(&mut self, ui: &mut Ui) {
+        heading(
+            ui,
+            "Command Deck",
+            "global native search across actions, panels, tasks, executions, and providers",
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Search");
+            let response = ui.add_sized(
+                [520.0, 26.0],
+                TextEdit::singleline(&mut self.command_query)
+                    .hint_text("provider failure, task id, route, panel, action"),
+            );
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.status = "command results refreshed".to_string();
+            }
+            if ui.button("Clear").clicked() {
+                self.command_query.clear();
+            }
+        });
+
+        let actions = action_items(&self.engine, &self.snapshot);
+        let results = command_results(&self.command_query, &self.engine, &self.snapshot, &actions);
+        let action_hits = results
+            .iter()
+            .filter(|result| result.kind == "Action")
+            .count();
+        let task_hits = results
+            .iter()
+            .filter(|result| result.kind == "Task")
+            .count();
+        let execution_hits = results
+            .iter()
+            .filter(|result| result.kind == "Execution")
+            .count();
+        metric_grid(
+            ui,
+            &[
+                ("Results", results.len().to_string(), !results.is_empty()),
+                ("Action Hits", action_hits.to_string(), action_hits == 0),
+                ("Task Hits", task_hits.to_string(), true),
+                ("Execution Hits", execution_hits.to_string(), true),
+            ],
+        );
+
+        panel(ui, "Results", |ui| {
+            if results.is_empty() {
+                ui.label(RichText::new("No command results for this query.").color(muted()));
+                return;
+            }
+            let mut target = None;
+            ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+                for result in &results {
+                    if command_result_row(ui, result) {
+                        target = Some(result.target.clone());
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+            if let Some(target) = target {
+                self.apply_command_target(target);
+            }
         });
     }
 
@@ -1873,6 +2000,243 @@ fn readiness_row(ui: &mut Ui, label: &str, ready: bool, detail: String) {
         ui.label(RichText::new(label).strong());
         ui.label(RichText::new(detail).small().color(muted()));
     });
+}
+
+fn command_results(
+    query: &str,
+    engine: &Engine,
+    snapshot: &Snapshot,
+    actions: &[ActionItem],
+) -> Vec<CommandResult> {
+    let terms = query_terms(query);
+    let empty = terms.is_empty();
+    let mut results = Vec::new();
+
+    for view in NAV_VIEWS {
+        let detail = view_detail(view);
+        push_command_if_match(
+            &mut results,
+            &terms,
+            90,
+            "Panel",
+            view.label().to_string(),
+            detail.to_string(),
+            CommandTarget::OpenView(view),
+        );
+    }
+
+    for action in actions {
+        let base = match action.severity {
+            ActionSeverity::Critical => 130,
+            ActionSeverity::Watch => 115,
+            ActionSeverity::Info => 80,
+        };
+        if empty && action.severity == ActionSeverity::Info {
+            continue;
+        }
+        push_command_if_match(
+            &mut results,
+            &terms,
+            base,
+            "Action",
+            action.title.clone(),
+            format!("{} Next: {}", action.detail, action.next_step),
+            CommandTarget::OpenView(View::ActionCenter),
+        );
+    }
+
+    for (name, provider) in &engine.cfg.providers {
+        let status = if provider.disabled {
+            "disabled"
+        } else if provider.adapter == "mock" {
+            "offline"
+        } else if provider.api_key_env.trim().is_empty() {
+            "missing key env"
+        } else {
+            "configured"
+        };
+        push_command_if_match(
+            &mut results,
+            &terms,
+            76,
+            "Provider",
+            format!("Provider {name}"),
+            format!(
+                "{} adapter={} model={} priority={}",
+                status,
+                provider.adapter,
+                if provider.model.is_empty() {
+                    "default"
+                } else {
+                    &provider.model
+                },
+                provider.priority
+            ),
+            CommandTarget::FilterExecutions(name.clone()),
+        );
+    }
+
+    for task in snapshot.tasks.iter().take(if empty { 8 } else { 60 }) {
+        push_command_if_match(
+            &mut results,
+            &terms,
+            72,
+            "Task",
+            wrap(&task.goal, 92),
+            format!(
+                "{} status={} next={}",
+                task.task_id,
+                task.status.as_str(),
+                if task.next_action.is_empty() {
+                    "none"
+                } else {
+                    &task.next_action
+                }
+            ),
+            CommandTarget::UseTask(task.goal.clone()),
+        );
+        push_command_if_match(
+            &mut results,
+            &terms,
+            68,
+            "Ledger",
+            format!("Find task {}", task.task_id),
+            wrap(&task.goal, 100),
+            CommandTarget::FilterTasks(task.task_id.clone()),
+        );
+    }
+
+    for execution in snapshot.executions.iter().take(if empty { 8 } else { 80 }) {
+        push_command_if_match(
+            &mut results,
+            &terms,
+            if execution.success { 58 } else { 82 },
+            "Execution",
+            format!(
+                "{} execution #{}",
+                if execution.success {
+                    "Open"
+                } else {
+                    "Inspect failed"
+                },
+                execution.id
+            ),
+            format!(
+                "task={} route={} provider={} model={} cost={} latency={}",
+                execution.task_id,
+                execution.route,
+                execution.provider,
+                execution.model,
+                usd(execution.est_cost_usd),
+                ms(execution.latency_ms as f64)
+            ),
+            CommandTarget::FilterExecutions(execution.task_id.clone()),
+        );
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.kind.cmp(b.kind))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    results.dedup_by(|a, b| a.kind == b.kind && a.title == b.title && a.detail == b.detail);
+    results.truncate(80);
+    results
+}
+
+fn push_command_if_match(
+    results: &mut Vec<CommandResult>,
+    terms: &[String],
+    base_score: i32,
+    kind: &'static str,
+    title: String,
+    detail: String,
+    target: CommandTarget,
+) {
+    let haystack = format!("{title} {detail}").to_lowercase();
+    if !terms.iter().all(|term| haystack.contains(term)) {
+        return;
+    }
+    let mut score = base_score;
+    if let Some(first) = terms.first() {
+        let title_lc = title.to_lowercase();
+        if title_lc.starts_with(first) {
+            score += 18;
+        } else if title_lc.contains(first) {
+            score += 8;
+        }
+    }
+    score += terms.len() as i32;
+    results.push(CommandResult {
+        score,
+        kind,
+        title,
+        detail,
+        target,
+    });
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+fn view_detail(view: View) -> &'static str {
+    match view {
+        View::Dashboard => "KPI telemetry, route effectiveness, spend, health",
+        View::ActionCenter => "Prioritized operational actions and readiness context",
+        View::CommandDeck => "Global search across panels, tasks, executions, providers",
+        View::Console => "Preview routes and execute a single task",
+        View::Planner => "Batch route planning and provider demand forecast",
+        View::PolicyLab => "What-if router policy simulation",
+        View::Calibration => "Evaluation dataset, route accuracy, APGR sweep",
+        View::Operations => "Circuit breakers, request aggregates, attempts, GenAI rollup",
+        View::Readiness => "SQLite, credentials, spend, trace policy, web retirement checks",
+        View::Tasks => "Persisted task state and flight-recorder access",
+        View::Executions => "Execution ledger and provider-attempt filter",
+        View::Config => "Effective providers, runtime mode, router policy",
+    }
+}
+
+fn command_result_row(ui: &mut Ui, result: &CommandResult) -> bool {
+    let mut clicked = false;
+    egui::Frame::default()
+        .fill(panel_dark())
+        .stroke(Stroke::new(1.0, Color32::from_rgb(43, 52, 74)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Open").clicked() {
+                    clicked = true;
+                }
+                ui.add_sized(
+                    [76.0, 22.0],
+                    egui::Label::new(
+                        RichText::new(result.kind)
+                            .monospace()
+                            .strong()
+                            .color(accent()),
+                    ),
+                );
+                ui.label(RichText::new(&result.title).strong());
+                ui.label(
+                    RichText::new(format!("score {}", result.score))
+                        .small()
+                        .color(muted()),
+                );
+            });
+            ui.label(
+                RichText::new(wrap(&result.detail, 132))
+                    .small()
+                    .color(muted()),
+            );
+        });
+    clicked
 }
 
 fn action_items(engine: &Engine, snapshot: &Snapshot) -> Vec<ActionItem> {
@@ -3175,6 +3539,63 @@ mod tests {
         assert!(actions
             .iter()
             .all(|action| action.severity != ActionSeverity::Critical));
+    }
+
+    #[test]
+    fn command_deck_finds_native_panels() {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        let engine = test_engine_with_config(cfg, true);
+        let actions = action_items(&engine, &snapshot_with_summary(1, 1));
+        let results = command_results("readiness", &engine, &Snapshot::default(), &actions);
+
+        assert!(results.iter().any(|result| {
+            result.kind == "Panel"
+                && result.title == "Readiness"
+                && matches!(result.target, CommandTarget::OpenView(View::Readiness))
+        }));
+    }
+
+    #[test]
+    fn command_deck_prioritizes_critical_actions() {
+        let mut cfg = crate::config::Config::default();
+        {
+            let openai = cfg.providers.get_mut("openai").unwrap();
+            openai.disabled = false;
+            openai.api_key_env = "TOKENOS_NATIVE_TEST_MISSING_KEY_DO_NOT_SET_9F4C7B31".to_string();
+        }
+        let engine = test_engine_with_config(cfg, false);
+        let snapshot = snapshot_with_summary(0, 0);
+        let actions = action_items(&engine, &snapshot);
+        let results = command_results("credentials", &engine, &snapshot, &actions);
+
+        assert_eq!(results.first().map(|result| result.kind), Some("Action"));
+        assert!(results
+            .first()
+            .map(|result| result.title.contains("credentials incomplete"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn command_deck_surfaces_tasks_as_console_actions() {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.get_mut("mock").unwrap().disabled = false;
+        let engine = test_engine_with_config(cfg, true);
+        let task = State::new("task-search-1", "repair provider retry policy");
+        let snapshot = Snapshot {
+            tasks: vec![task],
+            ..Snapshot::default()
+        };
+        let actions = action_items(&engine, &snapshot);
+        let results = command_results("retry policy", &engine, &snapshot, &actions);
+
+        assert!(results.iter().any(|result| {
+            result.kind == "Task"
+                && matches!(
+                    &result.target,
+                    CommandTarget::UseTask(task) if task == "repair provider retry policy"
+                )
+        }));
     }
 
     #[test]

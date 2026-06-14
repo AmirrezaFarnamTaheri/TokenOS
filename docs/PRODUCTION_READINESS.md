@@ -21,7 +21,7 @@ plane.
 | Area | Local closure |
 |---|---|
 | Routing correctness | `ASK` terminates locally with one question and zero provider cost. `REUSE` requires an exact verified solution-cache hit. |
-| Native UI | `tokenos app` provides dashboard, action center, console, planner, policy lab, calibration, operations, readiness, tasks, executions, and configuration views without webview/browser dependencies. |
+| Native UI | `tokenos app` provides dashboard, action center, command deck, console, planner, policy lab, calibration, operations, readiness, tasks, executions, and configuration views without webview/browser dependencies. |
 | Build governance | CI covers formatting, clippy, audit, release build, tests, native builds, and documentation drift checks. |
 | Provider safety | Live adapters fail when required key environment variables are missing. Gemini keys travel in headers, not URLs. |
 | Cost control | Conservative token budgeting, shadow pricing, per-task budget sentinel, daily/monthly spend limits, and provider cost forecasts are implemented. |
