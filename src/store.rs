@@ -817,18 +817,30 @@ impl Store {
     }
 
     fn jaccard_similarity(s1: &str, s2: &str) -> f64 {
-        let set1: std::collections::HashSet<String> = s1
-            .to_lowercase()
-            .split_whitespace()
-            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
-            .filter(|w: &String| !w.is_empty())
-            .collect();
-        let set2: std::collections::HashSet<String> = s2
-            .to_lowercase()
-            .split_whitespace()
-            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
-            .filter(|w: &String| !w.is_empty())
-            .collect();
+        const STOP_WORDS: &[&str] = &[
+            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+            "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+            "can", "cannot", "could", "did", "do", "does", "doing", "don", "down", "during", "each", "few",
+            "for", "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself",
+            "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "let", "me", "more",
+            "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
+            "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should", "so", "some", "such",
+            "than", "that", "the", "their", "theirs", "them", "themselves", "then", "there", "these", "they",
+            "this", "those", "through", "to", "too", "under", "until", "up", "very", "was", "we", "were",
+            "what", "when", "where", "which", "while", "who", "whom", "why", "with", "would", "you", "your",
+            "yours", "yourself", "yourselves"
+        ];
+
+        let get_set = |s: &str| -> std::collections::HashSet<String> {
+            s.to_lowercase()
+                .split_whitespace()
+                .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
+                .filter(|w: &String| !w.is_empty() && STOP_WORDS.binary_search(&w.as_str()).is_err())
+                .collect()
+        };
+
+        let set1 = get_set(s1);
+        let set2 = get_set(s2);
 
         if set1.is_empty() && set2.is_empty() {
             return 1.0;
