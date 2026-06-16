@@ -301,7 +301,7 @@ pub fn brace_balance(s: &str) -> i64 {
 
         // Line comment: //
         if c == '/' && chars.peek() == Some(&'/') && !in_double_quote && !in_single_quote {
-            while chars.next().map_or(false, |c| c != '\n') {}
+            while chars.next().is_some_and(|c| c != '\n') {}
             continue;
         }
 
@@ -457,6 +457,13 @@ mod additional_tests {
     fn c_style_block_comment() {
         assert_eq!(
             brace_balance("/* method body { */ int f() { return 0; }"),
+            0
+        );
+    }
+    #[test]
+    fn escaped_quote_with_brace_in_string() {
+        assert_eq!(
+            brace_balance(r#"fn main() { let s = "escaped \" { "; }"#),
             0
         );
     }

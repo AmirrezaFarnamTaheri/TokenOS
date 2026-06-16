@@ -260,7 +260,6 @@ fn add_column_if_not_exists(
 impl Store {
     /// Opens (and migrates) the database at `path`. None = default path,
     /// ":memory:" supported.
-
     pub fn check_fts5(&self) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let res: i32 = conn.query_row("SELECT count(*) FROM pragma_compile_options WHERE compile_options LIKE '%ENABLE_FTS5%'", [], |r| r.get(0)).unwrap_or(0);
@@ -1353,7 +1352,6 @@ CREATE TABLE IF NOT EXISTS api_request_stats (
     }
 
     /// Saves or updates the bandit state for a provider.
-
     pub fn save_tracker_state(&self, state: &crate::pricing::TrackerState) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let cooldown_str = state.cooldown_until.map(|dt| dt.to_rfc3339());
@@ -1397,14 +1395,13 @@ CREATE TABLE IF NOT EXISTS api_request_stats (
             })
         })?;
         let mut states = Vec::new();
-        for r in rows {
-            if let Ok(st) = r {
-                states.push(st);
-            }
+        for st in rows.flatten() {
+            states.push(st);
         }
         Ok(states)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_chained_execution(
         &self,
         exec_id: &str,

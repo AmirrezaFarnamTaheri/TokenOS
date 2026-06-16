@@ -409,7 +409,8 @@ impl TokenOsNativeApp {
     fn refresh_snapshot(&mut self) {
         self.last_refresh = Instant::now();
         self.snapshot = match load_snapshot(&self.engine) {
-            Ok(snapshot) => {
+            Ok(mut snapshot) => {
+                snapshot.actions = action_items(&self.engine, &snapshot);
                 self.status = "telemetry refreshed".to_string();
                 snapshot
             }
@@ -2341,6 +2342,7 @@ fn load_snapshot(engine: &Engine) -> Result<Snapshot> {
         health: Some(engine.store.health_snapshot()?),
         solution_cache: Some(engine.store.solution_cache_stats()?),
         error: None,
+        actions: vec![], // computed later
     })
 }
 
