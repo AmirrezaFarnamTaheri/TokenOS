@@ -104,6 +104,26 @@ pub fn verify_output(
         .unwrap_or(test_command);
 
     if !cmd.is_empty() {
+        // S-02: Security notice if network tools are used
+        let cmd_lower = cmd.to_lowercase();
+        if cmd_lower.contains("curl ")
+            || cmd_lower.contains("wget ")
+            || cmd_lower.contains("nc ")
+            || cmd_lower.contains("ncat ")
+        {
+            eprintln!("SECURITY NOTICE: Verification command contains network-capable tools. Operator is responsible for preventing exfiltration.");
+        }
+
+        // S-03: Use a temporary file to pass the output to the command instead of env var
+
+        let mut temp_file = tempfile::NamedTempFile::new()
+            .expect("Failed to create temporary file for TOKENOS_OUTPUT");
+        use std::io::Write;
+        temp_file
+            .write_all(output.as_bytes())
+            .expect("Failed to write to temporary file");
+        let temp_path = temp_file.path().to_string_lossy().to_string();
+
         let mut command = if cfg!(target_os = "windows") {
             let mut c = std::process::Command::new("powershell");
             c.args(["-Command", cmd]);
@@ -113,7 +133,8 @@ pub fn verify_output(
             c.args(["-c", cmd]);
             c
         };
-        command.env("TOKENOS_OUTPUT", output);
+        command.env("TOKENOS_OUTPUT_FILE", &temp_path);
+
         let cmd_res = command.output();
 
         match cmd_res {
@@ -165,7 +186,19 @@ pub fn verify_output(
 
 fn looks_like_diff(s: &str) -> bool {
     let t = s.trim();
-    t.starts_with("--- ") || t.starts_with("diff ") || t.contains("\n--- ") || t.starts_with("@@")
+    let has_prefix = t.starts_with("--- ")
+        || t.starts_with("diff ")
+        || t.contains(
+            "
+--- ",
+        )
+        || t.starts_with("@@");
+    let has_hunk = t.contains("@@");
+    let has_add_or_sub = t.lines().any(|l| {
+        (l.starts_with('+') && !l.starts_with("+++"))
+            || (l.starts_with('-') && !l.starts_with("---"))
+    });
+    has_prefix && has_hunk && has_add_or_sub
 }
 
 static RE_QUESTION_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)\?\s*$").unwrap());
@@ -183,59 +216,100 @@ fn has_placeholders(s: &str) -> bool {
         || lower.contains("remains unchanged")
         || lower.contains("implementation goes here")
         || lower.contains("implement remaining")
-        || lower.contains("// todo: implement")
-        || lower.contains("# todo: implement")
-        || lower.contains("/* todo: implement")
+        || lower.contains("// todo:")
+        || lower.contains("# todo:")
+        || lower.contains("/* todo:")
+        || lower.contains("// fixme:")
+        || lower.contains("# fixme:")
+        || lower.contains("/* fixme:")
+        || lower.contains("pass # todo")
+        || lower.contains("raise notimplementederror")
+        || lower.contains("// ...")
 }
 
 /// Net {}/()/[] depth, ignoring string literals and line comments (a cheap
 /// approximation of an AST balance check).
-fn brace_balance(s: &str) -> i64 {
-    let bytes = s.as_bytes();
+pub fn brace_balance(s: &str) -> i64 {
     let mut depth: i64 = 0;
-    let mut in_str: u8 = 0;
-    let mut esc = false;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_str != 0 {
-            if esc {
-                esc = false;
-            } else if c == b'\\' {
-                esc = true;
-            } else if c == in_str {
-                in_str = 0;
+    let mut chars = s.chars().peekable();
+    let mut in_double_quote = false;
+    let mut in_single_quote = false;
+    let mut in_block_comment = false;
+    let mut in_raw_string = false;
+    let mut raw_hash_count: usize = 0;
+
+    while let Some(c) = chars.next() {
+        // Block comment entry: /*
+        if !in_double_quote
+            && !in_single_quote
+            && !in_block_comment
+            && !in_raw_string
+            && c == '/'
+            && chars.peek() == Some(&'*')
+        {
+            chars.next();
+            in_block_comment = true;
+            continue;
+        }
+        // Block comment exit: */
+        if in_block_comment && c == '*' && chars.peek() == Some(&'/') {
+            chars.next();
+            in_block_comment = false;
+            continue;
+        }
+        if in_block_comment {
+            continue;
+        }
+
+        // Rust raw string: r#"..."#
+        if c == 'r' && !in_double_quote && !in_single_quote && !in_raw_string {
+            let mut hashes = 0;
+            let mut peek_chars = chars.clone();
+            while peek_chars.peek() == Some(&'#') {
+                peek_chars.next();
+                hashes += 1;
             }
-            i += 1;
-            continue;
+            if peek_chars.peek() == Some(&'"') {
+                in_raw_string = true;
+                raw_hash_count = hashes;
+                for _ in 0..=hashes {
+                    chars.next();
+                }
+                continue;
+            }
         }
-        if esc {
-            esc = false;
-            i += 1;
-            continue;
-        }
-        if c == b'\\' {
-            esc = true;
-            i += 1;
-            continue;
-        }
-        if c == b'"' || c == b'\'' || c == b'`' {
-            in_str = c;
-            i += 1;
-            continue;
-        }
-        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
+        if in_raw_string {
+            if c == '"' {
+                let mut close_hashes = 0;
+                let mut peek_chars = chars.clone();
+                while peek_chars.peek() == Some(&'#') {
+                    peek_chars.next();
+                    close_hashes += 1;
+                }
+                if close_hashes == raw_hash_count {
+                    for _ in 0..raw_hash_count {
+                        chars.next();
+                    }
+                    in_raw_string = false;
+                }
             }
             continue;
         }
+
+        // Line comment: //
+        if c == '/' && chars.peek() == Some(&'/') && !in_double_quote && !in_single_quote {
+            while chars.next().map_or(false, |c| c != '\n') {}
+            continue;
+        }
+
+        // String literal handling + brace counting
         match c {
-            b'{' | b'(' | b'[' => depth += 1,
-            b'}' | b')' | b']' => depth -= 1,
+            '"' if !in_single_quote => in_double_quote = !in_double_quote,
+            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            '{' | '(' | '[' if !in_double_quote && !in_single_quote => depth += 1,
+            '}' | ')' | ']' if !in_double_quote && !in_single_quote => depth -= 1,
             _ => {}
         }
-        i += 1;
     }
     depth
 }
@@ -353,5 +427,29 @@ mod tests {
         assert!(res.pass);
         assert_eq!(res.tier, "tests");
         assert_eq!(res.score, 0.65);
+    }
+}
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+
+    #[test]
+    fn block_comment_with_unbalanced_brace() {
+        assert_eq!(brace_balance("/* { */ fn f() {}"), 0);
+    }
+    #[test]
+    fn rust_raw_string_with_brace() {
+        assert_eq!(
+            brace_balance("let s = r#\"{\"json\":\"value\"}\"#; fn f() {}"),
+            0
+        );
+    }
+    #[test]
+    fn c_style_block_comment() {
+        assert_eq!(
+            brace_balance("/* method body { */ int f() { return 0; }"),
+            0
+        );
     }
 }

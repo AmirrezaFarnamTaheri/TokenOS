@@ -321,6 +321,28 @@ impl Default for RouterPolicy {
 
 /// Router output: the chosen route plus a one-line reason. The reason is for
 /// the human flight recorder, never transmitted upstream.
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComplexityHint {
+    Background, // title generation, summarize, one-liner
+    Low,        // DIRECT, QUERY (Ask?)
+    Medium,     // PATCH, small IMPLEMENT
+    High,       // IMPLEMENT, ESCALATE, large delegation
+}
+
+pub fn extract_complexity_hint(task: &str, route: &Route) -> ComplexityHint {
+    let lower_task = task.to_lowercase();
+    if lower_task.contains("generate a title") || lower_task.contains("summarize in") {
+        ComplexityHint::Background
+    } else if task.len() < 50 && matches!(route, Route::Direct | Route::Ask) {
+        ComplexityHint::Low
+    } else if matches!(route, Route::Implement) {
+        ComplexityHint::High
+    } else {
+        ComplexityHint::Medium
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
     pub route: Route,

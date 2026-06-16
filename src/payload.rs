@@ -18,6 +18,21 @@ use std::fmt::Write as _;
 /// The tiny worker contract. Workers are not smart; the orchestration layer
 /// is. This block must remain byte-stable to maximize provider prefix-cache
 /// hits.
+const IMPLEMENT_CAPABILITY_BOUNDARIES: &str = r#"
+## Capability Boundaries
+
+You MUST produce complete, runnable code. Do NOT:
+- Include TODO comments or placeholder implementations
+- Explain code that was not asked about
+- Ask clarifying questions (the task has been pre-screened)
+- Apologize for limitations
+
+You MUST:
+- Complete every function body
+- Handle the error cases visible in the workspace context
+- Match the naming conventions shown in the provided symbols
+"#;
+
 pub const KERNEL_CONTRACT: &str = "You are a token-optimal execution worker.
 Rules:
 1. Output the finished result only. No preamble, no commentary, no apologies.
@@ -41,6 +56,10 @@ pub fn build(route: Route, st: &State) -> String {
     // --- STATIC BLOCK ---
     b.push_str(KERNEL_CONTRACT);
     b.push_str("\n\n");
+    if route == Route::Implement {
+        b.push_str(IMPLEMENT_CAPABILITY_BOUNDARIES);
+        b.push_str("\n\n");
+    }
 
     // --- SEMI-STATIC BLOCK ---
     if !st.constraints.is_empty() {
@@ -187,16 +206,10 @@ fn unwrap_fence(s: &str) -> Option<String> {
     if !s.starts_with("```") {
         return None;
     }
-    let end = s.rfind("```")?;
-    if end <= 3 {
-        return None;
-    }
     let nl = s.find('\n')?;
-    if nl < end {
-        Some(s[nl + 1..end].trim_end_matches('\n').to_string())
-    } else {
-        None
-    }
+    let end = s[nl + 1..].find("\n```")?;
+    let end_idx = nl + 1 + end;
+    Some(s[nl + 1..end_idx].to_string())
 }
 
 #[cfg(test)]

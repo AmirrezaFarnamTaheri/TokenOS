@@ -48,6 +48,24 @@ static RULES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
                 .unwrap(),
         ),
         ("google_key", Regex::new(r"\bAIza[0-9A-Za-z_-]{30,}\b").unwrap()),
+
+        (
+            "github_token",
+            Regex::new(r"\b(gh[pousr]_[A-Za-z0-9_]{36,})\b").unwrap(),
+        ),
+        (
+            "vercel_token",
+            Regex::new(r"\bverb_[A-Za-z0-9_]{20,}\b").unwrap(),
+        ),
+        (
+            "private_key",
+            Regex::new(r"(?s)-----BEGIN [A-Z]+ PRIVATE KEY-----.*?-----END [A-Z]+ PRIVATE KEY-----").unwrap(),
+        ),
+        (
+            "env_secret",
+            Regex::new(r#"(?m)^(?:[A-Z0-9_]*SECRET[A-Z0-9_]*|PASSWORD|API_KEY)\s*=\s*['"]?([^\s'"]+)['"]?"#).unwrap(),
+        ),
+
         ("slack_token", Regex::new(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b").unwrap()),
         (
             "jwt",
@@ -65,7 +83,7 @@ static RULES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         ),
         (
             "connection_string",
-            Regex::new(r"\b[a-z][a-z0-9+]*://[^/\s:@]+:[^@\s]+@[^\s]+").unwrap(),
+            Regex::new(r"\b[a-z][a-z0-9+]*://[A-Za-z0-9._%-]+:[^@\s/]{3,}@[^\s]+").unwrap(),
         ),
         (
             "email",
@@ -424,4 +442,13 @@ mod tests {
         let (masked, _) = c.mask(&text);
         assert_eq!(c.unmask(&masked), expected);
     }
+}
+
+#[test]
+fn npmjs_url_not_masked() {
+    let mut c = MaskCodec::new();
+    let text = "https://registry.npmjs.org:443/package";
+    let (masked, spans) = c.mask(text);
+    assert_eq!(masked, text);
+    assert_eq!(spans.len(), 0);
 }
