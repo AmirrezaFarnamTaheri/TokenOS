@@ -133,6 +133,7 @@ pub fn verify_output(
             c.args(["-c", cmd]);
             c
         };
+        command.env_remove("TOKENOS_OUTPUT");
         command.env("TOKENOS_OUTPUT_FILE", &temp_path);
 
         let cmd_res = command.output();
@@ -225,6 +226,8 @@ fn has_placeholders(s: &str) -> bool {
         || lower.contains("pass # todo")
         || lower.contains("raise notimplementederror")
         || lower.contains("// ...")
+        || lower.contains("todo!()")
+        || lower.contains("unimplemented!()")
 }
 
 /// Net {}/()/[] depth, ignoring string literals and line comments (a cheap
@@ -303,6 +306,11 @@ pub fn brace_balance(s: &str) -> i64 {
         }
 
         // String literal handling + brace counting
+        if (in_double_quote || in_single_quote) && c == '\\' {
+            chars.next();
+            continue;
+        }
+
         match c {
             '"' if !in_single_quote => in_double_quote = !in_double_quote,
             '\'' if !in_double_quote => in_single_quote = !in_single_quote,

@@ -336,7 +336,13 @@ pub fn extract_complexity_hint(task: &str, route: &Route) -> ComplexityHint {
         ComplexityHint::Background
     } else if task.len() < 50 && matches!(route, Route::Direct | Route::Ask) {
         ComplexityHint::Low
-    } else if matches!(route, Route::Implement) {
+    } else if matches!(
+        route,
+        Route::Implement
+            | Route::EscalateConflict
+            | Route::EscalateSafety
+            | Route::EscalateExternal
+    ) {
         ComplexityHint::High
     } else {
         ComplexityHint::Medium

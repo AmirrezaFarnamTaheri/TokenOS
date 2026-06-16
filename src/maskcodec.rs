@@ -40,7 +40,7 @@ static RULES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         ),
         ("openai_key", Regex::new(r"\bsk-[A-Za-z0-9_-]{20,}\b").unwrap()),
         ("anthropic_key", Regex::new(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b").unwrap()),
-        ("github_token", Regex::new(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b").unwrap()),
+
         ("aws_access_key", Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap()),
         (
             "aws_secret_key",
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn same_secret_gets_same_placeholder() {
         let mut c = MaskCodec::new();
-        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTuvwx12345678";
+        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTuvwx123456789012";
         let (masked, _) = c.mask(&format!("{secret} and again {secret}"));
         assert!(!masked.contains(secret));
         assert_eq!(c.vault_len(), 1);

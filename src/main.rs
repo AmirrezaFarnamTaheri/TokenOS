@@ -459,6 +459,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
             eprintln!("Checking configuration...");
             let mut all_ok = true;
+            let mut hard_ok = true;
             if cfg.security.daily_spend_limit_usd > 0.0 {
                 eprintln!(
                     "  ✓ daily_spend_limit_usd [OK] limit is ${:.2}",
@@ -491,6 +492,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             if cfg.providers.is_empty() {
                 eprintln!("  ✗ No providers configured in tokenos.yaml!");
                 all_ok = false;
+                hard_ok = false;
+            } else if cfg.providers.values().all(|p| p.disabled) {
+                eprintln!("  ✗ No enabled providers configured in tokenos.yaml!");
+                all_ok = false;
+                hard_ok = false;
             } else {
                 for (name, p) in &cfg.providers {
                     if p.disabled {
@@ -601,10 +607,10 @@ Estimated readiness: 100% (No issues found)"
                 );
                 println!("status        {}", if store_ok { "OK" } else { "CHECK" });
             }
-            if store_ok {
+            if store_ok && hard_ok {
                 Ok(())
             } else {
-                Err(anyhow!("doctor found SQLite integrity problems"))
+                Err(anyhow::anyhow!("doctor found readiness problems"))
             }
         }
         Command::Attempts { limit, engine: ef } => {

@@ -94,9 +94,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      - name: Validate sample dataset
+        run: cargo run --bin tokenos -- eval --dataset sample_dataset.yaml --dry-run
       - name: Package
         run: |
           cd dist
@@ -108,6 +112,3 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tar.gz
-
-      - name: Validate sample dataset
-        run: cargo run --bin tokenos -- eval --dataset sample_dataset.yaml --dry-run
