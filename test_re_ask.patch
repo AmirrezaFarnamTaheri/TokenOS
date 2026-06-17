@@ -1,0 +1,12 @@
+--- src/engine.rs
++++ src/engine.rs
+@@ -704,7 +704,6 @@
+         let mut last_err: Option<anyhow::Error> = None;
+         let mut cascade_escalations = 0;
+         let mut first_attempt_executed = false;
+-        let mut re_asks_left = self.cfg.policy.re_ask_limit;
+         let mut current_prompt;
+
++        let mut re_asks_left = self.cfg.policy.re_ask_limit;
++
+         for prov_name in ordered_providers_banditized(&quotes, &chain, &self.bandit) {
