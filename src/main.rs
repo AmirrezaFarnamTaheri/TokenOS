@@ -454,6 +454,73 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Doctor { json, engine: ef } => {
             let eng = build_engine(&ef)?;
+            let store = &eng.store;
+            let cfg = &eng.cfg;
+
+            eprintln!("Checking configuration...");
+            let mut all_ok = true;
+            let mut hard_ok = true;
+            if cfg.security.daily_spend_limit_usd > 0.0 {
+                eprintln!(
+                    "  ✓ daily_spend_limit_usd [OK] limit is ${:.2}",
+                    cfg.security.daily_spend_limit_usd
+                );
+            } else {
+                eprintln!(
+                    "  ✗ daily_spend_limit_usd [WARN] not set or <= 0.0 - no spend guard active"
+                );
+                all_ok = false;
+            }
+
+            eprintln!("Checking database...");
+            let db_path = ef
+                .db
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(store::default_path);
+            eprintln!("  ✓ SQLite [OK] Path: {}", db_path.display());
+
+            let fts_ok = store.check_fts5().unwrap_or(false);
+            if fts_ok {
+                eprintln!("  ✓ FTS5   [OK] FTS5 extension loaded successfully");
+            } else {
+                eprintln!("  ✗ FTS5   [WARN] FTS5 extension missing. Semantic cache will fall back to exact matching.");
+                all_ok = false;
+            }
+
+            eprintln!("Checking providers...");
+            if cfg.providers.is_empty() {
+                eprintln!("  ✗ No providers configured in tokenos.yaml!");
+                all_ok = false;
+                hard_ok = false;
+            } else if cfg.providers.values().all(|p| p.disabled) {
+                eprintln!("  ✗ No enabled providers configured in tokenos.yaml!");
+                all_ok = false;
+                hard_ok = false;
+            } else {
+                for (name, p) in &cfg.providers {
+                    if p.disabled {
+                        eprintln!("  - {} [DISABLED]", name);
+                    } else if p.adapter == "mock" {
+                        eprintln!("  ✓ {} [OK] adapter: mock", name);
+                    } else {
+                        eprintln!("  ✓ {} [OK] adapter: {}", name, p.adapter);
+                    }
+                }
+            }
+
+            if !all_ok {
+                eprintln!(
+                    "
+Diagnostics found potential issues. Please review the warnings above."
+                );
+            } else {
+                eprintln!(
+                    "
+Estimated readiness: 100% (No issues found)"
+                );
+            }
+
             let health = eng.store.health_snapshot()?;
             let store_ok = health.quick_check == "ok";
             let enabled = eng.cfg.providers.values().filter(|p| !p.disabled).count();
@@ -540,10 +607,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 );
                 println!("status        {}", if store_ok { "OK" } else { "CHECK" });
             }
-            if store_ok {
+            if store_ok && hard_ok {
                 Ok(())
             } else {
-                Err(anyhow!("doctor found SQLite integrity problems"))
+                Err(anyhow::anyhow!("doctor found readiness problems"))
             }
         }
         Command::Attempts { limit, engine: ef } => {

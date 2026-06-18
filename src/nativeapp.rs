@@ -228,12 +228,12 @@ struct ABSimulationResult {
     actual_route: Option<Route>,
     actual_cost: Option<f64>,
     actual_latency_ms: Option<i64>,
-    
+
     route_a: Route,
     cost_a: f64,
     latency_a: i64,
     reason_a: String,
-    
+
     route_b: Route,
     cost_b: f64,
     latency_b: i64,
@@ -244,15 +244,15 @@ struct ABSimulationResult {
 struct ABReport {
     simulations: Vec<ABSimulationResult>,
     total_tasks: usize,
-    
+
     total_cost_a: f64,
     total_cost_b: f64,
     avg_latency_a: f64,
     avg_latency_b: f64,
-    
+
     route_distribution_a: std::collections::HashMap<Route, usize>,
     route_distribution_b: std::collections::HashMap<Route, usize>,
-    
+
     different_routes_count: usize,
 }
 
@@ -409,7 +409,8 @@ impl TokenOsNativeApp {
     fn refresh_snapshot(&mut self) {
         self.last_refresh = Instant::now();
         self.snapshot = match load_snapshot(&self.engine) {
-            Ok(snapshot) => {
+            Ok(mut snapshot) => {
+                snapshot.actions = action_items(&self.engine, &snapshot);
                 self.status = "telemetry refreshed".to_string();
                 snapshot
             }
@@ -601,7 +602,7 @@ impl TokenOsNativeApp {
             error_box(ui, err);
         }
         if let Some(sum) = &self.snapshot.summary {
-            let actions = action_items(&self.engine, &self.snapshot);
+            let actions = &self.snapshot.actions;
             metric_grid(
                 ui,
                 &[
@@ -677,7 +678,7 @@ impl TokenOsNativeApp {
             "Action Center",
             "prioritized operational work from readiness, spend, drift, and provider health",
         );
-        let actions = action_items(&self.engine, &self.snapshot);
+        let actions = &self.snapshot.actions;
         let critical = actions
             .iter()
             .filter(|a| a.severity == ActionSeverity::Critical)
@@ -782,7 +783,7 @@ impl TokenOsNativeApp {
             }
         });
 
-        let actions = action_items(&self.engine, &self.snapshot);
+        let actions = &self.snapshot.actions;
         let results = command_results(&self.command_query, &self.engine, &self.snapshot, &actions);
         let action_hits = results
             .iter()
@@ -928,9 +929,7 @@ impl TokenOsNativeApp {
                     stats
                         .map(|stats| pct(stats.success_rate))
                         .unwrap_or_else(|| "n/a".to_string()),
-                    stats
-                        .map(|stats| stats.success_rate >= 0.8)
-                        .unwrap_or(true),
+                    stats.map(|stats| stats.success_rate >= 0.8).unwrap_or(true),
                 ),
                 (
                     "Breaker",
@@ -1423,8 +1422,16 @@ impl TokenOsNativeApp {
     }
 
     fn execute_ab_simulation(&self) -> Result<ABReport, String> {
-        let tasks = self.engine.store.list_tasks(100).map_err(|e| e.to_string())?;
-        let executions = self.engine.store.list_executions(200).map_err(|e| e.to_string())?;
+        let tasks = self
+            .engine
+            .store
+            .list_tasks(100)
+            .map_err(|e| e.to_string())?;
+        let executions = self
+            .engine
+            .store
+            .list_executions(200)
+            .map_err(|e| e.to_string())?;
 
         let mut route_costs = std::collections::HashMap::new();
         let mut route_latencies = std::collections::HashMap::new();
@@ -1443,14 +1450,24 @@ impl TokenOsNativeApp {
         let mut avg_latency = std::collections::HashMap::new();
         for (r_str, cnt) in route_counts {
             if cnt > 0 {
-                avg_cost.insert(r_str.clone(), route_costs.get(&r_str).cloned().unwrap_or(0.0) / cnt as f64);
-                avg_latency.insert(r_str.clone(), route_latencies.get(&r_str).cloned().unwrap_or(0) / cnt as i64);
+                avg_cost.insert(
+                    r_str.clone(),
+                    route_costs.get(&r_str).cloned().unwrap_or(0.0) / cnt as f64,
+                );
+                avg_latency.insert(
+                    r_str.clone(),
+                    route_latencies.get(&r_str).cloned().unwrap_or(0) / cnt as i64,
+                );
             }
         }
 
         let fallback_latency = |r: &Route| -> i64 {
             match r {
-                Route::Ask | Route::Verify | Route::EscalateConflict | Route::EscalateSafety | Route::EscalateExternal => 150,
+                Route::Ask
+                | Route::Verify
+                | Route::EscalateConflict
+                | Route::EscalateSafety
+                | Route::EscalateExternal => 150,
                 Route::Direct => 800,
                 Route::Reuse => 300,
                 Route::Patch => 1500,
@@ -1470,26 +1487,50 @@ impl TokenOsNativeApp {
         let mut different_routes_count = 0;
 
         for task in &tasks {
-            let (dec_a, _) = self.engine.route_only_with_policy_constraints(&task.goal, &task.constraints, &self.ab_policy_a);
-            let (dec_b, _) = self.engine.route_only_with_policy_constraints(&task.goal, &task.constraints, &self.ab_policy_b);
+            let (dec_a, _) = self.engine.route_only_with_policy_constraints(
+                &task.goal,
+                &task.constraints,
+                &self.ab_policy_a,
+            );
+            let (dec_b, _) = self.engine.route_only_with_policy_constraints(
+                &task.goal,
+                &task.constraints,
+                &self.ab_policy_b,
+            );
 
             let matched_exec = executions.iter().find(|e| e.task_id == task.task_id);
 
             let (cost_a, latency_a) = matched_exec
                 .filter(|e| e.route == dec_a.route.to_string())
                 .map(|e| (e.est_cost_usd, e.latency_ms))
-                .unwrap_or_else(|| (
-                    avg_cost.get(&dec_a.route.to_string()).copied().unwrap_or_else(|| dec_a.route.cost()),
-                    avg_latency.get(&dec_a.route.to_string()).copied().unwrap_or_else(|| fallback_latency(&dec_a.route))
-                ));
+                .unwrap_or_else(|| {
+                    (
+                        avg_cost
+                            .get(&dec_a.route.to_string())
+                            .copied()
+                            .unwrap_or_else(|| dec_a.route.cost()),
+                        avg_latency
+                            .get(&dec_a.route.to_string())
+                            .copied()
+                            .unwrap_or_else(|| fallback_latency(&dec_a.route)),
+                    )
+                });
 
             let (cost_b, latency_b) = matched_exec
                 .filter(|e| e.route == dec_b.route.to_string())
                 .map(|e| (e.est_cost_usd, e.latency_ms))
-                .unwrap_or_else(|| (
-                    avg_cost.get(&dec_b.route.to_string()).copied().unwrap_or_else(|| dec_b.route.cost()),
-                    avg_latency.get(&dec_b.route.to_string()).copied().unwrap_or_else(|| fallback_latency(&dec_b.route))
-                ));
+                .unwrap_or_else(|| {
+                    (
+                        avg_cost
+                            .get(&dec_b.route.to_string())
+                            .copied()
+                            .unwrap_or_else(|| dec_b.route.cost()),
+                        avg_latency
+                            .get(&dec_b.route.to_string())
+                            .copied()
+                            .unwrap_or_else(|| fallback_latency(&dec_b.route)),
+                    )
+                });
 
             total_cost_a += cost_a;
             total_cost_b += cost_b;
@@ -1507,30 +1548,28 @@ impl TokenOsNativeApp {
                 task_id: task.task_id.clone(),
                 goal: task.goal.clone(),
                 constraints: task.constraints.clone(),
-                actual_route: matched_exec.map(|e| {
-                    match e.route.as_str() {
-                        "DIRECT" => Route::Direct,
-                        "REUSE" => Route::Reuse,
-                        "PATCH" => Route::Patch,
-                        "IMPLEMENT" => Route::Implement,
-                        "PARTIAL" => Route::Partial,
-                        "DELEGATE" => Route::Delegate,
-                        "ASK" => Route::Ask,
-                        "VERIFY" => Route::Verify,
-                        "ESCALATE-CONFLICT" => Route::EscalateConflict,
-                        "ESCALATE-SAFETY" => Route::EscalateSafety,
-                        "ESCALATE-EXTERNAL" => Route::EscalateExternal,
-                        _ => Route::Direct,
-                    }
+                actual_route: matched_exec.map(|e| match e.route.as_str() {
+                    "DIRECT" => Route::Direct,
+                    "REUSE" => Route::Reuse,
+                    "PATCH" => Route::Patch,
+                    "IMPLEMENT" => Route::Implement,
+                    "PARTIAL" => Route::Partial,
+                    "DELEGATE" => Route::Delegate,
+                    "ASK" => Route::Ask,
+                    "VERIFY" => Route::Verify,
+                    "ESCALATE-CONFLICT" => Route::EscalateConflict,
+                    "ESCALATE-SAFETY" => Route::EscalateSafety,
+                    "ESCALATE-EXTERNAL" => Route::EscalateExternal,
+                    _ => Route::Direct,
                 }),
                 actual_cost: matched_exec.map(|e| e.est_cost_usd),
                 actual_latency_ms: matched_exec.map(|e| e.latency_ms),
-                
+
                 route_a: dec_a.route,
                 cost_a,
                 latency_a,
                 reason_a: dec_a.reason.clone(),
-                
+
                 route_b: dec_b.route,
                 cost_b,
                 latency_b,
@@ -1606,7 +1645,7 @@ impl TokenOsNativeApp {
 
         if let Some(report) = &self.ab_report {
             ui.add_space(16.0);
-            
+
             let cost_delta = report.total_cost_a - report.total_cost_b;
             let lat_delta = report.avg_latency_a - report.avg_latency_b;
             let div_pct = if report.total_tasks > 0 {
@@ -1619,41 +1658,79 @@ impl TokenOsNativeApp {
                 ui,
                 &[
                     ("Total Tasks", report.total_tasks.to_string(), false),
-                    ("Divergence Rate", format!("{:.1}%", div_pct), report.different_routes_count > 0),
+                    (
+                        "Divergence Rate",
+                        format!("{:.1}%", div_pct),
+                        report.different_routes_count > 0,
+                    ),
                     ("Policy A Cost", usd(report.total_cost_a), false),
                     ("Policy B Cost", usd(report.total_cost_b), false),
                     ("Cost Savings", usd(cost_delta), cost_delta >= 0.0),
-                    ("Avg Latency A", format!("{:.0}ms", report.avg_latency_a), false),
-                    ("Avg Latency B", format!("{:.0}ms", report.avg_latency_b), false),
-                    ("Latency Delta", format!("{:.0}ms", lat_delta), lat_delta >= 0.0),
+                    (
+                        "Avg Latency A",
+                        format!("{:.0}ms", report.avg_latency_a),
+                        false,
+                    ),
+                    (
+                        "Avg Latency B",
+                        format!("{:.0}ms", report.avg_latency_b),
+                        false,
+                    ),
+                    (
+                        "Latency Delta",
+                        format!("{:.0}ms", lat_delta),
+                        lat_delta >= 0.0,
+                    ),
                 ],
             );
 
             ui.add_space(16.0);
-            
+
             ui.columns(2, |cols| {
                 cols[0].vertical(|ui| {
                     ui.label(RichText::new("Performance Comparison Chart").strong());
-                    ab_comparison_chart(ui, report.total_cost_a, report.total_cost_b, report.avg_latency_a, report.avg_latency_b);
+                    ab_comparison_chart(
+                        ui,
+                        report.total_cost_a,
+                        report.total_cost_b,
+                        report.avg_latency_a,
+                        report.avg_latency_b,
+                    );
                 });
                 cols[1].vertical(|ui| {
                     ui.label(RichText::new("Route Type Distribution").strong());
-                    ScrollArea::vertical()
-                        .max_height(160.0)
-                        .show(ui, |ui| {
-                            Grid::new("ab_route_distribution").striped(true).show(ui, |ui| {
+                    ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                        Grid::new("ab_route_distribution")
+                            .striped(true)
+                            .show(ui, |ui| {
                                 ui.label(RichText::new("Route").strong());
                                 ui.label(RichText::new("Policy A").strong());
                                 ui.label(RichText::new("Policy B").strong());
                                 ui.end_row();
 
                                 for route in &[
-                                    Route::Direct, Route::Reuse, Route::Patch, Route::Implement,
-                                    Route::Partial, Route::Delegate, Route::Ask, Route::Verify,
-                                    Route::EscalateConflict, Route::EscalateSafety, Route::EscalateExternal
+                                    Route::Direct,
+                                    Route::Reuse,
+                                    Route::Patch,
+                                    Route::Implement,
+                                    Route::Partial,
+                                    Route::Delegate,
+                                    Route::Ask,
+                                    Route::Verify,
+                                    Route::EscalateConflict,
+                                    Route::EscalateSafety,
+                                    Route::EscalateExternal,
                                 ] {
-                                    let count_a = report.route_distribution_a.get(route).copied().unwrap_or(0);
-                                    let count_b = report.route_distribution_b.get(route).copied().unwrap_or(0);
+                                    let count_a = report
+                                        .route_distribution_a
+                                        .get(route)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    let count_b = report
+                                        .route_distribution_b
+                                        .get(route)
+                                        .copied()
+                                        .unwrap_or(0);
                                     if count_a > 0 || count_b > 0 {
                                         ui.label(route.to_string());
                                         ui.label(count_a.to_string());
@@ -1662,7 +1739,7 @@ impl TokenOsNativeApp {
                                     }
                                 }
                             });
-                        });
+                    });
                 });
             });
 
@@ -1676,11 +1753,20 @@ impl TokenOsNativeApp {
                     .collect();
 
                 if discrepancies.is_empty() {
-                    ui.label(RichText::new("No routing differences between Policy A and Policy B.").color(good()));
+                    ui.label(
+                        RichText::new("No routing differences between Policy A and Policy B.")
+                            .color(good()),
+                    );
                 } else {
-                    ui.label(RichText::new(format!("Showing {} tasks with different routing decisions:", discrepancies.len())).color(muted()));
+                    ui.label(
+                        RichText::new(format!(
+                            "Showing {} tasks with different routing decisions:",
+                            discrepancies.len()
+                        ))
+                        .color(muted()),
+                    );
                     ui.add_space(8.0);
-                    
+
                     ScrollArea::vertical()
                         .max_height(250.0)
                         .show(ui, |ui| {
@@ -1702,13 +1788,13 @@ impl TokenOsNativeApp {
                                         } else {
                                             sim.goal.clone()
                                         };
-                                        
+
                                         let mut hover_text = format!("ID: {}\n\nGoal:\n{}", sim.task_id, sim.goal);
                                         if !sim.constraints.is_empty() {
                                             hover_text.push_str(&format!("\n\nConstraints:\n- {}", sim.constraints.join("\n- ")));
                                         }
                                         ui.label(goal_truncated).on_hover_text(hover_text);
-                                        
+
                                         if let Some(r) = sim.actual_route {
                                             let cost_str = sim.actual_cost.map(|c| usd(c)).unwrap_or_else(|| "n/a".to_string());
                                             let lat_str = sim.actual_latency_ms.map(|l| format!("{}ms", l)).unwrap_or_else(|| "n/a".to_string());
@@ -1720,10 +1806,10 @@ impl TokenOsNativeApp {
 
                                         ui.label(RichText::new(sim.route_a.to_string()).color(Color32::from_rgb(96, 165, 250)))
                                           .on_hover_text(format!("Policy A (Control) Details:\nSimulated Cost: {}\nSimulated Latency: {}ms", usd(sim.cost_a), sim.latency_a));
-                                          
+
                                         ui.label(RichText::new(sim.route_b.to_string()).color(Color32::from_rgb(168, 85, 247)))
                                           .on_hover_text(format!("Policy B (Variant) Details:\nSimulated Cost: {}\nSimulated Latency: {}ms", usd(sim.cost_b), sim.latency_b));
-                                          
+
                                         ui.label(format!("A: {}\nB: {}", sim.reason_a, sim.reason_b));
                                         ui.end_row();
                                     }
@@ -2256,6 +2342,7 @@ fn load_snapshot(engine: &Engine) -> Result<Snapshot> {
         health: Some(engine.store.health_snapshot()?),
         solution_cache: Some(engine.store.solution_cache_stats()?),
         error: None,
+        actions: vec![], // computed later
     })
 }
 
@@ -2554,7 +2641,7 @@ fn install_style(ctx: &Context) {
     style.visuals.window_fill = bg();
     style.visuals.panel_fill = bg();
     style.visuals.extreme_bg_color = panel_dark();
-    
+
     // Customize corner radius (egui defaults to 4.0, we make it 6.0/8.0 as per design system)
     style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
     style.visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
@@ -2565,7 +2652,7 @@ fn install_style(ctx: &Context) {
     // Customize interactive button fills and borders
     style.visuals.widgets.inactive.bg_fill = panel_fill();
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(30, 41, 59));
-    
+
     // Hover: slate-800 background, emerald green text, subtle slate-700 border
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(30, 41, 59);
     style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(71, 85, 105));
@@ -3916,12 +4003,24 @@ fn spend_chart(ui: &mut Ui, history: &[DailySpend]) {
 
         if let Some(pos) = hover_pos {
             if bar.contains(pos) {
-                egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(format!("spend_day_{}", idx)), |ui: &mut egui::Ui| {
-                    ui.label(RichText::new(format!(
-                        "Date: {}\nCost: {}\nRuns: {}\nSuccesses: {}",
-                        day.day, usd(day.cost_usd), day.runs, day.successes
-                    )).monospace().color(Color32::WHITE));
-                });
+                egui::show_tooltip_at_pointer(
+                    ui.ctx(),
+                    ui.layer_id(),
+                    egui::Id::new(format!("spend_day_{}", idx)),
+                    |ui: &mut egui::Ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Date: {}\nCost: {}\nRuns: {}\nSuccesses: {}",
+                                day.day,
+                                usd(day.cost_usd),
+                                day.runs,
+                                day.successes
+                            ))
+                            .monospace()
+                            .color(Color32::WHITE),
+                        );
+                    },
+                );
             }
         }
     }
@@ -3968,12 +4067,17 @@ fn sweep_chart(ui: &mut Ui, rows: &[SweepRow]) {
         // Show tooltip on hover
         if let Some(pos) = hover_pos {
             if bar.contains(pos) || apgr_bar.contains(pos) {
-                egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(format!("sweep_row_{}", idx)), |ui: &mut egui::Ui| {
-                    ui.label(RichText::new(format!(
+                egui::show_tooltip_at_pointer(
+                    ui.ctx(),
+                    ui.layer_id(),
+                    egui::Id::new(format!("sweep_row_{}", idx)),
+                    |ui: &mut egui::Ui| {
+                        ui.label(RichText::new(format!(
                         "Threshold: {:.2}\nAccuracy: {:.1}%\nAPGR: {:.1}%\nRouter Cost: {}\nSavings: {}",
                         row.threshold, row.accuracy, row.apgr, usd(row.router_cost), usd(row.savings)
                     )).monospace().color(Color32::WHITE));
-                });
+                    },
+                );
             }
         }
     }
@@ -3995,7 +4099,7 @@ fn ab_comparison_chart(ui: &mut Ui, cost_a: f64, cost_b: f64, latency_a: f64, la
     let max_latency = latency_a.max(latency_b).max(1.0);
 
     let plot_h = rect.height() - 60.0;
-    
+
     // Cost Comparison (Left half)
     let left_center_x = rect.left() + rect.width() * 0.25;
     let cost_bar_w = 50.0;
@@ -4003,7 +4107,10 @@ fn ab_comparison_chart(ui: &mut Ui, cost_a: f64, cost_b: f64, latency_a: f64, la
     let cost_h_b = ((cost_b / max_cost) as f32 * plot_h).max(3.0);
 
     let cost_bar_a = egui::Rect::from_min_size(
-        egui::pos2(left_center_x - cost_bar_w - 15.0, rect.bottom() - 35.0 - cost_h_a),
+        egui::pos2(
+            left_center_x - cost_bar_w - 15.0,
+            rect.bottom() - 35.0 - cost_h_a,
+        ),
         Vec2::new(cost_bar_w, cost_h_a),
     );
     let cost_bar_b = egui::Rect::from_min_size(
@@ -4018,14 +4125,20 @@ fn ab_comparison_chart(ui: &mut Ui, cost_a: f64, cost_b: f64, latency_a: f64, la
     painter.rect_filled(cost_bar_b, CornerRadius::same(4), color_b);
 
     painter.text(
-        egui::pos2(left_center_x - cost_bar_w / 2.0 - 15.0, rect.bottom() - 35.0 - cost_h_a - 15.0),
+        egui::pos2(
+            left_center_x - cost_bar_w / 2.0 - 15.0,
+            rect.bottom() - 35.0 - cost_h_a - 15.0,
+        ),
         egui::Align2::CENTER_BOTTOM,
         format!("${:.4}", cost_a),
         FontId::proportional(11.0),
         Color32::WHITE,
     );
     painter.text(
-        egui::pos2(left_center_x + cost_bar_w / 2.0 + 15.0, rect.bottom() - 35.0 - cost_h_b - 15.0),
+        egui::pos2(
+            left_center_x + cost_bar_w / 2.0 + 15.0,
+            rect.bottom() - 35.0 - cost_h_b - 15.0,
+        ),
         egui::Align2::CENTER_BOTTOM,
         format!("${:.4}", cost_b),
         FontId::proportional(11.0),
@@ -4046,7 +4159,10 @@ fn ab_comparison_chart(ui: &mut Ui, cost_a: f64, cost_b: f64, latency_a: f64, la
     let lat_h_b = ((latency_b / max_latency) as f32 * plot_h).max(3.0);
 
     let lat_bar_a = egui::Rect::from_min_size(
-        egui::pos2(right_center_x - lat_bar_w - 15.0, rect.bottom() - 35.0 - lat_h_a),
+        egui::pos2(
+            right_center_x - lat_bar_w - 15.0,
+            rect.bottom() - 35.0 - lat_h_a,
+        ),
         Vec2::new(lat_bar_w, lat_h_a),
     );
     let lat_bar_b = egui::Rect::from_min_size(
@@ -4058,14 +4174,20 @@ fn ab_comparison_chart(ui: &mut Ui, cost_a: f64, cost_b: f64, latency_a: f64, la
     painter.rect_filled(lat_bar_b, CornerRadius::same(4), color_b);
 
     painter.text(
-        egui::pos2(right_center_x - lat_bar_w / 2.0 - 15.0, rect.bottom() - 35.0 - lat_h_a - 15.0),
+        egui::pos2(
+            right_center_x - lat_bar_w / 2.0 - 15.0,
+            rect.bottom() - 35.0 - lat_h_a - 15.0,
+        ),
         egui::Align2::CENTER_BOTTOM,
         format!("{:.0}ms", latency_a),
         FontId::proportional(11.0),
         Color32::WHITE,
     );
     painter.text(
-        egui::pos2(right_center_x + lat_bar_w / 2.0 + 15.0, rect.bottom() - 35.0 - lat_h_b - 15.0),
+        egui::pos2(
+            right_center_x + lat_bar_w / 2.0 + 15.0,
+            rect.bottom() - 35.0 - lat_h_b - 15.0,
+        ),
         egui::Align2::CENTER_BOTTOM,
         format!("{:.0}ms", latency_b),
         FontId::proportional(11.0),

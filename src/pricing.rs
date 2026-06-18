@@ -86,7 +86,90 @@ impl Default for Tracker {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrackerState {
+    pub provider: String,
+    pub ewma_latency: f64,
+    pub ewma_fails: f64,
+    pub cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 impl Tracker {
+    pub fn get_state(&self, provider: &str) -> Option<TrackerState> {
+        let guard = self.state.lock().unwrap();
+        guard.get(provider).map(|h| {
+            let cooldown = h.cooldown_until.map(|inst| {
+                let now = Instant::now();
+                if inst > now {
+                    chrono::Utc::now()
+                        + chrono::Duration::from_std(inst.duration_since(now)).unwrap()
+                } else {
+                    chrono::Utc::now()
+                        - chrono::Duration::from_std(now.duration_since(inst)).unwrap()
+                }
+            });
+            TrackerState {
+                provider: provider.to_string(),
+                ewma_latency: h.ewma_latency_ms,
+                ewma_fails: h.fail_ewma,
+                cooldown_until: cooldown,
+            }
+        })
+    }
+
+    pub fn get_states(&self) -> Vec<TrackerState> {
+        let guard = self.state.lock().unwrap();
+        guard
+            .iter()
+            .map(|(p, h)| {
+                let cooldown = h.cooldown_until.map(|inst| {
+                    let now = Instant::now();
+                    if inst > now {
+                        chrono::Utc::now()
+                            + chrono::Duration::from_std(inst.duration_since(now)).unwrap()
+                    } else {
+                        chrono::Utc::now()
+                            - chrono::Duration::from_std(now.duration_since(inst)).unwrap()
+                    }
+                });
+                TrackerState {
+                    provider: p.clone(),
+                    ewma_latency: h.ewma_latency_ms,
+                    ewma_fails: h.fail_ewma,
+                    cooldown_until: cooldown,
+                }
+            })
+            .collect()
+    }
+
+    pub fn load_states(&self, states: Vec<TrackerState>) {
+        let mut guard = self.state.lock().unwrap();
+        for state in states {
+            let cooldown_until = state.cooldown_until.and_then(|dt| {
+                let now_utc = chrono::Utc::now();
+                if dt > now_utc {
+                    Some(
+                        Instant::now()
+                            + (dt - now_utc).to_std().unwrap_or(std::time::Duration::ZERO),
+                    )
+                } else {
+                    None
+                }
+            });
+            guard.insert(
+                state.provider,
+                Health {
+                    ewma_latency_ms: state.ewma_latency,
+                    fail_ewma: state.ewma_fails,
+                    calls: vec![],
+                    cooldown_until,
+                    consecutive_429s: 0,
+                    half_open_in_flight: false,
+                },
+            );
+        }
+    }
+
     /// Tracker with a 1-minute quota window.
     pub fn new() -> Self {
         Tracker {

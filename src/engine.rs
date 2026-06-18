@@ -90,9 +90,13 @@ fn new_id() -> String {
 
 /// Stable scope key for the persistent loop-detector window: identical task
 /// text across cold CLI invocations maps to the same history bucket.
-fn loop_scope(task: &str) -> String {
+fn sha256_hex(task: &str) -> String {
     use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(task.trim().as_bytes()))[..16].to_string()
+    hex::encode(Sha256::digest(task.trim().as_bytes()))
+}
+
+fn loop_scope(task: &str) -> String {
+    sha256_hex(task)[..16].to_string()
 }
 
 /// Stable digest of the task text used to key failure memory:
@@ -113,8 +117,7 @@ fn solution_cache_key(task: &str, constraints: &[String]) -> String {
 }
 
 fn goal_hash(task: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(task.trim().as_bytes()))
+    sha256_hex(task)
 }
 
 fn clarifying_question(sig: &Signals) -> String {
@@ -701,6 +704,8 @@ impl Engine {
         let mut last_err: Option<anyhow::Error> = None;
         let mut cascade_escalations = 0;
         let mut first_attempt_executed = false;
+        let mut re_asks_left = self.cfg.policy.re_ask_limit;
+        let mut current_prompt;
 
         for prov_name in ordered_providers_banditized(&quotes, &chain, &self.bandit) {
             // Skip candidates priced over the task budget.
@@ -751,8 +756,7 @@ impl Engine {
             }
             first_attempt_executed = true;
 
-            let mut re_asks_left = self.cfg.policy.re_ask_limit;
-            let mut current_prompt = prompt.clone();
+            current_prompt = prompt.clone();
 
             #[allow(unused_assignments)]
             let mut final_resp = None;
@@ -811,6 +815,9 @@ impl Engine {
 
                 let lat = start.elapsed().as_millis() as i64;
                 self.tracker.record(&prov_name, lat as f64, resp.is_ok());
+                if let Some(state) = self.tracker.get_state(&prov_name) {
+                    let _ = self.store.save_tracker_state(&state);
+                }
                 match &resp {
                     Err(crate::provider::ProviderError::RateLimited { retry_after }) => {
                         if let Some(dur) = retry_after {
@@ -820,6 +827,9 @@ impl Engine {
                         }
                     }
                     _ => self.tracker.clear_cooldown(&prov_name),
+                }
+                if let Some(state) = self.tracker.get_state(&prov_name) {
+                    let _ = self.store.save_tracker_state(&state);
                 }
 
                 if resp.is_err() {
@@ -1887,9 +1897,9 @@ mod tests {
 
         // Define verification command that reads TOKENOS_OUTPUT env var and outputs score: 0.5 for provider_a and 0.9 for provider_b
         e.cfg.policy.verification_command = if cfg!(target_os = "windows") {
-            "if ($env:TOKENOS_OUTPUT -like '*provider_a*') { Write-Output 'score: 0.5' } else { Write-Output 'score: 0.9' }".to_string()
+            "if (Get-Content $env:TOKENOS_OUTPUT_FILE -Raw -ErrorAction SilentlyContinue) -like '*provider_a*' { Write-Output 'score: 0.5' } else { Write-Output 'score: 0.9' }".to_string()
         } else {
-            "echo \"$TOKENOS_OUTPUT\" | grep -q 'provider_a' && echo 'score: 0.5' || echo 'score: 0.9'".to_string()
+            "cat \"$TOKENOS_OUTPUT_FILE\" | grep -q 'provider_a' && echo 'score: 0.5' || echo 'score: 0.9'".to_string()
         };
 
         // Run task

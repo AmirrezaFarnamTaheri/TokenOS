@@ -183,6 +183,34 @@ impl Default for SecurityPolicy {
 }
 
 /// Root configuration document (~/.config/tokenos/config.yaml).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoutingRule {
+    pub pattern: String,
+    pub target_provider: String,
+    pub target_model: String,
+    pub priority: u8,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelRouter {
+    #[serde(default)]
+    pub rules: Vec<ModelRoutingRule>,
+}
+
+impl ModelRouter {
+    pub fn resolve<'a>(&'a self, requested_model: &str) -> Option<(&'a str, &'a str)> {
+        for rule in &self.rules {
+            if let Ok(re) = regex::Regex::new(&rule.pattern) {
+                if re.is_match(requested_model) {
+                    return Some((&rule.target_provider, &rule.target_model));
+                }
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub current_profile: String,

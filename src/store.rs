@@ -166,6 +166,11 @@ CREATE INDEX IF NOT EXISTS idx_exec_att_created ON execution_attempts(id DESC);
 CREATE INDEX IF NOT EXISTS idx_exec_att_provider ON execution_attempts(provider, id DESC);
 CREATE INDEX IF NOT EXISTS idx_exec_att_route ON execution_attempts(route, id DESC);
 
+CREATE INDEX IF NOT EXISTS idx_executions_task_id ON executions(task_id);
+CREATE INDEX IF NOT EXISTS idx_executions_created_at ON executions(created_at);
+CREATE INDEX IF NOT EXISTS idx_executions_success ON executions(success);
+
+
 CREATE TABLE IF NOT EXISTS drift_ratios (
     provider    TEXT PRIMARY KEY,
     ewma_ratio  REAL NOT NULL,
@@ -175,6 +180,44 @@ CREATE TABLE IF NOT EXISTS drift_ratios (
 
 -- Legacy table name retained for migration compatibility. Active callers use
 -- generic native/embedded request aggregate APIs.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS solution_cache_fts USING fts5(
+    goal,
+    content='solution_cache',
+    content_rowid='rowid',
+    tokenize='porter ascii'
+);
+
+CREATE TRIGGER IF NOT EXISTS solution_cache_fts_insert AFTER INSERT ON solution_cache BEGIN
+    INSERT INTO solution_cache_fts(rowid, goal) VALUES (new.rowid, new.goal);
+END;
+
+CREATE TABLE IF NOT EXISTS tracker_state (
+    provider       TEXT PRIMARY KEY,
+    ewma_latency   REAL NOT NULL,
+    ewma_fails     REAL NOT NULL,
+    cooldown_until TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chained_executions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    exec_id       TEXT NOT NULL UNIQUE,
+    prev_hash     TEXT NOT NULL,
+    own_hash      TEXT NOT NULL,
+    task_id       TEXT NOT NULL,
+    route         TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    signals       TEXT NOT NULL,
+    provider_chain TEXT NOT NULL,
+    justification TEXT NOT NULL,
+    drift_flags   TEXT NOT NULL,
+    tokens_in     INTEGER,
+    tokens_out    INTEGER,
+    cost_usd      REAL,
+    success       BOOLEAN,
+    created_at    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS api_request_stats (
     method           TEXT NOT NULL,
     path             TEXT NOT NULL,
@@ -196,9 +239,33 @@ CREATE TABLE IF NOT EXISTS bandit_state (
 );
 "#;
 
+fn add_column_if_not_exists(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column_def: &str,
+) -> anyhow::Result<()> {
+    let sql = format!("ALTER TABLE {} ADD COLUMN {}", table, column_def);
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == 1 || e.extended_code == 2067 =>
+        {
+            // column already exists
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 impl Store {
     /// Opens (and migrates) the database at `path`. None = default path,
     /// ":memory:" supported.
+    pub fn check_fts5(&self) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let res: i32 = conn.query_row("SELECT count(*) FROM pragma_compile_options WHERE compile_options LIKE '%ENABLE_FTS5%'", [], |r| r.get(0)).unwrap_or(0);
+        Ok(res > 0)
+    }
+
     pub fn open(path: Option<&Path>) -> Result<Store> {
         Self::open_with_owner_permissions(path, true)
     }
@@ -249,44 +316,40 @@ impl Store {
             // Migration for pre-goal_hash databases: the column
             // addition is idempotent — the error on already-migrated DBs is
             // expected and ignored, then the index creation is retried.
-            conn.execute(
-                "ALTER TABLE failure_memory ADD COLUMN goal_hash TEXT NOT NULL DEFAULT ''",
-                [],
-            )
-            .ok();
+            add_column_if_not_exists(
+                &conn,
+                "failure_memory",
+                "goal_hash TEXT NOT NULL DEFAULT ''",
+            )?;
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_failmem_goal ON failure_memory(goal_hash)",
                 [],
             )?;
             // Migration to add verification_tier to executions.
-            conn.execute(
-                "ALTER TABLE executions ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
-                [],
-            )
-            .ok();
+            add_column_if_not_exists(
+                &conn,
+                "executions",
+                "verification_tier TEXT NOT NULL DEFAULT 'static'",
+            )?;
             // Migration to add verification_tier to solution_cache.
-            conn.execute(
-                "ALTER TABLE solution_cache ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'static'",
-                [],
-            )
-            .ok();
+            add_column_if_not_exists(
+                &conn,
+                "solution_cache",
+                "verification_tier TEXT NOT NULL DEFAULT 'static'",
+            )?;
             // Migration to add goal to solution_cache.
-            conn.execute(
-                "ALTER TABLE solution_cache ADD COLUMN goal TEXT NOT NULL DEFAULT ''",
-                [],
-            )
-            .ok();
+            add_column_if_not_exists(&conn, "solution_cache", "goal TEXT NOT NULL DEFAULT ''")?;
             // Migration to add route and cost_usd to execution_attempts.
-            conn.execute(
-                "ALTER TABLE execution_attempts ADD COLUMN route TEXT NOT NULL DEFAULT ''",
-                [],
-            )
-            .ok();
-            conn.execute(
-                "ALTER TABLE execution_attempts ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0.0",
-                [],
-            )
-            .ok();
+            add_column_if_not_exists(
+                &conn,
+                "execution_attempts",
+                "route TEXT NOT NULL DEFAULT ''",
+            )?;
+            add_column_if_not_exists(
+                &conn,
+                "execution_attempts",
+                "cost_usd REAL NOT NULL DEFAULT 0.0",
+            )?;
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_exec_att_created ON execution_attempts(id DESC)",
                 [],
@@ -300,7 +363,45 @@ impl Store {
                 [],
             )?;
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS api_request_stats (
+                "
+CREATE VIRTUAL TABLE IF NOT EXISTS solution_cache_fts USING fts5(
+    goal,
+    content='solution_cache',
+    content_rowid='rowid',
+    tokenize='porter ascii'
+);
+
+CREATE TRIGGER IF NOT EXISTS solution_cache_fts_insert AFTER INSERT ON solution_cache BEGIN
+    INSERT INTO solution_cache_fts(rowid, goal) VALUES (new.rowid, new.goal);
+END;
+
+CREATE TABLE IF NOT EXISTS tracker_state (
+    provider       TEXT PRIMARY KEY,
+    ewma_latency   REAL NOT NULL,
+    ewma_fails     REAL NOT NULL,
+    cooldown_until TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chained_executions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    exec_id       TEXT NOT NULL UNIQUE,
+    prev_hash     TEXT NOT NULL,
+    own_hash      TEXT NOT NULL,
+    task_id       TEXT NOT NULL,
+    route         TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    signals       TEXT NOT NULL,
+    provider_chain TEXT NOT NULL,
+    justification TEXT NOT NULL,
+    drift_flags   TEXT NOT NULL,
+    tokens_in     INTEGER,
+    tokens_out    INTEGER,
+    cost_usd      REAL,
+    success       BOOLEAN,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_request_stats (
                     method           TEXT NOT NULL,
                     path             TEXT NOT NULL,
                     status           INTEGER NOT NULL,
@@ -818,24 +919,141 @@ impl Store {
 
     fn jaccard_similarity(s1: &str, s2: &str) -> f64 {
         const STOP_WORDS: &[&str] = &[
-            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
-            "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
-            "can", "cannot", "could", "did", "do", "does", "doing", "don", "down", "during", "each", "few",
-            "for", "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself",
-            "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "let", "me", "more",
-            "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
-            "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should", "so", "some", "such",
-            "than", "that", "the", "their", "theirs", "them", "themselves", "then", "there", "these", "they",
-            "this", "those", "through", "to", "too", "under", "until", "up", "very", "was", "we", "were",
-            "what", "when", "where", "which", "while", "who", "whom", "why", "with", "would", "you", "your",
-            "yours", "yourself", "yourselves"
+            "a",
+            "about",
+            "above",
+            "after",
+            "again",
+            "against",
+            "all",
+            "am",
+            "an",
+            "and",
+            "any",
+            "are",
+            "as",
+            "at",
+            "be",
+            "because",
+            "been",
+            "before",
+            "being",
+            "below",
+            "between",
+            "both",
+            "but",
+            "by",
+            "can",
+            "cannot",
+            "could",
+            "did",
+            "do",
+            "does",
+            "doing",
+            "don",
+            "down",
+            "during",
+            "each",
+            "few",
+            "for",
+            "from",
+            "further",
+            "had",
+            "has",
+            "have",
+            "having",
+            "he",
+            "her",
+            "here",
+            "hers",
+            "herself",
+            "him",
+            "himself",
+            "his",
+            "how",
+            "i",
+            "if",
+            "in",
+            "into",
+            "is",
+            "it",
+            "its",
+            "itself",
+            "let",
+            "me",
+            "more",
+            "most",
+            "my",
+            "myself",
+            "no",
+            "nor",
+            "not",
+            "of",
+            "off",
+            "on",
+            "once",
+            "only",
+            "or",
+            "other",
+            "our",
+            "ours",
+            "ourselves",
+            "out",
+            "over",
+            "own",
+            "same",
+            "she",
+            "should",
+            "so",
+            "some",
+            "such",
+            "than",
+            "that",
+            "the",
+            "their",
+            "theirs",
+            "them",
+            "themselves",
+            "then",
+            "there",
+            "these",
+            "they",
+            "this",
+            "those",
+            "through",
+            "to",
+            "too",
+            "under",
+            "until",
+            "up",
+            "very",
+            "was",
+            "we",
+            "were",
+            "what",
+            "when",
+            "where",
+            "which",
+            "while",
+            "who",
+            "whom",
+            "why",
+            "with",
+            "would",
+            "you",
+            "your",
+            "yours",
+            "yourself",
+            "yourselves",
         ];
 
         let get_set = |s: &str| -> std::collections::HashSet<String> {
             s.to_lowercase()
                 .split_whitespace()
                 .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
-                .filter(|w: &String| !w.is_empty() && STOP_WORDS.binary_search(&w.as_str()).is_err())
+                .filter(|w: &String| {
+                    !w.is_empty() && STOP_WORDS.binary_search(&w.as_str()).is_err()
+                })
                 .collect()
         };
 
@@ -1134,6 +1352,96 @@ impl Store {
     }
 
     /// Saves or updates the bandit state for a provider.
+    pub fn save_tracker_state(&self, state: &crate::pricing::TrackerState) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let cooldown_str = state.cooldown_until.map(|dt| dt.to_rfc3339());
+        conn.execute(
+            "INSERT INTO tracker_state (provider, ewma_latency, ewma_fails, cooldown_until)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider) DO UPDATE SET
+                ewma_latency=excluded.ewma_latency,
+                ewma_fails=excluded.ewma_fails,
+                cooldown_until=excluded.cooldown_until",
+            rusqlite::params![
+                state.provider,
+                state.ewma_latency,
+                state.ewma_fails,
+                cooldown_str
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_tracker_states(&self) -> Result<Vec<crate::pricing::TrackerState>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT provider, ewma_latency, ewma_fails, cooldown_until FROM tracker_state",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let p: String = row.get(0)?;
+            let l: f64 = row.get(1)?;
+            let f: f64 = row.get(2)?;
+            let c: Option<String> = row.get(3)?;
+            let cooldown = c.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            });
+            Ok(crate::pricing::TrackerState {
+                provider: p,
+                ewma_latency: l,
+                ewma_fails: f,
+                cooldown_until: cooldown,
+            })
+        })?;
+        let mut states = Vec::new();
+        for st in rows.flatten() {
+            states.push(st);
+        }
+        Ok(states)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_chained_execution(
+        &self,
+        exec_id: &str,
+        task_id: &str,
+        route: &str,
+        provider: &str,
+        signals: &str,
+        provider_chain: &str,
+        justification: &str,
+        drift_flags: &str,
+        tokens_in: i64,
+        tokens_out: i64,
+        cost_usd: f64,
+        success: bool,
+        created_at: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let prev_hash: String = conn
+            .query_row(
+                "SELECT own_hash FROM chained_executions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "0".repeat(64));
+
+        let canonical = format!(
+            "exec_id={}|prev_hash={}|task_id={}|route={}|provider={}|signals={}|provider_chain={}|justification={}|drift_flags={}|tokens_in={}|tokens_out={}|cost_usd={}|success={}|created_at={}",
+            exec_id, prev_hash, task_id, route, provider, signals, provider_chain, justification, drift_flags, tokens_in, tokens_out, cost_usd, success, created_at
+        );
+        use sha2::{Digest, Sha256};
+        let own_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+
+        conn.execute(
+            "INSERT INTO chained_executions (exec_id, prev_hash, own_hash, task_id, route, provider, signals, provider_chain, justification, drift_flags, tokens_in, tokens_out, cost_usd, success, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![exec_id, prev_hash, own_hash, task_id, route, provider, signals, provider_chain, justification, drift_flags, tokens_in, tokens_out, cost_usd, success, created_at]
+        )?;
+        Ok(())
+    }
+
     pub fn save_bandit_state(
         &self,
         provider: &str,

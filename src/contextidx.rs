@@ -514,8 +514,8 @@ impl Indexer {
                 score.join(" + ")
             );
             let mut all: Vec<&dyn rusqlite::ToSql> = Vec::new();
-            // Score args first, then where args (matches query placeholder order:
-            // the WHERE clause precedes ORDER BY in SQL text, so where args first).
+            // WHERE clause arguments first, then ORDER BY score arguments.
+            // This strictly matches the query placeholder binding order.
             for a in &args {
                 all.push(a);
             }
@@ -564,7 +564,11 @@ impl Indexer {
         scored_syms.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         // 3. Binary-search fit budget: find the largest prefix of ranked symbols that fits the token budget
-        let mut low = 0;
+        if scored_syms.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut low = 1;
         let mut high = scored_syms.len();
         let mut best_prefix = String::new();
 
@@ -774,5 +778,31 @@ mod tests {
         assert!(!syms.is_empty());
         assert!(syms[0].body.len() <= 8000 + 32);
         assert!(syms[0].body.contains("truncated"));
+    }
+}
+
+#[cfg(test)]
+mod tests_fallback {
+    use super::*;
+
+    #[test]
+    fn like_fallback_integration() {
+        let mut idx = Indexer::open(Some(":memory:")).unwrap();
+        // Since we cannot disable fts5 easily via struct fields (it's `fts` boolean), let's set `fts` to false.
+        idx.fts = false;
+
+        // Insert a dummy symbol manually to test LIKE fallback
+        let conn = idx.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO symbols (file, name, kind, lang, start_line, end_line, body)
+                      VALUES ('test.rs', 'my_func', 'fn', 'rust', 1, 10, 'fn my_func() {}')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let syms = idx.search("my_func", 10).unwrap();
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "my_func");
     }
 }
